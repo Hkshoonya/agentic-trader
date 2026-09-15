@@ -1,4 +1,4 @@
-"""Operator CLI for agentic-trading (run / status / mode / kill-switch / auth stub)."""
+"""Operator CLI for agentic-trading (run / status / mode / kill-switch / auth)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,9 @@ from typing import Any, Optional, Sequence
 from agentic_trading.broker import Broker
 from agentic_trading.config import Config, load_config
 from agentic_trading.journal import DecisionJournal
+from agentic_trading.rh_mcp.client import RobinhoodMcpClient
+from agentic_trading.rh_mcp.oauth import AuthFailed, load_tokens, run_desktop_oauth
+from agentic_trading.rh_mcp.snapshot import write_tools_snapshot
 from agentic_trading.runtime import (
     build_guard,
     effective_mode,
@@ -51,11 +54,14 @@ def _load_tools(config: Config) -> list[dict[str, Any]]:
 
 
 def _token_available(config: Config) -> bool:
-    return Path(config.token_path).expanduser().is_file()
+    path = Path(config.token_path).expanduser()
+    if not path.is_file():
+        return False
+    return load_tokens(path) is not None
 
 
 class _Phase0FakeMcpClient:
-    """Local stand-in until Task 8 ships the real MCP client."""
+    """Local stand-in when tokens are missing (CI / offline)."""
 
     def __init__(self, tools: list[dict[str, Any]]) -> None:
         self._tools = list(tools)
@@ -81,24 +87,43 @@ def build_broker(
     client: Any = None,
     tools: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[Broker, list[dict[str, Any]]]:
-    """Build a Broker; inject ``client``/``tools`` for tests, else Fake when no token."""
+    """Build a Broker; inject ``client``/``tools`` for tests.
+
+    Uses real ``RobinhoodMcpClient`` when tokens exist; otherwise Fake.
+    """
     resolved_tools = list(tools) if tools is not None else _load_tools(config)
     if client is not None:
         return Broker(client, resolved_tools), resolved_tools
 
-    if not _token_available(config):
-        print(
-            "warning: no MCP token at "
-            f"{config.token_path}; using FakeMcpClient "
-            "(OAuth/real client lands in Task 8)",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            "warning: MCP OAuth client not implemented yet (Task 8); "
-            "using FakeMcpClient despite token file",
-            file=sys.stderr,
-        )
+    if _token_available(config):
+        try:
+            real = RobinhoodMcpClient(
+                config.mcp_url,
+                token_path=config.token_path,
+            )
+            # Prefer live tools/list when authenticated.
+            if tools is None:
+                try:
+                    resolved_tools = real.list_tools()
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"warning: tools/list failed ({exc}); "
+                        "falling back to snapshot/fixture tools",
+                        file=sys.stderr,
+                    )
+            return Broker(real, resolved_tools), resolved_tools
+        except AuthFailed as exc:
+            print(
+                f"warning: MCP auth failed ({exc}); using FakeMcpClient",
+                file=sys.stderr,
+            )
+
+    print(
+        "warning: no usable MCP token at "
+        f"{config.token_path}; using FakeMcpClient "
+        "(run: agentic-trading auth --config …)",
+        file=sys.stderr,
+    )
     fake = _Phase0FakeMcpClient(resolved_tools)
     return Broker(fake, resolved_tools), resolved_tools
 
@@ -156,12 +181,39 @@ def cmd_reset_kill_switch(config_path: str) -> int:
     return 0
 
 
-def cmd_auth() -> int:
-    print(
-        "OAuth implemented in Task 8; run agentic-trading auth after Task 8",
-        file=sys.stderr,
-    )
-    return 2
+def cmd_auth(config_path: str) -> int:
+    config = load_config(config_path)
+    try:
+        run_desktop_oauth(config.token_path)
+    except AuthFailed as exc:
+        print(f"auth failed: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("auth cancelled", file=sys.stderr)
+        return 130
+    return 0
+
+
+def cmd_snapshot_tools(config_path: str) -> int:
+    config = load_config(config_path)
+    if not _token_available(config):
+        print(
+            f"no tokens at {config.token_path}; run: agentic-trading auth --config …",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        client = RobinhoodMcpClient(config.mcp_url, token_path=config.token_path)
+        tools = client.list_tools()
+    except AuthFailed as exc:
+        print(f"auth failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"snapshot-tools failed: {exc}", file=sys.stderr)
+        return 1
+    write_tools_snapshot(tools, config.tools_snapshot_path, dated_copy=True)
+    print(f"wrote {len(tools)} tools to {config.tools_snapshot_path} (+ dated copy)")
+    return 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -185,7 +237,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reset_p = sub.add_parser("reset-kill-switch", help="Clear RiskGuard kill switch")
     reset_p.add_argument("--config", required=True)
 
-    sub.add_parser("auth", help="OAuth (Task 8)")
+    auth_p = sub.add_parser("auth", help="OAuth 2.1 PKCE desktop flow; save tokens")
+    auth_p.add_argument("--config", required=True)
+
+    snap_p = sub.add_parser(
+        "snapshot-tools",
+        help="Authenticated tools/list → tools_snapshot_path (+ dated copy)",
+    )
+    snap_p.add_argument("--config", required=True)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -198,7 +257,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "reset-kill-switch":
         return cmd_reset_kill_switch(args.config)
     if args.command == "auth":
-        return cmd_auth()
+        return cmd_auth(args.config)
+    if args.command == "snapshot-tools":
+        return cmd_snapshot_tools(args.config)
     parser.error(f"unknown command: {args.command}")
     return 2
 

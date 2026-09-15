@@ -244,11 +244,39 @@ class StopBeforePlaceTests(unittest.TestCase):
 
 
 class CliSmokeTests(unittest.TestCase):
-    def test_auth_stub_exits_2(self) -> None:
+    def test_auth_requires_config(self) -> None:
         from agentic_trading.cli import main
 
-        code = main(["auth"])
-        self.assertEqual(code, 2)
+        with self.assertRaises(SystemExit) as ctx:
+            main(["auth"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_auth_invokes_oauth_with_config(self) -> None:
+        from agentic_trading.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            quotes_path = tmp / "quotes.jsonl"
+            quotes_path.write_text("", encoding="utf-8")
+            config_path = _write_config(tmp, quotes_path=quotes_path)
+            with mock.patch(
+                "agentic_trading.cli.run_desktop_oauth",
+                return_value=None,
+            ) as oauth:
+                code = main(["auth", "--config", str(config_path)])
+            self.assertEqual(code, 0)
+            oauth.assert_called_once()
+
+    def test_snapshot_tools_requires_tokens(self) -> None:
+        from agentic_trading.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            quotes_path = tmp / "quotes.jsonl"
+            quotes_path.write_text("", encoding="utf-8")
+            config_path = _write_config(tmp, quotes_path=quotes_path)
+            code = main(["snapshot-tools", "--config", str(config_path)])
+            self.assertEqual(code, 1)
 
     def test_status_and_flip_mode(self) -> None:
         from agentic_trading.cli import main
