@@ -1,9 +1,12 @@
 # config/agentic.example.toml
 mode = "shadow"  # shadow | live
-strategy = "fixture"  # fixture | spy_scalper
+strategy = "fixture"  # fixture | spy_scalper | llm
 # For Phase 1 SPY scalper (shadow by default):
 # strategy = "spy_scalper"
 # scalper_config = "config.json"
+# For Phase 2 LLM multi-asset (shadow by default; Fake LLM without AGENTIC_LLM_API_KEY):
+# strategy = "llm"
+# symbol_whitelist = ["SPY", "QQQ", "IWM"]  # RiskGuard still enforces whitelist
 symbol_whitelist = ["SPY"]
 max_order_pct = "0.05"
 daily_notional_pct = "0.20"

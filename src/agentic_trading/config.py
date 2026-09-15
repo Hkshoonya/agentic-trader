@@ -29,8 +29,8 @@ class Config:
     def __post_init__(self) -> None:
         if self.mode not in ("shadow", "live"):
             raise ValueError("mode must be shadow|live")
-        if self.strategy not in ("fixture", "spy_scalper"):
-            raise ValueError("strategy must be fixture|spy_scalper")
+        if self.strategy not in ("fixture", "spy_scalper", "llm"):
+            raise ValueError("strategy must be fixture|spy_scalper|llm")
 
 
 def load_config(path: str | Path) -> Config:

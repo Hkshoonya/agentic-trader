@@ -22,7 +22,9 @@ from agentic_trading.runtime import (
     run_loop,
     write_mode,
 )
+from agentic_trading.llm import FakeLlmClient, build_llm_client
 from agentic_trading.strategies.fixture import FixtureStrategy
+from agentic_trading.strategies.llm_multi_asset import LlmMultiAssetStrategy
 from agentic_trading.strategies.spy_scalper import SpyScalperStrategy
 
 # Minimal tools list when no snapshot/token is available (Phase 0 local / CI).
@@ -142,13 +144,26 @@ def load_scalper_config(path: Path | None) -> paper_scalper.Config:
 def build_strategy(
     config: Config,
     strategy_name: Optional[str] = None,
-) -> FixtureStrategy | SpyScalperStrategy:
-    """Select FixtureStrategy or SpyScalperStrategy from config / CLI override."""
+) -> FixtureStrategy | SpyScalperStrategy | LlmMultiAssetStrategy:
+    """Select strategy plugin from config / CLI override."""
     name = (strategy_name or config.strategy or "fixture").strip().lower()
     if name == "fixture":
         return FixtureStrategy()
     if name == "spy_scalper":
         return SpyScalperStrategy(load_scalper_config(config.scalper_config))
+    if name == "llm":
+        client = build_llm_client()
+        if isinstance(client, FakeLlmClient):
+            print(
+                "warning: no AGENTIC_LLM_API_KEY; using FakeLlmClient "
+                "(set AGENTIC_LLM_BASE_URL / AGENTIC_LLM_API_KEY / "
+                "AGENTIC_LLM_MODEL for OpenAI-compatible HTTP)",
+                file=sys.stderr,
+            )
+        return LlmMultiAssetStrategy(
+            client=client,
+            whitelist=config.symbol_whitelist,
+        )
     raise ValueError(f"unknown strategy: {name}")
 
 
@@ -252,7 +267,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_p.add_argument("--config", required=True, help="Path to agentic TOML config")
     run_p.add_argument(
         "--strategy",
-        choices=["fixture", "spy_scalper"],
+        choices=["fixture", "spy_scalper", "llm"],
         default=None,
         help="Override strategy from config (default: config or fixture)",
     )

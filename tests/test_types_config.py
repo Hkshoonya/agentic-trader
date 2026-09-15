@@ -8,6 +8,7 @@ from agentic_trading.cli import build_strategy, load_scalper_config
 from agentic_trading.types import OrderIntent, Side
 from agentic_trading.config import load_config
 from agentic_trading.strategies.fixture import FixtureStrategy
+from agentic_trading.strategies.llm_multi_asset import LlmMultiAssetStrategy
 from agentic_trading.strategies.spy_scalper import SpyScalperStrategy
 
 
@@ -127,6 +128,18 @@ class StrategyFactoryTests(unittest.TestCase):
             cfg = load_config(self._minimal_config(Path(tmp_name), strategy="fixture"))
             strategy = build_strategy(cfg, strategy_name="spy_scalper")
             self.assertIsInstance(strategy, SpyScalperStrategy)
+
+    def test_build_strategy_selects_llm(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            cfg = load_config(self._minimal_config(Path(tmp_name), strategy="llm"))
+            strategy = build_strategy(cfg)
+            self.assertIsInstance(strategy, LlmMultiAssetStrategy)
+
+    def test_cli_override_selects_llm(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            cfg = load_config(self._minimal_config(Path(tmp_name), strategy="fixture"))
+            strategy = build_strategy(cfg, strategy_name="llm")
+            self.assertIsInstance(strategy, LlmMultiAssetStrategy)
 
     def test_load_scalper_config_defaults(self):
         cfg = load_scalper_config(None)
