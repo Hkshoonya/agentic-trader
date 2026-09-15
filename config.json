@@ -1,0 +1,15 @@
+{
+  "symbol": "SPY",
+  "initial_cash": "50",
+  "max_spread_bps": "2",
+  "slippage_bps": "1",
+  "fee_per_order": "0",
+  "take_profit_bps": "10",
+  "stop_loss_bps": "10",
+  "max_hold_seconds": 60,
+  "cooldown_seconds": 30,
+  "max_trades": 3,
+  "daily_loss_limit": "1",
+  "max_quote_age_seconds": 10,
+  "max_signal_gap_seconds": 30
+}
