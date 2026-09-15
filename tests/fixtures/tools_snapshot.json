@@ -1,0 +1,36 @@
+{
+  "tools": [
+    {
+      "name": "review_equity_order",
+      "description": "Simulate an equity order before placement",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbol": {"type": "string"},
+          "side": {"type": "string"},
+          "quantity": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "get_account",
+      "description": "Read Agentic account equity and positions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "place_equity_order",
+      "description": "Place an equity order",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbol": {"type": "string"},
+          "side": {"type": "string"},
+          "quantity": {"type": "string"}
+        }
+      }
+    }
+  ]
+}
