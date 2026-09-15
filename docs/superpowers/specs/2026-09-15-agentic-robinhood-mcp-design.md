@@ -43,8 +43,10 @@ Build a local Python autonomous trading agent that analyzes markets and can exec
 ### How RiskGuard measures state
 
 **Open positions (max = 1):**
-- **Live:** count open Agentic positions from MCP account/positions read (broker is source of truth). External app activity counts. If the read fails, refuse new entries.
-- **Shadow:** maintain a local shadow book of would-place opens/closes from the journal for the session. Do not invent broker fills. Cap = 1 open shadow position at a time.
+- Cap applies to **new entries only** (`side=buy` that opens or increases exposure). **Closing sells** that reduce or flatten an existing position are always allowed through the position-count check (still subject to whitelist, kill-switch, and shadow/live mode rules).
+- **Live:** count open Agentic positions from MCP account/positions read (broker is source of truth). External app activity counts. If the read fails, refuse **new entries** (closes still allowed only if the guard can verify the sell reduces a known held symbol; otherwise refuse).
+- **Shadow:** maintain a local shadow book of would-place opens/closes. Rebuild from today's journal on process start (same local day). Do not invent broker fills. Cap = 1 open shadow position for **entries**.
+- **Notional caps:** max-order 5% and daily notional 20% apply to **entries and closes** (absolute notional). Kill-switch blocks all writes including closes.
 
 **Daily notional:** sum of absolute order notionals for intents that passed the guard since **local midnight** (operator TZ from config, default system local). Shadow uses would-place notionals; live uses submitted place notionals (not cancelled-before-submit).
 
@@ -157,9 +159,11 @@ Same path; after review passes and guard allows, call place tool **once** per `d
 
 ### RiskGuard hard stops
 
-- Daily loss ≥ 3% equity → kill-switch (no write tools until `reset-kill-switch`)
-- Unknown symbol / over cap / max positions → reject before MCP write
-- Shadow mode blocks write tools at the guard even if misconfigured elsewhere
+- When `daily_pnl <= -0.03 * baseline_equity` → kill-switch (no write tools, including closes, until `reset-kill-switch`)
+- Unknown symbol → reject before MCP write
+- Entry over max-order or daily notional cap → reject; closes still checked against those notional caps
+- Entry when open position count ≥ max → reject; **closing sells are exempt from the max-position check**
+- Shadow mode blocks write/place tools at the guard even if misconfigured elsewhere
 
 ### Operational
 
@@ -211,7 +215,7 @@ The **next implementation plan covers Phase 0 only**. Phases 1–2 are follow-on
 
 1. `tools/list` snapshot written and used for capability mapping
 2. Shadow run produces journal entries with `would_place` and review payloads, zero place calls
-3. RiskGuard unit tests cover over-cap, wrong-symbol, kill-switch, and missing-notional rejection
+3. RiskGuard unit tests cover over-cap, wrong-symbol, kill-switch, missing-notional, and entry-blocked-but-close-allowed when max positions reached
 4. Existing paper scalper tests still pass
 5. Operator can flip mode and reset kill-switch via CLI without editing code
 
