@@ -7,6 +7,11 @@ from agentic_trading.journal import DecisionJournal
 
 
 class JournalTests(unittest.TestCase):
+    def test_iter_today_empty_before_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            j = DecisionJournal(Path(tmp))
+            self.assertEqual(list(j.iter_today()), [])
+
     def test_append_and_has_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
             j = DecisionJournal(Path(tmp))

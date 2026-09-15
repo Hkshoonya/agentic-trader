@@ -35,6 +35,7 @@ class DecisionJournal:
     def iter_today(self) -> Iterator[dict[str, Any]]:
         path = self._today_path()
         if not path.exists():
+            yield from ()
             return
         with path.open(encoding="utf-8") as f:
             for line in f:
