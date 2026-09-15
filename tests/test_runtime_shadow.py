@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import threading
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 from agentic_trading.broker import Broker
 from agentic_trading.config import load_config
 from agentic_trading.runtime import run_loop
 from agentic_trading.strategies.fixture import FixtureStrategy
+from agentic_trading.types import OrderIntent, Side
 from tests.fakes import FakeMcpClient
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -24,7 +29,7 @@ def load_tools() -> list[dict]:
     return payload["tools"]
 
 
-def _write_config(tmp: Path, *, quotes_path: Path) -> Path:
+def _write_config(tmp: Path, *, quotes_path: Path, mode: str = "shadow") -> Path:
     journal_dir = tmp / "journal"
     state_dir = tmp / "state"
     tools_path = tmp / "tools_snapshot.json"
@@ -33,7 +38,7 @@ def _write_config(tmp: Path, *, quotes_path: Path) -> Path:
     config_path.write_text(
         "\n".join(
             [
-                'mode = "shadow"',
+                f'mode = "{mode}"',
                 'symbol_whitelist = ["SPY"]',
                 'max_order_pct = "0.05"',
                 'daily_notional_pct = "0.20"',
@@ -54,6 +59,20 @@ def _write_config(tmp: Path, *, quotes_path: Path) -> Path:
         encoding="utf-8",
     )
     return config_path
+
+
+class _StopOnReviewClient(FakeMcpClient):
+    """Set stop_event after review so place must be skipped."""
+
+    def __init__(self, tools: list[dict], stop_event: threading.Event) -> None:
+        super().__init__(tools)
+        self._stop_event = stop_event
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        result = super().call_tool(name, arguments)
+        if name == "review_equity_order":
+            self._stop_event.set()
+        return result
 
 
 class ShadowRuntimeTests(unittest.TestCase):
@@ -159,6 +178,69 @@ class ShadowRuntimeTests(unittest.TestCase):
                 if line.strip()
             ]
             self.assertTrue(any(r.get("would_place") is True for r in records))
+
+
+class StopBeforePlaceTests(unittest.TestCase):
+    def test_stop_after_review_skips_place(self) -> None:
+        tools = load_tools()
+        stop_event = threading.Event()
+        client = _StopOnReviewClient(tools, stop_event)
+        broker = Broker(client, tools)
+        intent = OrderIntent(
+            decision_id="stop-before-place",
+            symbol="SPY",
+            side=Side.BUY,
+            quantity=Decimal("0.01"),
+            ref_price=Decimal("100"),
+            reason="live-stop-test",
+            created_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            quotes_path = tmp / "quotes.jsonl"
+            quotes_path.write_text(
+                json.dumps(
+                    {
+                        "symbol": "SPY",
+                        "observed_at": "2026-09-15T07:58:49Z",
+                        "quote_at": "2026-09-15T07:58:42Z",
+                        "bid": "100.00",
+                        "ask": "100.10",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config_path = _write_config(tmp, quotes_path=quotes_path, mode="live")
+            config = load_config(config_path)
+
+            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+                run_loop(
+                    config,
+                    broker=broker,
+                    strategy=FixtureStrategy([intent]),
+                    tools=tools,
+                    stop_event=stop_event,
+                )
+
+            journal_file = (
+                Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+            )
+            records = [
+                json.loads(line)
+                for line in journal_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            accepted = [r for r in records if r.get("event") == "accepted"]
+            self.assertEqual(len(accepted), 1)
+            self.assertTrue(accepted[0].get("would_place") is True)
+            self.assertIn("review", accepted[0])
+
+            place_calls = [c for c in client.calls if c.name == "place_equity_order"]
+            self.assertEqual(len(place_calls), 0)
+            review_calls = [c for c in client.calls if c.name == "review_equity_order"]
+            self.assertEqual(len(review_calls), 1)
 
 
 class CliSmokeTests(unittest.TestCase):

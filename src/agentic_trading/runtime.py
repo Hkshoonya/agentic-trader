@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -98,14 +99,21 @@ def run_loop(
     broker: Broker,
     strategy: Optional[Strategy] = None,
     tools: Optional[list[dict[str, Any]]] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
-    """Run the quote → strategy → guard → journal loop until feed ends or SIGINT."""
+    """Run the quote → strategy → guard → journal loop until feed ends or SIGINT.
+
+    ``stop_event`` is optional (tests): when set, behaves like SIGINT — finish the
+    current intent's review/journal but do not call ``place_order``.
+    """
     mode = effective_mode(config)
     journal = DecisionJournal(Path(config.journal_dir))
     guard = build_guard(config, mode)
     shadow_book = ShadowBook.from_journal(journal)
     guard.attach_shadow_book(shadow_book)
     guard.load(config.state_dir, journal)
+    if mode == "shadow":
+        guard.note_shadow_realized(shadow_book.realized_pnl)
 
     snapshot_tools = tools if tools is not None else getattr(broker, "_tools", None)
     if snapshot_tools:
@@ -124,6 +132,9 @@ def run_loop(
         nonlocal stop
         stop = True
 
+    def _should_stop() -> bool:
+        return stop or (stop_event is not None and stop_event.is_set())
+
     previous_sigint = signal.signal(signal.SIGINT, _request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
 
@@ -132,7 +143,7 @@ def run_loop(
 
     try:
         for quote in iter_quotes(config.quotes_path):
-            if stop:
+            if _should_stop():
                 break
 
             ticks_since_equity += 1
@@ -148,7 +159,7 @@ def run_loop(
 
             intents = strategy.on_quote(quote)
             for intent in intents:
-                if stop:
+                if _should_stop():
                     break
 
                 if journal.has_decision(intent.decision_id):
@@ -212,12 +223,16 @@ def run_loop(
                     # NEVER place_order when mode == shadow
                     shadow_book.apply_accepted(intent)
                     guard.note_shadow_realized(shadow_book.realized_pnl)
+                elif _should_stop():
+                    # Review + journal finished; do not start place after stop
+                    guard.persist(config.state_dir)
+                    break
                 elif decision.may_place and os.environ.get("AGENTIC_ALLOW_LIVE") == "1":
                     broker.place_order(**_order_kwargs(intent, decision.notional))
 
                 guard.persist(config.state_dir)
 
-            if stop:
+            if _should_stop():
                 break
     finally:
         signal.signal(signal.SIGINT, previous_sigint)
