@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from agentic_trading.broker import Broker
-from agentic_trading.rh_mcp.snapshot import write_tools_snapshot
+from agentic_trading.rh_mcp.snapshot import build_capability_map, write_tools_snapshot
 from agentic_trading.risk import PortfolioSnapshot
 
 from tests.fakes import FakeMcpClient
@@ -54,6 +54,25 @@ class BrokerTests(unittest.TestCase):
         )
 
 
+class CapabilityMapTests(unittest.TestCase):
+    def test_exact_names_preferred(self) -> None:
+        tools = load_tools()
+        m = build_capability_map(tools)
+        self.assertEqual(m["review_equity"], "review_equity_order")
+        self.assertEqual(m["place_equity"], "place_equity_order")
+        self.assertEqual(m["get_account"], "get_account")
+
+    def test_preview_account_not_review_equity(self) -> None:
+        tools = [{"name": "preview_account"}]
+        m = build_capability_map(tools)
+        self.assertNotIn("review_equity", m)
+
+    def test_replace_account_settings_not_place_equity(self) -> None:
+        tools = [{"name": "replace_account_settings"}]
+        m = build_capability_map(tools)
+        self.assertNotIn("place_equity", m)
+
+
 class SnapshotTests(unittest.TestCase):
     def test_write_tools_snapshot(self) -> None:
         tools = load_tools()
@@ -66,6 +85,10 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(
                 names,
                 ["review_equity_order", "get_account", "place_equity_order"],
+            )
+            self.assertEqual(
+                payload["capability_map"],
+                build_capability_map(tools),
             )
 
     def test_write_tools_snapshot_dated_copy(self) -> None:

@@ -13,12 +13,6 @@ _EXACT_CAPABILITY_MAP: dict[str, str] = {
     "get_account": "get_account",
 }
 
-_HEURISTIC_RULES: tuple[tuple[str, str], ...] = (
-    ("review", "review_equity"),
-    ("place", "place_equity"),
-    ("account", "get_account"),
-)
-
 
 def write_tools_snapshot(
     tools: list[dict[str, Any]],
@@ -29,7 +23,8 @@ def write_tools_snapshot(
     """Write tools list to ``path``; optionally also write a dated sibling copy."""
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"tools": tools}
+    capability_map = build_capability_map(tools)
+    payload = {"tools": tools, "capability_map": capability_map}
     text = json.dumps(payload, indent=2) + "\n"
     dest.write_text(text, encoding="utf-8")
     if dated_copy:
@@ -52,12 +47,33 @@ def build_capability_map(
             capability_map[logical] = tool_name
 
     for tool_name in tool_names:
-        lower = tool_name.lower()
-        for needle, logical in _HEURISTIC_RULES:
-            if needle in lower and logical not in capability_map:
-                capability_map[logical] = tool_name
+        if "review_equity" not in capability_map and _matches_review_equity(tool_name):
+            capability_map["review_equity"] = tool_name
+        if "place_equity" not in capability_map and _matches_place_equity(tool_name):
+            capability_map["place_equity"] = tool_name
+        if "get_account" not in capability_map and _matches_get_account(tool_name):
+            capability_map["get_account"] = tool_name
 
     return capability_map
+
+
+def _tokens(name: str) -> frozenset[str]:
+    return frozenset(name.lower().replace("-", "_").split("_"))
+
+
+def _matches_review_equity(name: str) -> bool:
+    tokens = _tokens(name)
+    return "review" in tokens and "equity" in tokens
+
+
+def _matches_place_equity(name: str) -> bool:
+    tokens = _tokens(name)
+    return "place" in tokens and ("equity" in tokens or "order" in tokens)
+
+
+def _matches_get_account(name: str) -> bool:
+    tokens = _tokens(name)
+    return "account" in tokens or ("equity" in tokens and "portfolio" in tokens)
 
 
 def _tool_name(tool: dict[str, Any]) -> str:
