@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+import agentic_trading  # noqa: F401 — repo-root path for paper_scalper
 import paper_scalper
 from agentic_trading.broker import Broker
 from agentic_trading.config import Config, load_config
