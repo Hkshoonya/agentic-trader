@@ -1,0 +1,17 @@
+# config/agentic.example.toml
+mode = "shadow"  # shadow | live
+symbol_whitelist = ["SPY"]
+max_order_pct = "0.05"
+daily_notional_pct = "0.20"
+daily_loss_pct = "0.03"
+max_open_positions = 1
+equity_refresh_ticks = 30
+equity_refresh_seconds = 60
+timezone = "local"
+quotes_path = "data/spy_quotes.jsonl"
+journal_dir = "data/journal"
+state_dir = "data/state"
+tools_snapshot_path = "data/tools_snapshot.json"
+token_path = "~/.config/agentic-trading/tokens.json"
+mcp_url = "https://agent.robinhood.com/mcp/trading"
+# capability names filled after first tools/list; leave empty to auto-map by heuristics + confirm
