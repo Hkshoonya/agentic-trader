@@ -70,6 +70,19 @@ class RiskGuardTests(unittest.TestCase):
         d = self.guard.evaluate(intent(side=Side.SELL, notional="10"), snap)
         self.assertFalse(d.allowed)
 
+    def test_rejects_oversell_quantity(self):
+        snap = PortfolioSnapshot(open_positions=1, held={"SPY": Decimal("0.4")})
+        d = self.guard.evaluate(
+            intent(side=Side.SELL, quantity="0.5", ref_price="100", decision_id="os"),
+            snap,
+        )
+        self.assertFalse(d.allowed)
+        ok = self.guard.evaluate(
+            intent(side=Side.SELL, quantity="0.4", ref_price="100", decision_id="ok"),
+            snap,
+        )
+        self.assertTrue(ok.allowed)
+
     def test_kill_switch_blocks_all_writes(self):
         self.guard.trip_kill_switch("loss")
         d = self.guard.evaluate(intent(), PortfolioSnapshot(0, {}))
@@ -77,6 +90,14 @@ class RiskGuardTests(unittest.TestCase):
         self.guard.reset_kill_switch()
         d2 = self.guard.evaluate(intent(decision_id="d2"), PortfolioSnapshot(0, {}))
         self.assertTrue(d2.allowed)
+
+    def test_kill_switch_blocks_close(self):
+        snap = PortfolioSnapshot(open_positions=1, held={"SPY": Decimal("1")})
+        self.guard.trip_kill_switch("loss")
+        close = self.guard.evaluate(
+            intent(side=Side.SELL, notional="40", decision_id="c"), snap
+        )
+        self.assertFalse(close.allowed)
 
     def test_shadow_marks_would_place_not_place(self):
         d = self.guard.evaluate(intent(), PortfolioSnapshot(0, {}))
@@ -280,6 +301,62 @@ class ShadowBookTests(unittest.TestCase):
         self.assertEqual(book.realized_pnl, Decimal("10"))
         snap = book.as_snapshot()
         self.assertEqual(snap.open_positions, 1)
+
+    def test_rejects_notional_only_apply(self):
+        book = ShadowBook()
+        with self.assertRaises(ValueError):
+            book.apply_accepted(intent(notional="50", decision_id="n"))
+
+    def test_day_roll_resets_realized_keeps_held(self):
+        guard = RiskGuard(
+            mode="shadow",
+            whitelist=frozenset({"SPY"}),
+            max_order_pct=Decimal("0.05"),
+            daily_notional_pct=Decimal("0.20"),
+            daily_loss_pct=Decimal("0.03"),
+            max_open_positions=1,
+            baseline_equity=Decimal("1000"),
+            current_equity=Decimal("1000"),
+        )
+        book = ShadowBook()
+        book.apply_accepted(intent(quantity="1", ref_price="100", decision_id="b"))
+        book.apply_accepted(
+            intent(side=Side.SELL, quantity="0.5", ref_price="80", decision_id="s")
+        )
+        self.assertEqual(book.realized_pnl, Decimal("-10"))
+        self.assertEqual(book.held["SPY"], Decimal("0.5"))
+        guard.attach_shadow_book(book)
+        guard.note_shadow_realized(book.realized_pnl)
+        self.assertEqual(guard.shadow_realized_today, Decimal("-10"))
+
+        guard._day_key = "2000-01-01"
+        guard._roll_day_if_needed()
+        self.assertEqual(book.realized_pnl, Decimal("0"))
+        self.assertEqual(book.held["SPY"], Decimal("0.5"))
+        self.assertEqual(guard.shadow_realized_today, Decimal("0"))
+        # Day loss from prior day must not keep kill armed after roll (unless already tripped)
+        self.assertTrue(
+            guard.evaluate(
+                intent(
+                    side=Side.SELL, quantity="0.4", ref_price="100", decision_id="c"
+                ),
+                book.as_snapshot(),
+            ).allowed
+        )
+
+    def test_timezone_day_key_uses_zoneinfo(self):
+        guard = RiskGuard(
+            mode="shadow",
+            whitelist=frozenset({"SPY"}),
+            max_order_pct=Decimal("0.05"),
+            daily_notional_pct=Decimal("0.20"),
+            daily_loss_pct=Decimal("0.03"),
+            max_open_positions=1,
+            baseline_equity=Decimal("1000"),
+            current_equity=Decimal("1000"),
+            timezone="UTC",
+        )
+        self.assertEqual(guard._day_key, datetime.now(timezone.utc).date().isoformat())
 
 
 class JournalEmptyIterTests(unittest.TestCase):

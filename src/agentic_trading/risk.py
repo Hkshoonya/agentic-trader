@@ -7,18 +7,35 @@ Accepted journal event shape (for ShadowBook.from_journal / daily rebuild)::
       "decision_id": "...",
       "would_place": true,          # shadow
       "may_place": false,
-      "notional": "50",             # optional top-level; else intent.notional_usd
+      "notional": "50",             # optional top-level; else intent notional
       "intent": {
         "symbol": "SPY",
-        "side": "buy",              # or Side value
-        "notional_usd": "50",
-        "quantity": "0.5",          # optional
-        "ref_price": "100"          # optional; with quantity for avg-cost PnL
+        "side": "buy",
+        "quantity": "0.5",          # required for ShadowBook.apply_accepted
+        "ref_price": "100"          # required for ShadowBook.apply_accepted
       }
     }
 
 Only records with event == "accepted" (and shadow would_place or live may_place /
 accepted writes) are applied to the shadow book and daily notional rebuild.
+
+Day roll / shadow PnL
+---------------------
+At local midnight (operator ``timezone``), RiskGuard resets daily notional,
+baseline equity (re-seeded on next ``update_equity``), and day-scoped shadow
+realized PnL used by ``note_shadow_realized``. Open shadow positions
+(``ShadowBook.held`` / avg cost) are **not** cleared.
+
+Runtime should either:
+
+1. ``guard.attach_shadow_book(book)`` so day-roll calls ``ShadowBook.roll_day()``
+   (clears ``realized_pnl``, keeps held), then pass the book's day realized into
+   ``note_shadow_realized`` after each accepted shadow fill; or
+2. Rebuild ``ShadowBook.from_journal(today)`` after the day changes (journal files
+   are day-scoped) and feed ``note_shadow_realized`` from that book's realized.
+
+``note_shadow_realized`` expects **today's** cumulative shadow realized (not
+lifetime across days).
 """
 
 from __future__ import annotations
@@ -29,6 +46,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from zoneinfo import ZoneInfo
 
 from agentic_trading.types import OrderIntent, Side
 
@@ -53,6 +71,8 @@ class GuardDecision:
 
 @dataclass
 class ShadowBook:
+    """Local shadow positions. ``realized_pnl`` is day-scoped when used with RiskGuard."""
+
     held: dict[str, Decimal] = field(default_factory=dict)
     realized_pnl: Decimal = Decimal("0")
     _avg_cost: dict[str, Decimal] = field(default_factory=dict, repr=False)
@@ -63,7 +83,7 @@ class ShadowBook:
         for record in journal.iter_today():
             if not _is_accepted_record(record):
                 continue
-            intent = _intent_from_record(record)
+            intent = _intent_from_record(record, require_qty_price=True)
             if intent is None:
                 continue
             book.apply_accepted(intent)
@@ -89,10 +109,13 @@ class ShadowBook:
             prev_qty = self.held.get(symbol, Decimal("0"))
             if prev_qty <= 0:
                 return
-            sell_qty = min(qty, prev_qty)
+            if qty > prev_qty:
+                raise ValueError(
+                    f"ShadowBook oversell: qty {qty} > held {prev_qty} for {symbol}"
+                )
             avg = self._avg_cost.get(symbol, Decimal("0"))
-            self.realized_pnl += (price - avg) * sell_qty
-            remaining = prev_qty - sell_qty
+            self.realized_pnl += (price - avg) * qty
+            remaining = prev_qty - qty
             if remaining <= 0:
                 self.held.pop(symbol, None)
                 self._avg_cost.pop(symbol, None)
@@ -101,6 +124,10 @@ class ShadowBook:
             return
 
         raise ValueError(f"unknown side: {side!r}")
+
+    def roll_day(self) -> None:
+        """Reset day-scoped realized PnL; held and avg cost persist across midnight."""
+        self.realized_pnl = Decimal("0")
 
     def as_snapshot(self) -> PortfolioSnapshot:
         held = {k: v for k, v in self.held.items() if v > 0}
@@ -119,6 +146,7 @@ class RiskGuard:
         max_open_positions: int,
         baseline_equity: Decimal,
         current_equity: Decimal,
+        timezone: str = "local",
     ) -> None:
         if mode not in ("shadow", "live"):
             raise ValueError("mode must be shadow|live")
@@ -130,10 +158,21 @@ class RiskGuard:
         self.max_open_positions = int(max_open_positions)
         self.baseline_equity = Decimal(str(baseline_equity))
         self.current_equity = Decimal(str(current_equity))
+        self.timezone = timezone or "local"
         self._kill_switch = False
         self._kill_reason = ""
         self._daily_notional = Decimal("0")
-        self._day_key = date.today().isoformat()
+        self._shadow_realized_today = Decimal("0")
+        self._shadow_book: Optional[ShadowBook] = None
+        self._day_key = self._today_key()
+
+    @property
+    def shadow_realized_today(self) -> Decimal:
+        return self._shadow_realized_today
+
+    def attach_shadow_book(self, book: ShadowBook) -> None:
+        """Optional: day-roll will call ``book.roll_day()`` (keeps held)."""
+        self._shadow_book = book
 
     def evaluate(
         self, intent: OrderIntent, snapshot: PortfolioSnapshot
@@ -167,6 +206,10 @@ class RiskGuard:
             held_qty = Decimal(str(snapshot.held.get(symbol, Decimal("0"))))
             if held_qty <= 0:
                 return self._deny(notional, "would_short")
+            if intent.quantity is not None:
+                qty = Decimal(str(intent.quantity))
+                if qty > held_qty:
+                    return self._deny(notional, "oversell")
             # positions_read_failed: close only if held confirms symbol (checked above)
         else:
             return self._deny(notional, "unknown_side")
@@ -181,16 +224,24 @@ class RiskGuard:
         self._roll_day_if_needed()
         eq = Decimal(str(equity))
         self.current_equity = eq
-        # First successful read of the day sets / refreshes baseline if unset that day
+        # First successful read of the day sets baseline if unset that day
         if self.baseline_equity <= 0:
             self.baseline_equity = eq
         if self.mode == "live":
             self._check_live_loss()
 
     def note_shadow_realized(self, realized_pnl: Decimal) -> None:
-        pnl = Decimal(str(realized_pnl))
+        """Update day-scoped shadow realized and trip kill if loss limit hit.
+
+        ``realized_pnl`` must be **today's** cumulative shadow realized PnL
+        (see module docstring on day roll).
+        """
+        self._roll_day_if_needed()
+        self._shadow_realized_today = Decimal(str(realized_pnl))
+        if self.baseline_equity <= 0:
+            return
         limit = -self.daily_loss_pct * self.baseline_equity
-        if pnl <= limit:
+        if self._shadow_realized_today <= limit:
             self.trip_kill_switch("shadow_daily_loss")
 
     def trip_kill_switch(self, reason: str) -> None:
@@ -211,7 +262,9 @@ class RiskGuard:
             "current_equity": str(self.current_equity),
             "day_key": self._day_key,
             "daily_notional": str(self._daily_notional),
+            "shadow_realized_today": str(self._shadow_realized_today),
             "mode": self.mode,
+            "timezone": self.timezone,
         }
         (path / _STATE_FILE).write_text(
             json.dumps(payload, indent=2) + "\n", encoding="utf-8"
@@ -219,6 +272,7 @@ class RiskGuard:
 
     def load(self, state_dir: Path | str, journal: Any = None) -> None:
         path = Path(state_dir) / _STATE_FILE
+        today = self._today_key()
         if path.exists():
             raw = json.loads(path.read_text(encoding="utf-8"))
             self._kill_switch = bool(raw.get("kill_switch", False))
@@ -228,16 +282,20 @@ class RiskGuard:
             if "current_equity" in raw:
                 self.current_equity = Decimal(str(raw["current_equity"]))
             stored_day = str(raw.get("day_key", ""))
-            today = date.today().isoformat()
             if stored_day == today:
                 self._day_key = today
                 self._daily_notional = Decimal(str(raw.get("daily_notional", "0")))
+                self._shadow_realized_today = Decimal(
+                    str(raw.get("shadow_realized_today", "0"))
+                )
             else:
-                # New local day: reset daily notional / PnL window; keep kill
+                # New day: reset daily notional / PnL window; keep kill
                 self._day_key = today
                 self._daily_notional = Decimal("0")
-                # Baseline should be re-established on next equity read
+                self._shadow_realized_today = Decimal("0")
                 self.baseline_equity = Decimal("0")
+                if self._shadow_book is not None:
+                    self._shadow_book.roll_day()
 
         if journal is not None:
             rebuilt = Decimal("0")
@@ -250,19 +308,26 @@ class RiskGuard:
             if rebuilt > self._daily_notional:
                 self._daily_notional = rebuilt
 
+    def _today_key(self) -> str:
+        if self.timezone in ("local", ""):
+            return date.today().isoformat()
+        return datetime.now(ZoneInfo(self.timezone)).date().isoformat()
+
     def _cap_equity(self) -> Decimal:
-        # Prefer current equity; fall back to baseline
         eq = self.current_equity if self.current_equity > 0 else self.baseline_equity
         if eq <= 0:
             raise ValueError("equity must be positive for risk caps")
         return eq
 
     def _roll_day_if_needed(self) -> None:
-        today = date.today().isoformat()
+        today = self._today_key()
         if self._day_key != today:
             self._day_key = today
             self._daily_notional = Decimal("0")
             self.baseline_equity = Decimal("0")
+            self._shadow_realized_today = Decimal("0")
+            if self._shadow_book is not None:
+                self._shadow_book.roll_day()
 
     def _check_live_loss(self) -> None:
         if self.baseline_equity <= 0:
@@ -304,12 +369,10 @@ class RiskGuard:
 def _is_accepted_record(record: Mapping[str, Any]) -> bool:
     if record.get("event") != "accepted":
         return False
-    # Shadow would-place or live place / generic accepted write
     if record.get("would_place") is True:
         return True
     if record.get("may_place") is True:
         return True
-    # Explicit accepted without flags (tests / rebuild helpers)
     return "intent" in record or "notional" in record
 
 
@@ -325,7 +388,9 @@ def _notional_from_record(record: Mapping[str, Any]) -> Optional[Decimal]:
     return None
 
 
-def _intent_from_record(record: Mapping[str, Any]) -> Optional[OrderIntent]:
+def _intent_from_record(
+    record: Mapping[str, Any], *, require_qty_price: bool = False
+) -> Optional[OrderIntent]:
     raw = record.get("intent")
     if not isinstance(raw, Mapping):
         return None
@@ -350,7 +415,10 @@ def _intent_from_record(record: Mapping[str, Any]) -> Optional[OrderIntent]:
         "reason": str(raw.get("reason", "journal_replay")),
         "created_at": created_at,
     }
-    if raw.get("quantity") is not None and raw.get("ref_price") is not None:
+    has_qty_price = raw.get("quantity") is not None and raw.get("ref_price") is not None
+    if require_qty_price and not has_qty_price:
+        return None
+    if has_qty_price:
         kwargs["quantity"] = Decimal(str(raw["quantity"]))
         kwargs["ref_price"] = Decimal(str(raw["ref_price"]))
     elif raw.get("notional_usd") is not None:
@@ -365,5 +433,6 @@ def _intent_from_record(record: Mapping[str, Any]) -> Optional[OrderIntent]:
 def _qty_and_price(intent: OrderIntent) -> tuple[Decimal, Decimal]:
     if intent.quantity is not None and intent.ref_price is not None:
         return Decimal(str(intent.quantity)), Decimal(str(intent.ref_price))
-    # Notional-only: one lot sized to notional (price = notional, qty = 1)
-    return Decimal("1"), intent.resolved_notional()
+    raise ValueError(
+        "ShadowBook requires quantity and ref_price; notional-only intents are not supported"
+    )
