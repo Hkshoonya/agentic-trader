@@ -72,6 +72,49 @@ Agentic trading can lose money. Past simulation or shadow results do not predict
 .venv/bin/python -m pytest tests/ -v
 ```
 
+## Phase 1 — SPY scalper strategy (shadow)
+
+Phase 1 wires the paper SPY scalper rules as a streaming runtime strategy (`SpyScalperStrategy`). It emits `OrderIntent`s into RiskGuard + the decision journal. **Shadow remains the default** — the strategy never places live orders unless both live gates are set (below).
+
+There is **no profit guarantee**. Past paper or shadow results do not predict live performance. The Agentic account can lose all funds.
+
+### Select the strategy
+
+In `config/agentic.toml` (copied from the example):
+
+```toml
+strategy = "spy_scalper"
+scalper_config = "config.json"  # optional; paper_scalper knobs
+```
+
+Or override on the CLI (config default remains `fixture`):
+
+```bash
+agentic-trading run --config config/agentic.toml --strategy spy_scalper
+```
+
+Offline paper replay is unchanged:
+
+```bash
+python3 paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
+```
+
+### Live dual-gate warning
+
+Live placement still requires **all** of:
+
+1. `agentic-trading flip-mode live --config config/agentic.toml`
+2. `AGENTIC_ALLOW_LIVE=1` in the environment
+3. Valid OAuth tokens (`agentic-trading auth`)
+
+Never set `AGENTIC_ALLOW_LIVE` for routine soaks. Operator checklist: [`docs/superpowers/plans/manual-live-flip-checklist.md`](docs/superpowers/plans/manual-live-flip-checklist.md).
+
+### Verify Phase 1
+
+```bash
+.venv/bin/python -m pytest tests/ -v
+```
+
 ## Run the experiment (paper trading)
 
 From this directory:
