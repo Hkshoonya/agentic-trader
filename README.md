@@ -115,6 +115,50 @@ Never set `AGENTIC_ALLOW_LIVE` for routine soaks. Operator checklist: [`docs/sup
 .venv/bin/python -m pytest tests/ -v
 ```
 
+## Phase 2 — Multi-asset LLM strategy (shadow)
+
+Phase 2 adds `LlmMultiAssetStrategy`: an LLM proposes 0..1 `OrderIntent`s from brief quote context. **RiskGuard remains mandatory** on every intent. **Shadow remains the default** — the strategy never places live orders unless both live gates are set.
+
+There is **no profit guarantee**. LLM proposals are research heuristics, not advice. Past shadow results do not predict live performance. The Agentic account can lose all funds.
+
+### Select the strategy
+
+In `config/agentic.toml`:
+
+```toml
+strategy = "llm"
+# Expand whitelist via config; RiskGuard still rejects non-whitelisted symbols
+# symbol_whitelist = ["SPY", "QQQ", "IWM"]
+```
+
+Or override on the CLI:
+
+```bash
+agentic-trading run --config config/agentic.toml --strategy llm
+```
+
+### LLM client (Fake by default)
+
+Without `AGENTIC_LLM_API_KEY`, the CLI uses `FakeLlmClient` (empty intents by default) and prints a warning — **CI-safe; no real LLM HTTP**.
+
+Optional OpenAI-compatible HTTP when configured:
+
+| Env var | Role | Default |
+|---|---|---|
+| `AGENTIC_LLM_API_KEY` | Bearer token (required for real HTTP) | unset → Fake |
+| `AGENTIC_LLM_BASE_URL` | API base URL | `https://api.openai.com/v1` |
+| `AGENTIC_LLM_MODEL` | Model name | `gpt-4o-mini` |
+
+### Live dual-gate warning
+
+Same as Phase 0/1: live placement still requires `flip-mode live`, `AGENTIC_ALLOW_LIVE=1`, and valid OAuth. Never set `AGENTIC_ALLOW_LIVE` for routine soaks.
+
+### Verify Phase 2
+
+```bash
+.venv/bin/python -m pytest tests/ -v
+```
+
 ## Run the experiment (paper trading)
 
 From this directory:
