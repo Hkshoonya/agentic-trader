@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+import paper_scalper
 from agentic_trading.broker import Broker
 from agentic_trading.config import Config, load_config
 from agentic_trading.journal import DecisionJournal
@@ -21,6 +22,7 @@ from agentic_trading.runtime import (
     write_mode,
 )
 from agentic_trading.strategies.fixture import FixtureStrategy
+from agentic_trading.strategies.spy_scalper import SpyScalperStrategy
 
 # Minimal tools list when no snapshot/token is available (Phase 0 local / CI).
 _FALLBACK_TOOLS: list[dict[str, Any]] = [
@@ -128,20 +130,45 @@ def build_broker(
     return Broker(fake, resolved_tools), resolved_tools
 
 
+def load_scalper_config(path: Path | None) -> paper_scalper.Config:
+    """Load paper_scalper.Config from JSON path, or defaults."""
+    if path is not None and Path(path).is_file():
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        return paper_scalper.Config(**payload)
+    return paper_scalper.Config()
+
+
+def build_strategy(
+    config: Config,
+    strategy_name: Optional[str] = None,
+) -> FixtureStrategy | SpyScalperStrategy:
+    """Select FixtureStrategy or SpyScalperStrategy from config / CLI override."""
+    name = (strategy_name or config.strategy or "fixture").strip().lower()
+    if name == "fixture":
+        return FixtureStrategy()
+    if name == "spy_scalper":
+        return SpyScalperStrategy(load_scalper_config(config.scalper_config))
+    raise ValueError(f"unknown strategy: {name}")
+
+
 def cmd_run(
     config_path: str,
     *,
     broker: Optional[Broker] = None,
     tools: Optional[list[dict[str, Any]]] = None,
     strategy: Any = None,
+    strategy_name: Optional[str] = None,
 ) -> int:
     config = load_config(config_path)
     if broker is None:
         broker, tools = build_broker(config, tools=tools)
+    resolved = (
+        strategy if strategy is not None else build_strategy(config, strategy_name)
+    )
     run_loop(
         config,
         broker=broker,
-        strategy=strategy or FixtureStrategy(),
+        strategy=resolved,
         tools=tools,
     )
     return 0
@@ -222,6 +249,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     run_p = sub.add_parser("run", help="Run quote loop (shadow by default)")
     run_p.add_argument("--config", required=True, help="Path to agentic TOML config")
+    run_p.add_argument(
+        "--strategy",
+        choices=["fixture", "spy_scalper"],
+        default=None,
+        help="Override strategy from config (default: config or fixture)",
+    )
 
     status_p = sub.add_parser(
         "status", help="Print mode, kill, daily notional, baseline"
@@ -249,7 +282,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "run":
-        return cmd_run(args.config)
+        return cmd_run(args.config, strategy_name=args.strategy)
     if args.command == "status":
         return cmd_status(args.config)
     if args.command == "flip-mode":

@@ -23,14 +23,19 @@ class Config:
     tools_snapshot_path: Path
     token_path: Path
     mcp_url: str
+    strategy: str = "fixture"
+    scalper_config: Path | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in ("shadow", "live"):
             raise ValueError("mode must be shadow|live")
+        if self.strategy not in ("fixture", "spy_scalper"):
+            raise ValueError("strategy must be fixture|spy_scalper")
 
 
 def load_config(path: str | Path) -> Config:
     raw = tomllib.loads(Path(path).read_text())
+    scalper_raw = raw.get("scalper_config")
     return Config(
         mode=raw["mode"],
         symbol_whitelist=frozenset(s.upper() for s in raw["symbol_whitelist"]),
@@ -47,4 +52,6 @@ def load_config(path: str | Path) -> Config:
         tools_snapshot_path=Path(raw["tools_snapshot_path"]),
         token_path=Path(raw["token_path"]).expanduser(),
         mcp_url=str(raw["mcp_url"]),
+        strategy=str(raw.get("strategy", "fixture")),
+        scalper_config=Path(scalper_raw) if scalper_raw else None,
     )

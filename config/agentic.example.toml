@@ -1,5 +1,9 @@
 # config/agentic.example.toml
 mode = "shadow"  # shadow | live
+strategy = "fixture"  # fixture | spy_scalper
+# For Phase 1 SPY scalper (shadow by default):
+# strategy = "spy_scalper"
+# scalper_config = "config.json"
 symbol_whitelist = ["SPY"]
 max_order_pct = "0.05"
 daily_notional_pct = "0.20"
