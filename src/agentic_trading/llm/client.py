@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Callable, Optional, Protocol, Union
 
 import httpx
@@ -10,6 +11,39 @@ import httpx
 DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
 DEFAULT_FAKE_RESPONSE = '{"intents":[]}'
+
+
+def load_dotenv(path: Path | str = ".env", *, override: bool = False) -> int:
+    """Load ``KEY=value`` lines from a .env file, tolerating ``export`` prefixes.
+
+    Real environment variables win unless ``override`` is set, so a shell export
+    still takes precedence over the file. Secrets are never logged.
+    """
+    source = Path(path)
+    if not source.is_file():
+        return 0
+    loaded = 0
+    for line in source.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # Trailing comments only apply outside quotes: `MODEL=x  # note`.
+        if not value.startswith(("'", '"')):
+            hash_index = value.find("#")
+            if hash_index != -1:
+                value = value[:hash_index].strip()
+        value = value.strip().strip('"').strip("'")
+        if not key or not value:
+            continue
+        if override or key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    return loaded
 
 
 class LlmClient(Protocol):
@@ -85,6 +119,7 @@ def build_llm_client(
     model: Optional[str] = None,
 ) -> LlmClient:
     """Build OpenAI-compatible client when key present; else Fake with empty intents."""
+    load_dotenv()
     key = api_key if api_key is not None else os.environ.get("AGENTIC_LLM_API_KEY")
     if not key:
         return FakeLlmClient(DEFAULT_FAKE_RESPONSE)

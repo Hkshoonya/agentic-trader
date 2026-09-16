@@ -253,6 +253,13 @@ class _Loop:
         self._stopping = False
         self.stage = "shadow"
         self.last_evolution_at = 0.0
+        self.advisor = None
+        try:
+            from agentic_trading.llm.advisor import build_advisor
+
+            self.advisor = build_advisor()
+        except Exception:  # noqa: BLE001 — advisory layer must never block startup
+            self.advisor = None
         self.apply_stage_caps()
 
     def apply_stage_caps(self) -> None:
@@ -413,6 +420,52 @@ class _Loop:
         if is_entry and intent.symbol.upper() in self.open_order_symbols:
             self._journal_rejected(intent, "open_order_pending", Decimal("0"))
             return
+
+        # Advisory veto: the model may refuse an entry (reduce risk) and its
+        # hold opinion is recorded, but it never overrides a mechanical exit.
+        if self.advisor is not None:
+            decision = self.advisor.review_entry(
+                symbol=intent.symbol,
+                side=side.value,
+                ref_price=str(intent.ref_price or ""),
+                quantity=str(intent.quantity or ""),
+                reason=intent.reason,
+                context={
+                    "session": session,
+                    "equity": str(self.guard.current_equity),
+                    "stage": self.stage,
+                    "role": "entry" if is_entry else "exit",
+                },
+            )
+            if decision is not None:
+                self.journal.append(
+                    {
+                        "decision_id": intent.decision_id,
+                        "event": "advisor",
+                        "model": getattr(self.advisor, "model", ""),
+                        "role": "entry" if is_entry else "exit",
+                        "symbol": intent.symbol,
+                        **decision.to_dict(),
+                    }
+                )
+                if decision.vetoes and is_entry:
+                    self._journal_rejected(
+                        intent,
+                        f"llm_veto: {decision.reason}" if decision.reason else "llm_veto",
+                        intent.resolved_notional(),
+                    )
+                    return
+            elif getattr(self.advisor, "last_error", ""):
+                # An advisor that fails silently is indistinguishable from one
+                # that does not exist; surface the reason instead.
+                self.journal.append(
+                    {
+                        "decision_id": intent.decision_id,
+                        "event": "advisor_error",
+                        "error": self.advisor.last_error,
+                        "model": getattr(self.advisor, "model", ""),
+                    }
+                )
 
         if self.mode == "shadow":
             snapshot = self.shadow_book.as_snapshot()

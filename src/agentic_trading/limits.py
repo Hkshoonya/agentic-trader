@@ -98,6 +98,12 @@ def propose(
             updated_at=_now(),
         )
 
+    # De-risk once, not on every evaluation. Halving repeatedly spirals the cap
+    # below the minimum order size, which silently disables trading entirely
+    # instead of trading smaller.
+    if current is not None and current.reason == "evidence_not_passed_de_risk":
+        return current
+
     base_order = (
         Decimal(current.max_order_pct) if current is not None else ceiling_order
     )

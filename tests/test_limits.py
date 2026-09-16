@@ -33,14 +33,15 @@ class ProposeTests(unittest.TestCase):
             self.assertLess(Decimal(limits.max_order_pct), Decimal("0.05"))
             self.assertEqual(limits.reason, "evidence_not_passed_de_risk")
 
-    def test_repeated_failure_keeps_de_risking_then_floors(self) -> None:
+    def test_de_risking_happens_once_not_on_every_evaluation(self) -> None:
+        """Repeated halving spirals below the minimum order and disables trading."""
         with tempfile.TemporaryDirectory() as name:
             cfg = config(Path(name))
-            current = None
-            for _ in range(12):
-                current = propose(cfg, eligible=False, current=current)
-            self.assertGreaterEqual(Decimal(current.max_order_pct), MIN_ORDER_PCT)
-            self.assertLess(Decimal(current.max_order_pct), Decimal("0.01"))
+            first = propose(cfg, eligible=False, current=None)
+            again = propose(cfg, eligible=False, current=first)
+            self.assertEqual(first.to_dict(), again.to_dict())
+            self.assertEqual(Decimal(first.max_order_pct), Decimal("0.025"))
+            self.assertGreaterEqual(Decimal(again.max_order_pct), MIN_ORDER_PCT)
 
     def test_passing_restores_the_ceiling_but_never_beyond(self) -> None:
         with tempfile.TemporaryDirectory() as name:
