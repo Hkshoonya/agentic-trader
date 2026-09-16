@@ -64,7 +64,9 @@ class CryptoFeedTests(unittest.TestCase):
         quotes = feed.poll()
         self.assertEqual(len(quotes), 1)
         quote = quotes[0]
-        self.assertEqual(quote["symbol"], "BTC-USD")
+        # The crypto namespace returns pairs undashed (BTCUSD), which is the
+        # shape the live feed actually produces.
+        self.assertEqual(quote["symbol"], "BTCUSD")
         self.assertEqual(quote["bid"], Decimal("118250.00"))
         self.assertEqual(quote["ask"], Decimal("118280.00"))
         self.assertEqual(quote["observed_at"], OBSERVED.isoformat())

@@ -282,8 +282,12 @@ class CryptoQuoteFeed(McpQuoteFeed):
 
     def poll(self) -> list[dict]:
         payload = self.broker.get_crypto_quotes(self.symbols)
+        # The crypto namespace returns pairs without the dash (BTCUSD), while
+        # callers supply the broker form (BTC-USD). Compare on the undashed
+        # form or every quote is filtered out and the feed looks empty.
+        wanted = [symbol.replace("-", "").upper() for symbol in self.symbols]
         return normalize_quotes_payload(
-            payload, symbols=self.symbols, observed_at=self.clock()
+            payload, symbols=wanted, observed_at=self.clock()
         )
 
 
