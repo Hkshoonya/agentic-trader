@@ -45,11 +45,41 @@ def run_evolution(
     seed: int = 42,
     starting_cash: Decimal = Decimal("50"),
 ) -> EvolutionResult:
-    """Evolve on the configured historical bar file."""
+    """Evolve on the configured history.
+
+    ``history_path`` may be a single bar file (one symbol) or a directory of
+    bar files, in which case the pooled multi-symbol evaluator is used — the
+    same one the CLI exposes. A directory is read as all ``*_day.jsonl`` files,
+    falling back to ``*_5minute.jsonl``; the pooled daily horizon is where the
+    evaluation actually has enough independent trades to decide anything.
+    """
     if config.history_path is None:
         raise ValueError(
             "no history_path configured; run 'agentic-trading fetch-history' first"
         )
+
+    if Path(config.history_path).is_dir():
+        from agentic_trading.multisymbol import evolve_multi, load_symbol_bars
+
+        directory = Path(config.history_path)
+        day_files = sorted(directory.glob("*_day.jsonl"))
+        interval = "day" if day_files else "5minute"
+        symbols = sorted(
+            path.name[: -len(f"_{interval}.jsonl")]
+            for path in directory.glob(f"*_{interval}.jsonl")
+        )
+        symbol_bars = load_symbol_bars(directory, symbols, interval=interval)
+        if not symbol_bars:
+            raise ValueError(f"no usable bar files in {directory}")
+        return evolve_multi(
+            symbol_bars,
+            population=population or config.evolution_population,
+            generations=generations or config.evolution_generations,
+            seed=seed,
+            min_oos_trades=config.min_oos_trades,
+            starting_cash=starting_cash,
+        )
+
     bars = load_bars(config.history_path)
     if len(bars) < 60:
         raise ValueError(
