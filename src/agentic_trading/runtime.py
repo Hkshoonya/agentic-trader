@@ -158,16 +158,6 @@ def build_order_request(
             "cannot be converted safely"
         )
 
-    # Crypto is wired for quotes only. Without historicals there is nothing to
-    # validate a crypto strategy against, so it must never reach a placement —
-    # fail closed here rather than let it fall through to the equity place tool.
-    from agentic_trading.marketdata import is_crypto_pair
-
-    if is_crypto_pair(intent.symbol):
-        raise OrderValidationError(
-            "crypto execution is not enabled; this book trades crypto in shadow only"
-        )
-
     market_hours = market_hours_argument(session)
     side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
     fractional = intent.quantity != intent.quantity.to_integral_value()
@@ -563,6 +553,21 @@ class _Loop:
         self.guard.persist(self.config.state_dir)
 
     def _place(self, intent: OrderIntent, request: EquityOrderRequest) -> None:
+        # Crypto has no historicals to validate against, so it may be simulated
+        # (shadow) but never submitted. _place only runs in live mode, which
+        # makes this the correct place for that refusal.
+        from agentic_trading.marketdata import is_crypto_pair
+
+        if is_crypto_pair(intent.symbol):
+            self.journal.append(
+                {
+                    "decision_id": intent.decision_id,
+                    "event": "place_refused",
+                    "reason": "crypto_execution_disabled",
+                    "symbol": intent.symbol,
+                }
+            )
+            return
         try:
             result = self.broker.place_order(request)
         except Exception as exc:  # noqa: BLE001 — record and count the failure
@@ -737,7 +742,33 @@ def run_daemon(
                 sleep(config.poll_seconds)
                 continue
 
-            _self_improve_cycle(loop, config, journal)
+            # Self-evaluation is offline research and must never block the live
+            # path. With 30 symbol files it runs for minutes, which previously
+            # delayed the first trade decision of every cycle; it now runs on a
+            # worker thread while the quote loop keeps polling.
+            worker = getattr(loop, "eval_thread", None)
+            interval_due = (
+                config.autonomy != "manual"
+                and config.evolution_interval_minutes > 0
+                and (
+                    loop.last_evolution_at == 0
+                    or (time.monotonic() - loop.last_evolution_at)
+                    >= config.evolution_interval_minutes * 60
+                )
+            )
+            if interval_due and not (worker and worker.is_alive()):
+                if once:
+                    # A single-cycle smoke test must finish its evaluation before
+                    # exiting, so run it inline there and thread it in the daemon.
+                    _self_improve_cycle(loop, config, journal)
+                else:
+                    loop.eval_thread = threading.Thread(  # type: ignore[attr-defined]
+                        target=_self_improve_cycle,
+                        args=(loop, config, journal),
+                        daemon=True,
+                        name="self-evaluation",
+                    )
+                    loop.eval_thread.start()
             now = time.monotonic()
             if (now - last_equity_at) >= config.equity_refresh_seconds:
                 loop.refresh_equity()

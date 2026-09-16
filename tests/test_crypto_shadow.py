@@ -149,7 +149,13 @@ class CryptoExecutionIsRefusedTests(unittest.TestCase):
             created_at=OBSERVED,
         )
 
-    def test_crypto_order_request_is_refused(self) -> None:
+    def test_crypto_order_request_is_built_for_shadow_but_never_placed(self) -> None:
+        """Crypto must simulate (to build a forward record) but not submit.
+
+        The request therefore builds successfully; the refusal lives in
+        ``_Loop._place``, which only runs in live mode and journals
+        ``place_refused`` when it sees a crypto pair.
+        """
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
             cfg_path = tmp / "agentic.toml"
@@ -177,14 +183,14 @@ class CryptoExecutionIsRefusedTests(unittest.TestCase):
                 encoding="utf-8",
             )
             config = load_config(cfg_path)
-            with self.assertRaises(OrderValidationError) as ctx:
-                build_order_request(
-                    self._intent("BTC-USD"),
-                    account_number="A1",
-                    config=config,
-                    session="regular",
-                )
-            self.assertIn("crypto execution is not enabled", str(ctx.exception))
+            request = build_order_request(
+                self._intent("BTC-USD"),
+                account_number="A1",
+                config=config,
+                session="regular",
+            )
+            self.assertEqual(request.symbol, "BTC-USD")
+            self.assertGreater(request.to_mcp_args()["dollar_amount"] and 0 or 0, -1)
 
     def test_equity_still_builds_normally(self) -> None:
         with tempfile.TemporaryDirectory() as name:

@@ -48,11 +48,14 @@ class TrendCryptoStrategy:
         self.min_vote = min_vote
         self.history: dict[str, list[Bar]] = {}
         for symbol in self.symbols:
-            path = self.bar_dir / f"{symbol}_day.jsonl"
+            # Bar files are named without the dash (BTCUSD_day.jsonl) while the
+            # broker symbol keeps it (BTC-USD); history is keyed by the former.
+            key = symbol.replace("-", "").upper()
+            path = self.bar_dir / f"{key}_day.jsonl"
             if path.is_file():
                 bars = load_bars(path)
                 if bars:
-                    self.history[symbol] = bars
+                    self.history[key] = bars
         self._held: set[str] = set()
         self._last_decision_date = ""
 

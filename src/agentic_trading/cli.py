@@ -268,9 +268,10 @@ def build_strategy(
             if config.history_path
             else Path("data/bars")
         )
-        # Bar files are named BTCUSD_day.jsonl, the whitelist uses BTC-USD.
+        # Pass the broker form (BTC-USD) so emitted intents pass the RiskGuard
+        # whitelist; the strategy maps to the bar-file name (BTCUSD) internally.
         symbols = [
-            symbol.replace("-", "").upper()
+            symbol.upper()
             for symbol in sorted(config.symbol_whitelist)
             if "-" in symbol or symbol.upper().endswith("USD")
         ]
