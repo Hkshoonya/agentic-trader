@@ -31,7 +31,7 @@ CRYPTO_PAYLOAD = {
     "data": {
         "results": [
             {
-                "symbol": "BTC-USD",
+                "symbol": "BTCUSD",
                 "id": "abc",
                 "bid_price": "118250.00",
                 "ask_price": "118280.00",
