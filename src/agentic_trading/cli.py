@@ -260,6 +260,29 @@ def build_strategy(
             whitelist=config.symbol_whitelist,
             max_quote_age_seconds=config.max_quote_age_seconds,
         )
+    if name == "trend_crypto":
+        from agentic_trading.strategies.trend_crypto import TrendCryptoStrategy
+
+        bar_dir = (
+            Path(config.history_path)
+            if config.history_path
+            else Path("data/bars")
+        )
+        # Bar files are named BTCUSD_day.jsonl, the whitelist uses BTC-USD.
+        symbols = [
+            symbol.replace("-", "").upper()
+            for symbol in sorted(config.symbol_whitelist)
+            if "-" in symbol or symbol.upper().endswith("USD")
+        ]
+        if not symbols:
+            raise ValueError(
+                "trend_crypto needs crypto pairs in symbol_whitelist, e.g. BTC-USD"
+            )
+        return TrendCryptoStrategy(
+            bar_dir=bar_dir,
+            symbols=symbols,
+            max_positions=config.max_open_positions * 5,
+        )
     raise ValueError(f"unknown strategy: {name}")
 
 

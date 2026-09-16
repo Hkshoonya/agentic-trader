@@ -542,6 +542,12 @@ class _Loop:
             # NEVER place_order when mode == shadow
             self.shadow_book.apply_accepted(intent)
             self.guard.note_shadow_realized(self.shadow_book.realized_pnl)
+            # Tell a strategy that tracks its own positions what actually filled,
+            # otherwise its exits carry a stale quantity and RiskGuard rejects
+            # them as oversell (leaving the shadow book unable to flatten).
+            note_fill = getattr(self.strategy, "note_fill", None)
+            if callable(note_fill) and intent.quantity is not None:
+                note_fill(intent.symbol, intent.quantity)
             self.guard.persist(self.config.state_dir)
             return
 

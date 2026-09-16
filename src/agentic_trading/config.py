@@ -48,8 +48,10 @@ class Config:
     def __post_init__(self) -> None:
         if self.mode not in ("shadow", "live"):
             raise ValueError("mode must be shadow|live")
-        if self.strategy not in ("fixture", "spy_scalper", "llm"):
-            raise ValueError("strategy must be fixture|spy_scalper|llm")
+        if self.strategy not in ("fixture", "spy_scalper", "llm", "trend_crypto"):
+            raise ValueError(
+                "strategy must be fixture|spy_scalper|llm|trend_crypto"
+            )
         if self.quote_source not in ("file", "mcp"):
             raise ValueError("quote_source must be file|mcp")
         if self.session_policy not in ("regular", "extended", "all", "any"):
