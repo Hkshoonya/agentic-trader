@@ -585,6 +585,9 @@ def cmd_evolve(
                 state, assessment, policy_from_config(config)
             )
             save_state(config.state_dir, state)
+            events.extend(
+                selfimprove.update_limits(config, eligible=assessment.eligible)
+            )
             print(f"symbols pooled: {', '.join(sorted(symbol_bars))}")
         else:
             assessment, state, events = selfimprove.evaluate_and_record(

@@ -124,7 +124,35 @@ def evaluate_and_record(
     state = load_state(config.state_dir)
     events = apply_assessment(state, assessment, policy, equity=equity)
     save_state(config.state_dir, state)
+
+    events.extend(update_limits(config, eligible=assessment.eligible))
     return assessment, state, events
+
+
+def update_limits(config: Config, *, eligible: bool) -> list[dict[str, Any]]:
+    """Adaptive risk, bounded by the operator's ceilings.
+
+    A failing assessment halves the agent's own limits; a passing one restores
+    them to the configured ceiling. Neither direction can exceed what the
+    operator authorised — see :mod:`agentic_trading.limits`.
+    """
+    from agentic_trading.limits import load_limits, propose, save_limits
+
+    previous = load_limits(config.state_dir)
+    updated = propose(config, eligible=eligible, current=previous)
+    if previous is not None and previous.to_dict() == updated.to_dict():
+        return []
+    save_limits(config.state_dir, updated)
+    return [
+        {
+            "event": "limits_updated",
+            "reason": updated.reason,
+            "max_order_pct": updated.max_order_pct,
+            "daily_notional_pct": updated.daily_notional_pct,
+            "ceiling_max_order_pct": str(config.max_order_pct),
+            "ceiling_daily_notional_pct": str(config.daily_notional_pct),
+        }
+    ]
 
 
 def apply_stage(

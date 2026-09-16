@@ -256,6 +256,11 @@ class _Loop:
             self.guard.max_order_pct = min(self.config.max_order_pct, probation_cap)
         else:
             self.guard.max_order_pct = self.config.max_order_pct
+        # The agent's stored limits may only ever tighten what the operator set.
+        from agentic_trading.limits import apply_to_guard
+
+        self.guard.daily_notional_pct = self.config.daily_notional_pct
+        apply_to_guard(self.guard, self.config)
 
     def set_mode(self, mode: str) -> None:
         """Switch shadow/live at runtime (autonomy promotion or demotion)."""
