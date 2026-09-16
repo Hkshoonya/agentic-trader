@@ -104,11 +104,26 @@ def assess(
             f"out-of-sample drawdown {oos.max_drawdown_pct:.1f}% "
             f"> allowed {policy.max_oos_drawdown_pct:.1f}%"
         )
-    if oos.bootstrap_p_value > policy.max_bootstrap_p_value:
-        reasons.append(
-            f"edge indistinguishable from noise (bootstrap p="
-            f"{oos.bootstrap_p_value:.3f} > {policy.max_bootstrap_p_value})"
-        )
+    # Searching N genomes means evaluating N hypotheses, so the significance bar
+    # has to tighten with N (Bonferroni). Without this, adding strategy families
+    # simply manufactures false positives: the session that produced +159bps at
+    # p=0.011 from 240 genomes saw that edge invert to -94bps when the selection
+    # criterion changed. The threshold scales instead of the optimism.
+    tested = int(getattr(evolution, "evaluated", 0) or 0)
+    alpha = policy.max_bootstrap_p_value
+    if tested > 1:
+        alpha = policy.max_bootstrap_p_value / tested
+    if oos.bootstrap_p_value > alpha:
+        if tested > 1:
+            reasons.append(
+                f"edge does not survive the search: p={oos.bootstrap_p_value:.4f} "
+                f"> {alpha:.6f} (0.05 / {tested} hypotheses tested)"
+            )
+        else:
+            reasons.append(
+                f"edge indistinguishable from noise (bootstrap p="
+                f"{oos.bootstrap_p_value:.3f} > {policy.max_bootstrap_p_value})"
+            )
     if oos.trades > 0 and oos.expectancy_bps > 0 and oos.profit_factor < 1.0:
         reasons.append(
             f"profit factor {oos.profit_factor:.2f} < 1.0 despite positive expectancy"
@@ -127,6 +142,8 @@ def assess(
         ),
         "oos_max_drawdown_pct": round(oos.max_drawdown_pct, 3),
         "oos_bootstrap_p_value": round(oos.bootstrap_p_value, 4),
+        "tested_hypotheses": tested,
+        "effective_alpha": alpha,
         "folds_positive": folds_positive,
         "folds_total": folds_total,
         "train_bars": getattr(evolution, "train_bars", 0),

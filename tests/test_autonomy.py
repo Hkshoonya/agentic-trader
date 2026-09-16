@@ -119,7 +119,7 @@ class AutonomyTests(unittest.TestCase):
             oos_folds=[Metrics(trades=15, expectancy_bps=20.0)] * 3,
             train_bars=2000,
             test_bars=800,
-            evaluated=100,
+            evaluated=1,
             seed=1,
         )
         # Drop any ambient consent var: a test that omits it must genuinely

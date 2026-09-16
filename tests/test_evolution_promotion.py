@@ -206,6 +206,41 @@ class EvolutionTests(unittest.TestCase):
 
 
 class PromotionGateTests(unittest.TestCase):
+    def test_gate_tightens_with_the_number_of_hypotheses_searched(self) -> None:
+        """Same evidence, same p-value: more search must mean a higher bar."""
+        from agentic_trading.backtest import Metrics
+        from agentic_trading.evolution import EvolutionResult
+
+        def result(evaluated: int) -> EvolutionResult:
+            return EvolutionResult(
+                champion=Genome(),
+                in_sample=Metrics(trades=60, expectancy_bps=30.0, max_drawdown_pct=4.0),
+                out_of_sample=Metrics(
+                    trades=60,
+                    win_rate=0.6,
+                    expectancy_bps=25.0,
+                    profit_factor=1.8,
+                    max_drawdown_pct=5.0,
+                    bootstrap_p_value=0.01,
+                ),
+                oos_folds=[Metrics(trades=20, expectancy_bps=20.0)] * 3,
+                evaluated=evaluated,
+            )
+
+        policy = PromotionPolicy(min_oos_trades=30)
+        single = assess(result(1), policy)
+        searched = assess(result(400), policy)
+
+        self.assertTrue(single.eligible, single.reasons)
+        self.assertFalse(searched.eligible)
+        self.assertTrue(
+            any("does not survive the search" in reason for reason in searched.reasons),
+            searched.reasons,
+        )
+        self.assertAlmostEqual(
+            searched.evidence["effective_alpha"], 0.05 / 400, places=6
+        )
+
     def _assessment(self, **overrides) -> Assessment:
         base = Assessment(
             eligible=True,
