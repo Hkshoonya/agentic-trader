@@ -139,6 +139,20 @@ class Broker:
             "get_price_book", {"symbols": [s.strip().upper() for s in symbols]}
         )
 
+    def get_crypto_quotes(self, symbols: list[str]) -> dict[str, Any]:
+        """24/7 crypto quotes (read-only).
+
+        Robinhood's crypto namespace is separate from equity: it wants pair
+        symbols such as ``BTC-USD``, and no execution path is wired for it — the
+        runtime refuses to build a crypto order, so this can only ever drive
+        shadow decisions.
+        """
+        if not symbols:
+            raise ValueError("symbols required")
+        return self._call(
+            "get_crypto_quotes", {"symbols": [s.strip().upper() for s in symbols]}
+        )
+
     def get_tradability(self, symbols: list[str]) -> dict[str, Any]:
         account = self.resolve_account_number()
         return self._call(

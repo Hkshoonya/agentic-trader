@@ -277,9 +277,47 @@ class McpQuoteFeed:
         )
 
 
+class CryptoQuoteFeed(McpQuoteFeed):
+    """Polls ``get_crypto_quotes`` — the only market open around the clock."""
+
+    def poll(self) -> list[dict]:
+        payload = self.broker.get_crypto_quotes(self.symbols)
+        return normalize_quotes_payload(
+            payload, symbols=self.symbols, observed_at=self.clock()
+        )
+
+
+class CompositeQuoteFeed:
+    """Polls several feeds and concatenates their quotes."""
+
+    def __init__(self, feeds: list[QuoteFeed]) -> None:
+        self.feeds = list(feeds)
+
+    def poll(self) -> list[dict]:
+        quotes: list[dict] = []
+        for feed in self.feeds:
+            quotes.extend(feed.poll())
+        return quotes
+
+
+def is_crypto_pair(symbol: str) -> bool:
+    """Whitelist convention: ``BTC-USD`` (or ``BTCUSD``) is crypto, ``SPY`` is not."""
+    text = symbol.upper()
+    return "-" in text or text.endswith("USD")
+
+
 def build_quote_feed(config: Config, broker: Broker) -> QuoteFeed:
     if config.quote_source == "mcp":
-        return McpQuoteFeed(broker, sorted(config.symbol_whitelist))
+        equity = sorted(s for s in config.symbol_whitelist if not is_crypto_pair(s))
+        crypto = sorted(s for s in config.symbol_whitelist if is_crypto_pair(s))
+        feeds: list[QuoteFeed] = []
+        if equity:
+            feeds.append(McpQuoteFeed(broker, equity))
+        if crypto:
+            feeds.append(CryptoQuoteFeed(broker, crypto))
+        if not feeds:
+            return McpQuoteFeed(broker, sorted(config.symbol_whitelist))
+        return feeds[0] if len(feeds) == 1 else CompositeQuoteFeed(feeds)
     if config.quote_source == "file":
         return FileQuoteFeed(config.quotes_path)
     raise ValueError(f"unknown quote_source: {config.quote_source!r}")

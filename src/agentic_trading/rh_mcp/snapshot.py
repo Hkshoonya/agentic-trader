@@ -22,6 +22,9 @@ _EXACT_CAPABILITY_MAP: dict[str, str] = {
     "place_equity_order": "place_equity",
     "get_equity_orders": "get_orders",
     "cancel_equity_order": "cancel_equity",
+    # Crypto is a separate namespace on purpose: an equity capability can never
+    # bind to a crypto tool, and crypto execution is not wired at all.
+    "get_crypto_quotes": "get_crypto_quotes",
 }
 
 # Asset classes this module must never bind to equity capabilities.

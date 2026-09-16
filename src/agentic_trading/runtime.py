@@ -158,6 +158,16 @@ def build_order_request(
             "cannot be converted safely"
         )
 
+    # Crypto is wired for quotes only. Without historicals there is nothing to
+    # validate a crypto strategy against, so it must never reach a placement —
+    # fail closed here rather than let it fall through to the equity place tool.
+    from agentic_trading.marketdata import is_crypto_pair
+
+    if is_crypto_pair(intent.symbol):
+        raise OrderValidationError(
+            "crypto execution is not enabled; this book trades crypto in shadow only"
+        )
+
     market_hours = market_hours_argument(session)
     side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
     fractional = intent.quantity != intent.quantity.to_integral_value()
