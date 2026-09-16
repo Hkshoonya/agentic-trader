@@ -336,6 +336,7 @@ def run_desktop_oauth(
     *,
     port: int = 8765,
     open_browser: bool = True,
+    open_url: Callable[[str], None] | None = None,
     paste_fallback: bool = True,
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
@@ -367,8 +368,9 @@ def run_desktop_oauth(
     print_fn("Open this URL to authorize (desktop browser required):")
     print_fn(url)
     if open_browser:
+        opener = open_url or webbrowser.open
         try:
-            webbrowser.open(url)
+            opener(url)
         except Exception:  # noqa: BLE001 — best-effort only
             print_fn("(could not open browser automatically)")
 

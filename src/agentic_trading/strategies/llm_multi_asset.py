@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agentic_trading.llm.client import LlmClient
 from agentic_trading.types import OrderIntent, Side, new_decision_id
@@ -21,12 +21,13 @@ SYSTEM_PROMPT = (
 )
 
 DEFAULT_QUANTITY = Decimal("0.01")
+DEFAULT_MAX_QUOTE_AGE_SECONDS = 60.0
 
 
 def _parse_observed_at(quote: dict) -> datetime:
     value = quote.get("observed_at")
     if not isinstance(value, str):
-        return datetime.now(timezone.utc)
+        raise ValueError("missing observed_at")
     result = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if result.tzinfo is None:
         return result.replace(tzinfo=timezone.utc)
@@ -42,14 +43,18 @@ class LlmMultiAssetStrategy:
         whitelist: frozenset[str],
         *,
         default_quantity: Decimal = DEFAULT_QUANTITY,
+        max_quote_age_seconds: float = DEFAULT_MAX_QUOTE_AGE_SECONDS,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self.client = client
         self.whitelist = frozenset(s.upper() for s in whitelist)
         self.default_quantity = Decimal(str(default_quantity))
+        self.max_quote_age_seconds = float(max_quote_age_seconds)
+        self.clock = clock
 
     def on_quote(self, quote: dict) -> list[OrderIntent]:
         try:
-            symbol, bid, ask, observed = self._validate_quote(quote)
+            symbol, bid, ask, observed, quoted = self._validate_quote(quote)
         except (ValueError, KeyError, TypeError, InvalidOperation):
             return []
 
@@ -97,7 +102,9 @@ class LlmMultiAssetStrategy:
             )
         ]
 
-    def _validate_quote(self, quote: dict) -> tuple[str, Decimal, Decimal, datetime]:
+    def _validate_quote(
+        self, quote: dict
+    ) -> tuple[str, Decimal, Decimal, datetime, datetime]:
         if not isinstance(quote, dict):
             raise ValueError("quote must be an object")
         symbol = str(quote["symbol"]).upper()
@@ -106,7 +113,14 @@ class LlmMultiAssetStrategy:
         if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask < bid:
             raise ValueError("invalid_or_crossed_prices")
         observed = _parse_observed_at(quote)
-        return symbol, bid, ask, observed
+        quoted = _parse_observed_at({"observed_at": quote.get("quote_at")})
+        age = (observed - quoted).total_seconds()
+        if age < 0:
+            raise ValueError("future_quote")
+        # An LLM call costs seconds; never let a stale tick reach a real order.
+        if age > self.max_quote_age_seconds:
+            raise ValueError("stale_quote")
+        return symbol, bid, ask, observed, quoted
 
     def _build_user_prompt(self, *, symbol: str, bid: Decimal, ask: Decimal) -> str:
         whitelist = ", ".join(sorted(self.whitelist)) or "(empty)"

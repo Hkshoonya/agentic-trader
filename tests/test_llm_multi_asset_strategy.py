@@ -16,12 +16,14 @@ def _quote(
     bid: str = "100.00",
     ask: str = "100.02",
     observed_at: str = "2026-09-15T12:00:00Z",
+    quote_at: str = "2026-09-15T11:59:59Z",
 ) -> dict:
     return {
         "symbol": symbol,
         "bid": bid,
         "ask": ask,
         "observed_at": observed_at,
+        "quote_at": quote_at,
     }
 
 
@@ -97,6 +99,46 @@ class LlmMultiAssetStrategyTests(unittest.TestCase):
         client = build_llm_client(api_key="")
         self.assertIsInstance(client, FakeLlmClient)
         self.assertEqual(client.complete("s", "u"), '{"intents":[]}')
+
+    def test_stale_quote_does_not_reach_the_llm(self) -> None:
+        client = FakeLlmClient(BUY_SPY_JSON)
+        strategy = LlmMultiAssetStrategy(
+            client=client,
+            whitelist=frozenset({"SPY"}),
+            max_quote_age_seconds=10,
+        )
+        intents = strategy.on_quote(
+            _quote(
+                observed_at="2026-09-15T12:00:00Z",
+                quote_at="2026-09-15T11:57:00Z",
+            )
+        )
+        self.assertEqual(intents, [])
+        self.assertEqual(len(client.calls), 0)
+
+    def test_future_dated_quote_is_rejected(self) -> None:
+        client = FakeLlmClient(BUY_SPY_JSON)
+        strategy = LlmMultiAssetStrategy(
+            client=client, whitelist=frozenset({"SPY"})
+        )
+        intents = strategy.on_quote(
+            _quote(
+                observed_at="2026-09-15T12:00:00Z",
+                quote_at="2026-09-15T12:00:30Z",
+            )
+        )
+        self.assertEqual(intents, [])
+        self.assertEqual(len(client.calls), 0)
+
+    def test_quote_without_source_timestamp_is_rejected(self) -> None:
+        client = FakeLlmClient(BUY_SPY_JSON)
+        strategy = LlmMultiAssetStrategy(
+            client=client, whitelist=frozenset({"SPY"})
+        )
+        quote = _quote()
+        quote.pop("quote_at")
+        self.assertEqual(strategy.on_quote(quote), [])
+        self.assertEqual(len(client.calls), 0)
 
 
 if __name__ == "__main__":

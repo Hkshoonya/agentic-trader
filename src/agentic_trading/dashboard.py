@@ -1,0 +1,237 @@
+"""Local animated dashboard: live executions, equity flow, promotion state.
+
+Stdlib only (``http.server``) so it runs wherever the bot runs, with no CDN and
+no outbound network access. Every endpoint is read-only: state is derived from
+the decision journal, RiskGuard state, and evolution/promotion files. Nothing
+here can place an order.
+
+Binds to ``127.0.0.1`` by default — this is an operator console, not a public
+web app, and the journal contains account activity.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
+
+from agentic_trading.config import Config
+from agentic_trading.dashboard_html import HTML
+from agentic_trading.promotion import load_state
+from agentic_trading.runtime import effective_mode
+from agentic_trading.session import next_session_open, session_allows, session_for
+
+
+def _read_json(path: Path) -> Optional[dict[str, Any]]:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+class DashboardState:
+    """Reads bot state from disk. Every method is read-only."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.journal_dir = Path(config.journal_dir)
+        self.state_dir = Path(config.state_dir)
+
+    def journal_path(self) -> Path:
+        return self.journal_dir / f"{date.today().isoformat()}.jsonl"
+
+    def read_records(self, *, limit: int = 2000) -> list[dict[str, Any]]:
+        path = self.journal_path()
+        if not path.is_file():
+            return []
+        records: list[dict[str, Any]] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            return []
+        return records[-limit:]
+
+    def summary(self) -> dict[str, Any]:
+        records = self.read_records()
+        risk = _read_json(self.state_dir / "risk_guard.json") or {}
+        promotion = load_state(self.state_dir)
+        evolution = _read_json(self.state_dir / "evolution.json")
+        now = datetime.now(timezone.utc)
+        session = session_for(now)
+
+        counts: dict[str, int] = {}
+        for record in records:
+            event = str(record.get("event", "unknown"))
+            counts[event] = counts.get(event, 0) + 1
+
+        return {
+            "mode": effective_mode(self.config),
+            "kill_switch": bool(risk.get("kill_switch", False)),
+            "kill_reason": risk.get("kill_reason", ""),
+            "daily_notional": risk.get("daily_notional", "0"),
+            "baseline_equity": risk.get("baseline_equity", "0"),
+            "current_equity": risk.get("current_equity", "0"),
+            "session": session,
+            "session_allowed": session_allows(self.config.session_policy, session),
+            "session_policy": self.config.session_policy,
+            "next_open": next_session_open(now).isoformat(),
+            "strategy": self.config.strategy,
+            "symbols": sorted(self.config.symbol_whitelist),
+            "quote_source": self.config.quote_source,
+            "autonomy": self.config.autonomy,
+            "event_counts": counts,
+            "promotion": {
+                "stage": promotion.stage,
+                "streak": promotion.streak,
+                "required_cycles": self.config.promotion_cycles_required,
+                "last_assessment": promotion.last_assessment,
+                "updated_at": promotion.updated_at,
+            },
+            "evolution": evolution,
+            "generated_at": now.isoformat(),
+        }
+
+    def records_since(self, offset: int) -> dict[str, Any]:
+        records = self.read_records()
+        offset = max(0, offset)
+        return {
+            "offset": len(records),
+            "records": [_compact(record) for record in records[offset:]],
+        }
+
+    def equity_curve(self) -> dict[str, Any]:
+        """Order notionals over time, plus current RiskGuard equity state."""
+        records = self.read_records()
+        points: list[dict[str, Any]] = []
+        for record in records:
+            if record.get("event") != "accepted":
+                continue
+            intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+            points.append(
+                {
+                    "at": intent.get("created_at") or "",
+                    "notional": float(Decimal(str(record.get("notional", "0") or "0"))),
+                    "side": record.get("side"),
+                    "symbol": record.get("symbol"),
+                    "mode": record.get("mode"),
+                }
+            )
+        risk = _read_json(self.state_dir / "risk_guard.json") or {}
+        return {
+            "points": points[-500:],
+            "baseline_equity": risk.get("baseline_equity", "0"),
+            "current_equity": risk.get("current_equity", "0"),
+            "daily_notional": risk.get("daily_notional", "0"),
+        }
+
+
+def _compact(record: dict[str, Any]) -> dict[str, Any]:
+    """Trim journal records for the wire, keeping operator-relevant fields."""
+    keep = (
+        "event",
+        "reason",
+        "symbol",
+        "side",
+        "quantity",
+        "notional",
+        "mode",
+        "session",
+        "would_place",
+        "may_place",
+        "decision_id",
+        "kind",
+        "count",
+        "symbols",
+        "error",
+        "consecutive_errors",
+        "order_request",
+    )
+    compact = {key: record[key] for key in keep if key in record}
+    intent = record.get("intent")
+    if isinstance(intent, dict):
+        compact["intent"] = {
+            key: intent[key]
+            for key in ("symbol", "side", "reason", "created_at", "quantity")
+            if key in intent
+        }
+    compact["at"] = (
+        (intent or {}).get("created_at") if isinstance(intent, dict) else None
+    ) or record.get("at") or ""
+    return compact
+
+
+class _Handler(BaseHTTPRequestHandler):
+    state: DashboardState
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        return
+
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, payload: Any, status: int = 200) -> None:
+        self._send(
+            status, json.dumps(payload, default=str).encode("utf-8"), "application/json"
+        )
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            self._send(200, HTML.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if parsed.path == "/api/summary":
+            self._json(self.state.summary())
+            return
+        if parsed.path == "/api/equity":
+            self._json(self.state.equity_curve())
+            return
+        if parsed.path == "/api/journal":
+            params = parse_qs(parsed.query)
+            try:
+                offset = int(params.get("offset", ["0"])[0])
+            except ValueError:
+                offset = 0
+            self._json(self.state.records_since(offset))
+            return
+        if parsed.path == "/api/health":
+            self._json({"ok": True})
+            return
+        self._json({"error": "not found"}, status=404)
+
+
+def serve(
+    config: Config,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    open_browser: bool = False,
+) -> ThreadingHTTPServer:
+    """Build the dashboard server (call ``serve_forever()`` to block)."""
+    state = DashboardState(config)
+    handler = type("BoundHandler", (_Handler,), {"state": state})
+    server = ThreadingHTTPServer((host, port), handler)
+    if open_browser:
+        import webbrowser
+
+        threading.Timer(0.4, lambda: webbrowser.open(f"http://{host}:{port}/")).start()
+    return server

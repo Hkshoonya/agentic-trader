@@ -10,6 +10,7 @@ config/agentic.toml
 data/tools_snapshot*.json
 data/journal/
 data/state/
+data/bars/
 *.egg-info/
 dist/
 build/

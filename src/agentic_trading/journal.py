@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterator
@@ -15,7 +16,10 @@ class DecisionJournal:
 
     def append(self, record: dict[str, Any]) -> None:
         self._journal_dir.mkdir(parents=True, exist_ok=True)
-        with self._today_path().open("a", encoding="utf-8") as f:
+        path = self._today_path()
+        # Journals carry account identifiers and order details: owner-only.
+        handle = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(handle, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     def has_decision(self, decision_id: str) -> bool:

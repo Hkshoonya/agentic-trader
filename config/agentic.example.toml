@@ -1,6 +1,37 @@
 # config/agentic.example.toml
 mode = "shadow"  # shadow | live
 strategy = "fixture"  # fixture | spy_scalper | llm
+# --- Phase 3 autonomous loop -------------------------------------------------
+# Quote source: "file" tails a collector-written JSONL; "mcp" polls
+# get_equity_quotes through the authenticated broker (no collector needed).
+quote_source = "file"  # file | mcp
+session_policy = "regular"  # regular | extended | all | any
+# Order construction: "market" uses dollar-based buys in regular hours (the only
+# way to trade fractional shares); "limit" posts a marketable limit at the touch
+# and is required for whole-share trading outside regular hours.
+order_type = "market"  # market | limit
+poll_seconds = 5.0
+# Hard bound on entries per local day, in addition to the notional caps.
+max_orders_per_day = 10
+# Trip the kill switch after this many consecutive broker placement errors.
+max_consecutive_errors = 3
+# Reject quotes whose source timestamp is older than this (latency guard).
+max_quote_age_seconds = 60.0
+# Leave unset to auto-select the single agentic_allowed account.
+# account_number = "123456789"
+# --- Phase 4 self-evaluation, promotion and autonomy --------------------------
+# manual   = operator switches stages by hand (default, safest)
+# assisted = the bot re-evolves and records a verdict, but never promotes itself
+# auto     = the bot may promote/demote itself, and ONLY when
+#            AGENTIC_ALLOW_AUTONOMY=1 is exported for that session
+autonomy = "manual"
+# Bars for evolution/backtesting: agentic-trading fetch-history (or import-history)
+# history_path = "data/bars/SPY_day.jsonl"
+evolution_interval_minutes = 60   # 0 disables periodic evolution
+evolution_population = 24
+evolution_generations = 6
+promotion_cycles_required = 3     # consecutive passing assessments per stage
+min_oos_trades = 30               # out-of-sample sample floor for promotion
 # For Phase 1 SPY scalper (shadow by default):
 # strategy = "spy_scalper"
 # scalper_config = "config.json"

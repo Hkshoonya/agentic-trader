@@ -1,35 +1,196 @@
 {
+  "_comment": "Recorded Robinhood Trading MCP tools/list (equity subset), 2026-09-16. Used as the contract the broker is tested against.",
   "tools": [
     {
-      "name": "review_equity_order",
-      "description": "Simulate an equity order before placement",
+      "name": "get_accounts",
+      "description": "List the user's brokerage accounts.",
       "inputSchema": {
         "type": "object",
-        "properties": {
-          "symbol": {"type": "string"},
-          "side": {"type": "string"},
-          "quantity": {"type": "string"}
-        }
+        "properties": {},
+        "additionalProperties": false
       }
     },
     {
-      "name": "get_account",
-      "description": "Read Agentic account equity and positions",
+      "name": "get_portfolio",
+      "description": "Get the account's portfolio market value breakdown and buying power.",
       "inputSchema": {
         "type": "object",
-        "properties": {}
+        "properties": {
+          "account_number": {"type": "string"}
+        },
+        "required": ["account_number"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_equity_positions",
+      "description": "List open equity positions for a specific brokerage account.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account_number": {"type": "string"},
+          "cursor": {"type": "string"}
+        },
+        "required": ["account_number"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_equity_quotes",
+      "description": "Get real-time stock quotes and the last-completed-session close.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbols": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["symbols"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_equity_price_book",
+      "description": "Real-time bid/ask order book snapshot (max 4 symbols).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbols": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["symbols"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_equity_tradability",
+      "description": "Check tradability for up to 10 equity symbols.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account_number": {"type": "string"},
+          "symbols": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["account_number", "symbols"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "review_equity_order",
+      "description": "Simulate a stock order without placing it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account_number": {"type": "string"},
+          "symbol": {"type": "string"},
+          "side": {"type": "string"},
+          "type": {"type": "string"},
+          "quantity": {"type": "string"},
+          "dollar_amount": {"type": "string"},
+          "limit_price": {"type": "string"},
+          "stop_price": {"type": "string"},
+          "time_in_force": {"type": "string"},
+          "market_hours": {"type": "string"}
+        },
+        "required": ["account_number", "symbol", "side", "type"],
+        "additionalProperties": false
       }
     },
     {
       "name": "place_equity_order",
-      "description": "Place an equity order",
+      "description": "Place a real equity order with real money.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "account_number": {"type": "string"},
           "symbol": {"type": "string"},
           "side": {"type": "string"},
+          "type": {"type": "string"},
+          "quantity": {"type": "string"},
+          "dollar_amount": {"type": "string"},
+          "limit_price": {"type": "string"},
+          "stop_price": {"type": "string"},
+          "time_in_force": {"type": "string"},
+          "market_hours": {"type": "string"},
+          "ref_id": {"type": "string"}
+        },
+        "required": ["account_number", "symbol", "side", "type"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_equity_orders",
+      "description": "Fetch equity orders for an account.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account_number": {"type": "string"},
+          "order_id": {"type": "string"},
+          "state": {"type": "string"},
+          "state_group": {"type": "string"},
+          "symbol": {"type": "string"},
+          "cursor": {"type": "string"}
+        },
+        "required": ["account_number"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cancel_equity_order",
+      "description": "Cancel an open equity order by order_id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account_number": {"type": "string"},
+          "order_id": {"type": "string"}
+        },
+        "required": ["account_number", "order_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "review_option_order",
+      "description": "Simulate an options order without placing it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account_number": {"type": "string"},
+          "legs": {"type": "array"},
           "quantity": {"type": "string"}
-        }
+        },
+        "required": ["account_number", "legs", "quantity"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "place_option_order",
+      "description": "Place a real options order with real money.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account_number": {"type": "string"},
+          "legs": {"type": "array"},
+          "quantity": {"type": "string"}
+        },
+        "required": ["account_number", "legs", "quantity"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_crypto_positions",
+      "description": "List open crypto positions for a specific brokerage account.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"rhs_account_number": {"type": "string"}},
+        "required": ["rhs_account_number"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_crypto_orders",
+      "description": "List crypto order history for an account.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"rhs_account_number": {"type": "string"}},
+        "required": ["rhs_account_number"],
+        "additionalProperties": false
       }
     }
   ]

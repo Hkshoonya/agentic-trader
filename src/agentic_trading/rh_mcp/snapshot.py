@@ -7,11 +7,27 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+# Exact tool names → logical capabilities (verified against the live MCP tool
+# list on 2026-09-16). Heuristics below are a fallback for renames.
 _EXACT_CAPABILITY_MAP: dict[str, str] = {
+    "get_accounts": "list_accounts",
+    "get_portfolio": "get_portfolio",
+    "get_equity_positions": "get_positions",
+    "get_equity_quotes": "get_quotes",
+    "get_equity_price_book": "get_price_book",
+    "get_equity_tradability": "get_tradability",
+    "get_equity_historicals": "get_historicals",
+    "get_equity_technical_indicators": "get_indicators",
     "review_equity_order": "review_equity",
     "place_equity_order": "place_equity",
-    "get_account": "get_account",
+    "get_equity_orders": "get_orders",
+    "cancel_equity_order": "cancel_equity",
 }
+
+# Asset classes this module must never bind to equity capabilities.
+_NON_EQUITY_TOKENS = frozenset(
+    {"option", "options", "crypto", "advanced", "index", "indexes"}
+)
 
 
 def write_tools_snapshot(
@@ -47,12 +63,27 @@ def build_capability_map(
             capability_map[logical] = tool_name
 
     for tool_name in tool_names:
+        if _tokens(tool_name) & _NON_EQUITY_TOKENS:
+            # Never let an option/crypto tool satisfy an equity capability.
+            continue
         if "review_equity" not in capability_map and _matches_review_equity(tool_name):
             capability_map["review_equity"] = tool_name
         if "place_equity" not in capability_map and _matches_place_equity(tool_name):
             capability_map["place_equity"] = tool_name
-        if "get_account" not in capability_map and _matches_get_account(tool_name):
-            capability_map["get_account"] = tool_name
+        if "list_accounts" not in capability_map and _matches_accounts(tool_name):
+            capability_map["list_accounts"] = tool_name
+        if "get_portfolio" not in capability_map and _matches_portfolio(tool_name):
+            capability_map["get_portfolio"] = tool_name
+        if "get_positions" not in capability_map and _matches_positions(tool_name):
+            capability_map["get_positions"] = tool_name
+        if "get_quotes" not in capability_map and _matches_quotes(tool_name):
+            capability_map["get_quotes"] = tool_name
+        if "get_orders" not in capability_map and _matches_orders(tool_name):
+            capability_map["get_orders"] = tool_name
+        if "cancel_equity" not in capability_map and _matches_cancel(tool_name):
+            capability_map["cancel_equity"] = tool_name
+        if "get_historicals" not in capability_map and _matches_historicals(tool_name):
+            capability_map["get_historicals"] = tool_name
 
     return capability_map
 
@@ -63,7 +94,7 @@ def _tokens(name: str) -> frozenset[str]:
 
 def _matches_review_equity(name: str) -> bool:
     tokens = _tokens(name)
-    return "review" in tokens and "equity" in tokens
+    return "review" in tokens and bool(tokens & {"equity", "stock", "order"})
 
 
 def _matches_place_equity(name: str) -> bool:
@@ -71,9 +102,41 @@ def _matches_place_equity(name: str) -> bool:
     return "place" in tokens and ("equity" in tokens or "order" in tokens)
 
 
-def _matches_get_account(name: str) -> bool:
+def _matches_accounts(name: str) -> bool:
     tokens = _tokens(name)
-    return "account" in tokens or ("equity" in tokens and "portfolio" in tokens)
+    return bool(tokens & {"accounts", "account"}) and bool(tokens & {"get", "list"})
+
+
+def _matches_portfolio(name: str) -> bool:
+    tokens = _tokens(name)
+    return "portfolio" in tokens
+
+
+def _matches_positions(name: str) -> bool:
+    tokens = _tokens(name)
+    return bool(tokens & {"positions", "position"}) and bool(
+        tokens & {"get", "list"}
+    )
+
+
+def _matches_quotes(name: str) -> bool:
+    tokens = _tokens(name)
+    return bool(tokens & {"quotes", "quote"}) and bool(tokens & {"get", "list"})
+
+
+def _matches_orders(name: str) -> bool:
+    tokens = _tokens(name)
+    return "orders" in tokens and bool(tokens & {"get", "list"})
+
+
+def _matches_cancel(name: str) -> bool:
+    tokens = _tokens(name)
+    return "cancel" in tokens and bool(tokens & {"order", "orders", "equity"})
+
+
+def _matches_historicals(name: str) -> bool:
+    tokens = _tokens(name)
+    return bool(tokens & {"historicals", "historical", "history", "bars", "candles"})
 
 
 def _tool_name(tool: dict[str, Any]) -> str:

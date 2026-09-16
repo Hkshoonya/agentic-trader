@@ -25,12 +25,59 @@ class Config:
     mcp_url: str
     strategy: str = "fixture"
     scalper_config: Path | None = None
+    # Phase 3 — autonomous loop
+    quote_source: str = "file"  # file | mcp
+    poll_seconds: float = 5.0
+    session_policy: str = "regular"  # regular | extended | all | any
+    account_number: str | None = None
+    order_type: str = "market"  # market (regular hours) | limit (marketable)
+    max_orders_per_day: int = 10
+    max_consecutive_errors: int = 3
+    max_quote_age_seconds: float = 60.0
+    # Phase 4 — self-evaluation, promotion, autonomy
+    autonomy: str = "manual"  # manual | assisted | auto
+    history_path: Path | None = None
+    evolution_interval_minutes: int = 60
+    evolution_population: int = 24
+    evolution_generations: int = 6
+    promotion_cycles_required: int = 3
+    min_oos_trades: int = 30
+    equity_sizing: bool = True
+    min_order_notional: Decimal = Decimal("1.00")
 
     def __post_init__(self) -> None:
         if self.mode not in ("shadow", "live"):
             raise ValueError("mode must be shadow|live")
         if self.strategy not in ("fixture", "spy_scalper", "llm"):
             raise ValueError("strategy must be fixture|spy_scalper|llm")
+        if self.quote_source not in ("file", "mcp"):
+            raise ValueError("quote_source must be file|mcp")
+        if self.session_policy not in ("regular", "extended", "all", "any"):
+            raise ValueError("session_policy must be regular|extended|all|any")
+        if self.order_type not in ("market", "limit"):
+            raise ValueError("order_type must be market|limit")
+        if self.poll_seconds <= 0:
+            raise ValueError("poll_seconds must be positive")
+        if self.max_orders_per_day < 1:
+            raise ValueError("max_orders_per_day must be >= 1")
+        if self.max_consecutive_errors < 1:
+            raise ValueError("max_consecutive_errors must be >= 1")
+        if self.max_quote_age_seconds <= 0:
+            raise ValueError("max_quote_age_seconds must be positive")
+        if self.autonomy not in ("manual", "assisted", "auto"):
+            raise ValueError("autonomy must be manual|assisted|auto")
+        if self.evolution_interval_minutes < 0:
+            raise ValueError("evolution_interval_minutes must be >= 0")
+        if self.evolution_population < 2:
+            raise ValueError("evolution_population must be >= 2")
+        if self.evolution_generations < 1:
+            raise ValueError("evolution_generations must be >= 1")
+        if self.promotion_cycles_required < 1:
+            raise ValueError("promotion_cycles_required must be >= 1")
+        if self.min_oos_trades < 1:
+            raise ValueError("min_oos_trades must be >= 1")
+        if self.min_order_notional <= 0:
+            raise ValueError("min_order_notional must be positive")
 
 
 def load_config(path: str | Path) -> Config:
@@ -54,4 +101,23 @@ def load_config(path: str | Path) -> Config:
         mcp_url=str(raw["mcp_url"]),
         strategy=str(raw.get("strategy", "fixture")),
         scalper_config=Path(scalper_raw) if scalper_raw else None,
+        quote_source=str(raw.get("quote_source", "file")),
+        poll_seconds=float(raw.get("poll_seconds", 5.0)),
+        session_policy=str(raw.get("session_policy", "regular")),
+        account_number=(
+            str(raw["account_number"]) if raw.get("account_number") else None
+        ),
+        order_type=str(raw.get("order_type", "market")),
+        max_orders_per_day=int(raw.get("max_orders_per_day", 10)),
+        max_consecutive_errors=int(raw.get("max_consecutive_errors", 3)),
+        max_quote_age_seconds=float(raw.get("max_quote_age_seconds", 60.0)),
+        autonomy=str(raw.get("autonomy", "manual")),
+        history_path=Path(raw["history_path"]) if raw.get("history_path") else None,
+        evolution_interval_minutes=int(raw.get("evolution_interval_minutes", 60)),
+        evolution_population=int(raw.get("evolution_population", 24)),
+        evolution_generations=int(raw.get("evolution_generations", 6)),
+        promotion_cycles_required=int(raw.get("promotion_cycles_required", 3)),
+        min_oos_trades=int(raw.get("min_oos_trades", 30)),
+        equity_sizing=bool(raw.get("equity_sizing", True)),
+        min_order_notional=Decimal(str(raw.get("min_order_notional", "1.00"))),
     )

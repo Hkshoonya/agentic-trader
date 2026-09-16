@@ -150,6 +150,13 @@ class ShadowRuntimeTests(unittest.TestCase):
             self.assertTrue(Path(config.tools_snapshot_path).is_file())
 
     def test_shadow_runtime_with_repo_quotes_file(self) -> None:
+        """Premarket recording + fractional orders = not placeable (by design).
+
+        Robinhood rejects fractional and dollar-based orders outside
+        regular_hours, so the recorded premarket file must produce explicit
+        ``order_invalid`` rejections instead of a would-place entry, and must
+        never reach a place call.
+        """
         if not REPO_QUOTES.is_file():
             self.skipTest("data/spy_quotes.jsonl missing")
 
@@ -177,7 +184,16 @@ class ShadowRuntimeTests(unittest.TestCase):
                 for line in journal_file.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            self.assertTrue(any(r.get("would_place") is True for r in records))
+            self.assertFalse(any(r.get("would_place") is True for r in records))
+            rejections = [r for r in records if r.get("event") == "rejected"]
+            self.assertTrue(rejections)
+            reasons = [str(r.get("reason", "")) for r in rejections]
+            # The entry is unplaceable fractional premarket; any follow-up sell
+            # then has no shadow position to close.
+            self.assertTrue(
+                any(reason.startswith("order_invalid") for reason in reasons), reasons
+            )
+            self.assertTrue(any(reason == "would_short" for reason in reasons), reasons)
 
 
 class StopBeforePlaceTests(unittest.TestCase):

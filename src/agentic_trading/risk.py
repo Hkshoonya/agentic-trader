@@ -170,6 +170,14 @@ class RiskGuard:
     def shadow_realized_today(self) -> Decimal:
         return self._shadow_realized_today
 
+    @property
+    def kill_switch(self) -> bool:
+        return self._kill_switch
+
+    @property
+    def kill_reason(self) -> str:
+        return self._kill_reason
+
     def attach_shadow_book(self, book: ShadowBook) -> None:
         """Optional: day-roll will call ``book.roll_day()`` (keeps held)."""
         self._shadow_book = book
