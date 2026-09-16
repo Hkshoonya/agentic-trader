@@ -22,11 +22,11 @@ from agentic_trading.backtest import (
 from agentic_trading.history import Bar
 
 RANGES: dict[str, tuple[int, int]] = {
-    "lookback": (1, 8),
-    "entry_bps": (2, 120),
-    "tp_bps": (10, 300),
-    "sl_bps": (10, 300),
-    "max_hold_bars": (2, 30),
+    "lookback": (1, 20),
+    "entry_bps": (2, 200),
+    "tp_bps": (20, 800),
+    "sl_bps": (20, 800),
+    "max_hold_bars": (2, 40),
     "vol_window": (5, 30),
     "max_vol_bps": (50, 800),
     "trend_window": (10, 120),
@@ -38,6 +38,7 @@ _INT_FIELDS = tuple(RANGES)
 
 def random_genome(rng: random.Random) -> Genome:
     return Genome(
+        mode=rng.choice(["momentum", "mean_reversion"]),
         **{name: rng.randint(*bounds) for name, bounds in RANGES.items()},
         use_trend_filter=rng.random() < 0.7,
     )
@@ -45,6 +46,8 @@ def random_genome(rng: random.Random) -> Genome:
 
 def mutate(genome: Genome, rng: random.Random, *, rate: float = 0.35) -> Genome:
     values = genome.to_dict()
+    if rng.random() < rate:
+        values["mode"] = rng.choice(["momentum", "mean_reversion"])
     for name, (low, high) in RANGES.items():
         if rng.random() < rate:
             span = max(1, (high - low) // 4)
@@ -64,17 +67,25 @@ def crossover(a: Genome, b: Genome, rng: random.Random) -> Genome:
     child["use_trend_filter"] = (
         left["use_trend_filter"] if rng.random() < 0.5 else right["use_trend_filter"]
     )
+    child["mode"] = left["mode"] if rng.random() < 0.5 else right["mode"]
     return Genome.from_dict(child)
 
 
 def fitness(metrics: Metrics, *, min_trades: int) -> float:
     """Selection score for the *training* slice only.
 
-    Requires a minimum sample, then rewards expectancy and penalises drawdown.
+    Requires a minimum sample, then rewards expectancy while steering hard away
+    from deep drawdowns: a genome that earns 160bps but draws down 26% is not
+    tradeable on a small account whose kill switch trips at -3% daily.
     """
     if metrics.trades < min_trades:
         return float("-inf")
-    return metrics.expectancy_bps - 0.05 * metrics.max_drawdown_pct
+    excess_drawdown = max(0.0, metrics.max_drawdown_pct - DRAWDOWN_TARGET_PCT)
+    return metrics.expectancy_bps - DRAWDOWN_PENALTY_PER_PCT * excess_drawdown
+
+
+DRAWDOWN_TARGET_PCT = 10.0
+DRAWDOWN_PENALTY_PER_PCT = 8.0
 
 
 @dataclass

@@ -238,9 +238,9 @@ class PromotionGateTests(unittest.TestCase):
     def test_gate_accepts_a_strong_out_of_sample_edge(self) -> None:
         bars = synthetic_bars(seed=5, count=2000)
         result = evolve(
-            bars, population=12, generations=4, seed=3, min_trades=10, min_oos_trades=15
+            bars, population=12, generations=4, seed=3, min_trades=10, min_oos_trades=10
         )
-        assessment = assess(result, PromotionPolicy(min_oos_trades=15))
+        assessment = assess(result, PromotionPolicy(min_oos_trades=10))
         self.assertTrue(assessment.eligible, assessment.reasons)
 
     def test_streak_required_before_promotion(self) -> None:

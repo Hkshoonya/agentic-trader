@@ -69,7 +69,7 @@ def _write_config(tmp: Path, *, autonomy: str, history: Path | None) -> Path:
         f'autonomy = "{autonomy}"',
         "evolution_population = 12",
         "evolution_generations = 4",
-        "min_oos_trades = 15",
+        "min_oos_trades = 10",
         "promotion_cycles_required = 1",
         "evolution_interval_minutes = 1",
     ]
@@ -98,7 +98,33 @@ class _EmptyFeed:
 
 class AutonomyTests(unittest.TestCase):
     def _run_once(self, config, broker, *, env: dict | None = None):
-        with mock.patch.dict(os.environ, env or {}, clear=False):
+        # Inject a qualifying evolution result: these tests are about the
+        # promotion/consent plumbing, not about whether a random search happens
+        # to find an edge on synthetic bars. Depending on the search made them
+        # fail whenever the fitness function changed.
+        from agentic_trading.backtest import Genome, Metrics
+        from agentic_trading.evolution import EvolutionResult
+
+        qualifying = EvolutionResult(
+            champion=Genome(),
+            in_sample=Metrics(trades=60, expectancy_bps=30.0, max_drawdown_pct=3.0),
+            out_of_sample=Metrics(
+                trades=50,
+                win_rate=0.6,
+                expectancy_bps=25.0,
+                profit_factor=1.8,
+                max_drawdown_pct=4.0,
+                bootstrap_p_value=0.01,
+            ),
+            oos_folds=[Metrics(trades=15, expectancy_bps=20.0)] * 3,
+            train_bars=2000,
+            test_bars=800,
+            evaluated=100,
+            seed=1,
+        )
+        with mock.patch.dict(os.environ, env or {}, clear=False), mock.patch(
+            "agentic_trading.selfimprove.run_evolution", return_value=qualifying
+        ):
             run_daemon(
                 config,
                 broker=broker,

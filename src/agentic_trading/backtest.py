@@ -26,6 +26,7 @@ BPS = Decimal("10000")
 class Genome:
     """Searchable strategy parameters."""
 
+    mode: str = "momentum"  # momentum | mean_reversion
     lookback: int = 3
     entry_bps: int = 10
     tp_bps: int = 40
@@ -39,6 +40,7 @@ class Genome:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "mode": self.mode,
             "lookback": self.lookback,
             "entry_bps": self.entry_bps,
             "tp_bps": self.tp_bps,
@@ -54,6 +56,7 @@ class Genome:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Genome":
         return cls(
+            mode=str(raw.get("mode", "momentum")),
             lookback=int(raw["lookback"]),
             entry_bps=int(raw["entry_bps"]),
             tp_bps=int(raw["tp_bps"]),
@@ -260,7 +263,16 @@ def run_backtest(
 
         momentum = momentum_bps(bars, index, genome.lookback)
         vol = realized_vol_bps(bars, index, genome.vol_window)
-        if momentum is None or vol is None or momentum < genome.entry_bps:
+        if momentum is None or vol is None:
+            equity_curve.append((bar.start, cash))
+            continue
+        # Two competing hypotheses: momentum buys strength, mean reversion buys
+        # short-term weakness (still long-only, still inside the trend filter).
+        if genome.mode == "mean_reversion":
+            triggered = momentum <= -genome.entry_bps
+        else:
+            triggered = momentum >= genome.entry_bps
+        if not triggered:
             equity_curve.append((bar.start, cash))
             continue
         if vol > genome.max_vol_bps:
