@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional, Protocol
 
 from agentic_trading.broker import Broker
 from agentic_trading.config import Config
+from agentic_trading.orders import is_crypto_symbol
 from agentic_trading.quotes import _normalize_quote
 
 _ENTRY_LIST_KEYS = ("quotes", "results", "items", "data", "equity_quotes")
@@ -306,8 +307,9 @@ class CompositeQuoteFeed:
 
 def is_crypto_pair(symbol: str) -> bool:
     """Whitelist convention: ``BTC-USD`` (or ``BTCUSD``) is crypto, ``SPY`` is not."""
-    text = symbol.upper()
-    return "-" in text or text.endswith("USD")
+    # Single source of truth: orders owns this because broker/orders cannot
+    # import marketdata (marketdata imports broker).
+    return is_crypto_symbol(symbol)
 
 
 def build_quote_feed(config: Config, broker: Broker) -> QuoteFeed:

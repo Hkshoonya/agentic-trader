@@ -1,4 +1,8 @@
-"""24/7 crypto shadow loop: quotes flow, execution stays impossible."""
+"""24/7 crypto feed and order-shape handling.
+
+Execution gating (when crypto may actually be submitted) is covered in
+``tests/test_crypto_routing.py``.
+"""
 
 from __future__ import annotations
 
@@ -137,7 +141,7 @@ class CryptoFeedTests(unittest.TestCase):
             self.assertNotIsInstance(feed, CompositeQuoteFeed)
 
 
-class CryptoExecutionIsRefusedTests(unittest.TestCase):
+class CryptoOrderShapeTests(unittest.TestCase):
     def _intent(self, symbol: str) -> OrderIntent:
         return OrderIntent(
             decision_id="d-crypto",
@@ -149,13 +153,8 @@ class CryptoExecutionIsRefusedTests(unittest.TestCase):
             created_at=OBSERVED,
         )
 
-    def test_crypto_order_request_is_built_for_shadow_but_never_placed(self) -> None:
-        """Crypto must simulate (to build a forward record) but not submit.
-
-        The request therefore builds successfully; the refusal lives in
-        ``_Loop._place``, which only runs in live mode and journals
-        ``place_refused`` when it sees a crypto pair.
-        """
+    def test_crypto_order_request_uses_the_crypto_argument_shape(self) -> None:
+        """Crypto builds a request in the crypto namespace, not the equity one."""
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
             cfg_path = tmp / "agentic.toml"
@@ -190,7 +189,14 @@ class CryptoExecutionIsRefusedTests(unittest.TestCase):
                 session="regular",
             )
             self.assertEqual(request.symbol, "BTC-USD")
-            self.assertGreater(request.to_mcp_args()["dollar_amount"] and 0 or 0, -1)
+            args = request.to_mcp_args()
+            # Crypto envelopes carry the numeric account id and no session
+            # label: the equity fields are rejected by the live crypto tools.
+            self.assertEqual(args["rhs_account_number"], "A1")
+            self.assertNotIn("account_number", args)
+            self.assertNotIn("market_hours", args)
+            self.assertNotIn("time_in_force", args)
+            self.assertEqual(args["type"], "market")
 
     def test_equity_still_builds_normally(self) -> None:
         with tempfile.TemporaryDirectory() as name:

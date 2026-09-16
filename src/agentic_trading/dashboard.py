@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
-from agentic_trading.config import Config
+from agentic_trading.config import Config, load_config
 from agentic_trading.dashboard_html import HTML
+from agentic_trading.jsonio import dumps as json_dumps
 from agentic_trading.promotion import load_state
 from agentic_trading.runtime import effective_mode
 from agentic_trading.session import next_session_open, session_allows, session_for
@@ -40,10 +41,46 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
 class DashboardState:
     """Reads bot state from disk. Every method is read-only."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, config_path: Path | str | None = None) -> None:
         self.config = config
+        self._config_path = Path(config_path) if config_path else None
+        self._config_stamp: Optional[tuple[int, int]] = self._stat_config()
+        self._config_lock = threading.Lock()
         self.journal_dir = Path(config.journal_dir)
         self.state_dir = Path(config.state_dir)
+
+    def _stat_config(self) -> Optional[tuple[int, int]]:
+        if self._config_path is None:
+            return None
+        try:
+            info = self._config_path.stat()
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size)
+
+    def refresh_config(self) -> Config:
+        """Re-read the config when the operator edits it under a live console.
+
+        The console runs for days while ``config/agentic.toml`` changes (new
+        strategy, whitelist, session policy, caps). Serving the boot-time copy
+        would quietly misreport what the bot is doing — the exact failure that
+        showed a crypto daemon as ``strategy = "fixture"`` with ``["SPY"]``.
+        """
+        if self._config_path is None:
+            return self.config
+        with self._config_lock:
+            stamp = self._stat_config()
+            if stamp == self._config_stamp:
+                return self.config
+            try:
+                config = load_config(self._config_path)
+            except Exception:  # noqa: BLE001 — a half-written TOML must not 500
+                return self.config
+            self.config = config
+            self._config_stamp = stamp
+            self.journal_dir = Path(config.journal_dir)
+            self.state_dir = Path(config.state_dir)
+            return config
 
     def journal_path(self) -> Path:
         return self.journal_dir / f"{date.today().isoformat()}.jsonl"
@@ -67,6 +104,7 @@ class DashboardState:
         return records[-limit:]
 
     def summary(self) -> dict[str, Any]:
+        self.refresh_config()
         records = self.read_records()
         risk = _read_json(self.state_dir / "risk_guard.json") or {}
         promotion = load_state(self.state_dir)
@@ -107,6 +145,7 @@ class DashboardState:
         }
 
     def records_since(self, offset: int) -> dict[str, Any]:
+        self.refresh_config()
         records = self.read_records()
         offset = max(0, offset)
         return {
@@ -116,6 +155,7 @@ class DashboardState:
 
     def equity_curve(self) -> dict[str, Any]:
         """Order notionals over time, plus current RiskGuard equity state."""
+        self.refresh_config()
         records = self.read_records()
         points: list[dict[str, Any]] = []
         cumulative = Decimal("0")
@@ -145,6 +185,7 @@ class DashboardState:
 
     def orders_table(self, *, limit: int = 60) -> dict[str, Any]:
         """Every order the agent decided on today, newest first."""
+        self.refresh_config()
         rows: list[dict[str, Any]] = []
         for record in self.read_records():
             event = record.get("event")
@@ -256,7 +297,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _json(self, payload: Any, status: int = 200) -> None:
         self._send(
-            status, json.dumps(payload, default=str).encode("utf-8"), "application/json"
+            status,
+            json_dumps(payload).encode("utf-8"),
+            "application/json",
         )
 
     def do_GET(self) -> None:  # noqa: N802
@@ -293,9 +336,10 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8787,
     open_browser: bool = False,
+    config_path: Path | str | None = None,
 ) -> ThreadingHTTPServer:
     """Build the dashboard server (call ``serve_forever()`` to block)."""
-    state = DashboardState(config)
+    state = DashboardState(config, config_path=config_path)
     handler = type("BoundHandler", (_Handler,), {"state": state})
     server = ThreadingHTTPServer((host, port), handler)
     if open_browser:

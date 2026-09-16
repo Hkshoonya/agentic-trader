@@ -181,6 +181,79 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(len(curve["points"]), 1)
             self.assertEqual(curve["points"][0]["notional"], 5.0)
 
+    def test_edited_config_is_picked_up_without_a_restart(self) -> None:
+        """The console outlives config edits; it must not report stale limits."""
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config_path = tmp / "agentic.toml"
+            self._config(tmp)
+
+            state = DashboardState(
+                load_config(config_path), config_path=config_path
+            )
+            self.assertEqual(state.summary()["symbols"], ["SPY"])
+            self.assertEqual(state.summary()["session_policy"], "regular")
+
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text.replace('symbol_whitelist = ["SPY"]', 'symbol_whitelist = ["BTC-USD"]')
+                .replace('strategy = "fixture"', 'strategy = "trend_crypto"')
+                + 'session_policy = "any"\n'
+                + 'strategy = "trend_crypto"\n',
+                encoding="utf-8",
+            )
+
+            summary = state.summary()
+            self.assertEqual(summary["symbols"], ["BTC-USD"])
+            self.assertEqual(summary["strategy"], "trend_crypto")
+            self.assertEqual(summary["session_policy"], "any")
+
+    def test_unreadable_config_keeps_serving_the_last_good_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config_path = tmp / "agentic.toml"
+            self._config(tmp)
+            state = DashboardState(load_config(config_path), config_path=config_path)
+
+            config_path.write_text("this is not = = toml\n", encoding="utf-8")
+
+            summary = state.summary()
+            self.assertEqual(summary["symbols"], ["SPY"])
+
+    def test_non_finite_metrics_cannot_break_the_console(self) -> None:
+        """A backtest with no losing trades reports an infinite profit factor.
+
+        Python serializes that as ``Infinity``, which no browser can parse: the
+        whole console rendered as placeholders until the wire was made strict.
+        """
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            state_dir = Path(config.state_dir)
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "evolution.json").write_text(
+                '{"out_of_sample": {"profit_factor": Infinity}, '
+                '"in_sample": {"profit_factor": 2.5}}\n',
+                encoding="utf-8",
+            )
+
+            server = serve(config, host="127.0.0.1", port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with urllib.request.urlopen(f"{base}/api/summary", timeout=5) as r:
+                    body = r.read().decode("utf-8")
+            finally:
+                server.shutdown()
+                server.server_close()
+
+            # json.loads refuses bare Infinity, so parsing at all is the assert.
+            payload = json.loads(body)
+            metrics = payload["evolution"]["out_of_sample"]
+            self.assertIsNone(metrics["profit_factor"])
+            self.assertEqual(payload["evolution"]["in_sample"]["profit_factor"], 2.5)
+
     def test_http_surface_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)

@@ -659,7 +659,13 @@ def cmd_dashboard(
     from agentic_trading.dashboard import serve
 
     config = load_config(config_path)
-    server = serve(config, host=host, port=port, open_browser=open_browser)
+    server = serve(
+        config,
+        host=host,
+        port=port,
+        open_browser=open_browser,
+        config_path=config_path,
+    )
     print(f"dashboard: http://{host}:{port}/  (read-only, Ctrl+C to stop)")
     try:
         server.serve_forever()

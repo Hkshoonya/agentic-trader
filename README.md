@@ -225,6 +225,46 @@ writes `state_dir/probe.json`, which contains account data and is gitignored.
 - An open order for a symbol blocks another entry in that symbol
 - Kill switch and daily counters survive restarts via `state_dir/risk_guard.json`
 
+### Crypto (24/7) — a separate broker namespace
+
+Robinhood's crypto tools are not the equity tools with a different symbol. They
+want the numeric `rhs_account_number` (not the alphanumeric `account_number`),
+reject `market_hours` outright, spell a stop-triggered market order `stop_loss`,
+and accept only `gtc`-or-omitted for market/limit durations. Sending an equity
+argument shape to a crypto tool (or the reverse) fails with `unexpected
+additional properties`, which is what `broker.review_order`/`place_order` route
+around by symbol, and what `tests/test_crypto_routing.py` pins against the
+recorded tool schemas.
+
+Two consequences worth knowing before enabling anything:
+
+- **Holdings live in two books.** `get_equity_positions` cannot see crypto, so
+  the live loop merges `get_crypto_positions` and `get_crypto_orders` before it
+  asks RiskGuard. Without that merge a live crypto position is invisible: entries
+  would stack past `max_open_positions` and an exit would be refused as
+  `would_short`, stranding the position. If the crypto book cannot be read while
+  the whitelist trades pairs, the merged snapshot fails closed.
+- **Crypto goes live later than equities.** It has no closing bell to flatten
+  into, so it only submits at `stage = "live"` — not at `probation`, and not
+  while the promotion gate still reports `eligible: false`. Below that it is
+  simulated and journaled as `place_refused` with reason
+  `crypto_requires_live_stage`.
+
+### Operator services
+
+Both halves run as `systemd --user` units that restart on failure and at boot:
+
+```bash
+systemctl --user status  agentic-trading agentic-trading-dashboard
+systemctl --user restart agentic-trading            # daemon (trading loop)
+systemctl --user restart agentic-trading-dashboard  # console on 127.0.0.1:8787
+journalctl --user -u agentic-trading -f             # live log
+```
+
+The console is read-only, binds to loopback, and re-reads `config/agentic.toml`
+on every request, so editing the strategy or whitelist does not require a
+restart (and cannot silently misreport what the daemon is doing).
+
 ### Known constraints and unverified areas
 
 - **Fractional shares only trade in regular hours as market orders.** At $50,

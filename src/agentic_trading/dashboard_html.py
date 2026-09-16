@@ -5,6 +5,7 @@ from agentic_trading.dashboard_js import SCRIPT
 _TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>%F0%9F%93%88</text></svg>">
 <title>Agentic Trader — live console</title>
 <style>
 :root{--bg:#0a0e14;--panel:#121821;--line:#1e2836;--text:#dbe4f0;--muted:#7b8a9e;--buy:#35d07f;--sell:#ff5f6d;--accent:#4aa8ff;--warn:#ffb020;--shadow:#6b7cff}
@@ -25,7 +26,8 @@ main{display:grid;gap:14px;padding:16px;grid-template-columns:repeat(12,1fr)}
 .span3{grid-column:span 3}.span4{grid-column:span 4}.span5{grid-column:span 5}.span7{grid-column:span 7}.span8{grid-column:span 8}
 .metric{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
 .sub{color:var(--muted);font-size:12px}
-.row{display:flex;justify-content:space-between;gap:10px;padding:3px 0}
+.row{display:flex;justify-content:space-between;gap:10px;padding:3px 0;flex-wrap:wrap}
+.row b{text-align:right;overflow-wrap:anywhere}
 .gauge{height:10px;border-radius:6px;background:#1b2431;overflow:hidden}
 .gauge>div{height:100%;width:0;transition:width .6s ease;background:linear-gradient(90deg,var(--shadow),var(--accent))}
 #stream{max-height:340px;overflow:auto}

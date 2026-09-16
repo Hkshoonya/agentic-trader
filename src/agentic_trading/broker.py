@@ -22,7 +22,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional, Protocol
 
-from agentic_trading.orders import EquityOrderRequest
+from agentic_trading.orders import EquityOrderRequest, is_crypto_symbol
 from agentic_trading.rh_mcp.snapshot import build_capability_map
 from agentic_trading.risk import PortfolioSnapshot
 
@@ -161,14 +161,35 @@ class Broker:
         """24/7 crypto quotes (read-only).
 
         Robinhood's crypto namespace is separate from equity: it wants pair
-        symbols such as ``BTC-USD``, and no execution path is wired for it — the
-        runtime refuses to build a crypto order, so this can only ever drive
-        shadow decisions.
+        symbols such as ``BTC-USD`` and returns them undashed (``BTCUSD``).
         """
         if not symbols:
             raise ValueError("symbols required")
         return self._call(
             "get_crypto_quotes", {"symbols": [s.strip().upper() for s in symbols]}
+        )
+
+    def get_crypto_positions(
+        self, *, rhs_account_number: str | None = None
+    ) -> dict[str, Any]:
+        """Crypto holdings, keyed by the numeric ``rhs_account_number``."""
+        account = rhs_account_number or self.resolve_rhs_account_number()
+        return self._call("get_crypto_positions", {"rhs_account_number": account})
+
+    def get_crypto_position_snapshot(self) -> PortfolioSnapshot:
+        """Crypto holdings as a pair-keyed :class:`PortfolioSnapshot`.
+
+        The equity snapshot cannot see crypto, so without this a live crypto
+        position is invisible: entries would stack past ``max_open_positions``
+        and exits would be refused as ``would_short``, stranding the position.
+        """
+        return _extract_crypto_positions(self.get_crypto_positions())
+
+    def get_crypto_orders(self) -> list[dict[str, Any]]:
+        """Open and historical crypto orders (paginated, first page)."""
+        account = self.resolve_rhs_account_number()
+        return _first_list(
+            self._call("get_crypto_orders", {"rhs_account_number": account})
         )
 
     def get_tradability(self, symbols: list[str]) -> dict[str, Any]:
@@ -208,11 +229,23 @@ class Broker:
     # -- orders -----------------------------------------------------------
 
     def review_order(self, request: EquityOrderRequest) -> dict[str, Any]:
-        # The live review tool rejects ref_id; it is a placement-only key.
-        return self._call("review_equity", request.to_mcp_args(include_ref_id=False))
+        """Pre-trade review (read-only) in the namespace the symbol belongs to.
+
+        Crypto orders must go to ``preview_crypto_order``: the equity review
+        tool rejects the crypto argument shape with ``unexpected additional
+        properties ["rhs_account_number"]``. Ref_id is a placement-only key and
+        is dropped for both namespaces.
+        """
+        capability = (
+            "preview_crypto" if is_crypto_symbol(request.symbol) else "review_equity"
+        )
+        return self._call(capability, request.to_mcp_args(include_ref_id=False))
 
     def place_order(self, request: EquityOrderRequest) -> dict[str, Any]:
-        return self._call("place_equity", request.to_mcp_args())
+        capability = (
+            "place_crypto" if is_crypto_symbol(request.symbol) else "place_equity"
+        )
+        return self._call(capability, request.to_mcp_args())
 
     def get_orders(
         self,
@@ -306,6 +339,35 @@ def _extract_equity(payload: Any, *, _depth: int = 0) -> tuple[Decimal, str]:
         "could not determine account equity from portfolio payload "
         f"(keys: {_shape(payload)}); run 'agentic-trading probe' to inspect it"
     )
+
+
+def _extract_crypto_positions(payload: Any) -> PortfolioSnapshot:
+    """Parse crypto holdings into a pair-keyed snapshot.
+
+    Recorded live shape (``get_crypto_positions`` outputSchema):
+    ``{"data": {"results": [{"currency": {"code": "BTC"}, "quantity": "0.001"}]}}``.
+    A ``null`` or empty page means "no crypto held"; anything unrecognized is a
+    read failure, because this snapshot is what stops a live crypto entry from
+    stacking and an exit from being refused as an oversell (fail closed).
+    """
+    try:
+        rows = _first_list(payload)
+    except BrokerPayloadError:
+        return PortfolioSnapshot(open_positions=0, held={}, positions_read_failed=True)
+
+    held: dict[str, Decimal] = {}
+    for row in rows:
+        currency = row.get("currency")
+        code = ""
+        if isinstance(currency, dict):
+            code = str(currency.get("code") or "")
+        if not code:
+            code = str(row.get("currency_code") or "")
+        quantity = _to_decimal(row.get("quantity"))
+        if not code or quantity is None or quantity == 0:
+            continue
+        held[f"{code.strip().upper()}-USD"] = quantity
+    return PortfolioSnapshot(open_positions=len(held), held=held)
 
 
 def _extract_positions(payload: Any, *, _depth: int = 0) -> PortfolioSnapshot:

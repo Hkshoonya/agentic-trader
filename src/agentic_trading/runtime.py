@@ -25,10 +25,14 @@ from agentic_trading.broker import Broker, BrokerPayloadError
 from agentic_trading.config import Config
 from agentic_trading.journal import DecisionJournal
 from agentic_trading.marketdata import QuoteFeed, build_quote_feed
-from agentic_trading.orders import EquityOrderRequest, OrderValidationError
+from agentic_trading.orders import (
+    EquityOrderRequest,
+    OrderValidationError,
+    is_crypto_symbol,
+)
 from agentic_trading.quotes import iter_quotes
 from agentic_trading.rh_mcp.snapshot import write_tools_snapshot
-from agentic_trading.risk import RiskGuard, ShadowBook
+from agentic_trading.risk import PortfolioSnapshot, RiskGuard, ShadowBook
 from agentic_trading.session import (
     market_hours_argument,
     next_session_open,
@@ -77,6 +81,20 @@ def build_guard(config: Config, mode: str) -> RiskGuard:
         current_equity=Decimal("0"),
         timezone=config.timezone,
     )
+
+
+def _with_pair_symbol(order: dict[str, Any]) -> dict[str, Any]:
+    """Give a crypto order the pair symbol the rest of the loop expects.
+
+    Crypto orders carry ``currency_code`` (``BTC``) rather than a symbol, while
+    every downstream check compares against whitelist pairs (``BTC-USD``).
+    """
+    if order.get("symbol"):
+        return order
+    code = str(order.get("currency_code") or "").strip().upper()
+    if not code:
+        return order
+    return {**order, "symbol": f"{code}-USD"}
 
 
 def _intent_payload(intent: OrderIntent) -> dict[str, Any]:
@@ -162,8 +180,7 @@ def build_order_request(
     # Crypto trades 24/7 and is fractional by nature, so the equity rule that
     # fractional orders need regular_hours does not apply; forcing regular_hours
     # keeps the shared validator happy and the crypto args omit it anyway.
-    symbol = intent.symbol.upper()
-    is_crypto = "-" in symbol or symbol.endswith("USD")
+    is_crypto = is_crypto_symbol(intent.symbol)
     market_hours = "regular_hours" if is_crypto else market_hours_argument(session)
     fractional = intent.quantity != intent.quantity.to_integral_value()
 
@@ -309,6 +326,36 @@ class _Loop:
 
     # -- state ------------------------------------------------------------
 
+    @property
+    def trades_crypto(self) -> bool:
+        return any(is_crypto_symbol(s) for s in self.config.symbol_whitelist)
+
+    def live_positions(self) -> PortfolioSnapshot:
+        """Real holdings across both books, as the guard must see them.
+
+        Robinhood reports equity and crypto holdings separately, so a live loop
+        that reads only ``get_equity_positions`` sees a crypto position as
+        nothing: entries stack past ``max_open_positions`` and exits are denied
+        as ``would_short``. If the crypto book cannot be read while the
+        whitelist trades pairs, the merged snapshot fails closed instead of
+        reporting "flat".
+        """
+        equity = self.broker.get_positions()
+        if not self.trades_crypto:
+            return equity
+        crypto = self.broker.get_crypto_position_snapshot()
+        if crypto.positions_read_failed:
+            return PortfolioSnapshot(
+                open_positions=0, held={}, positions_read_failed=True
+            )
+        held = dict(equity.held)
+        held.update({symbol: qty for symbol, qty in crypto.held.items() if qty > 0})
+        return PortfolioSnapshot(
+            open_positions=len(held),
+            held=held,
+            positions_read_failed=equity.positions_read_failed,
+        )
+
     def refresh_equity(self) -> None:
         try:
             equity = self.broker.get_equity()
@@ -328,12 +375,29 @@ class _Loop:
         """Record open orders and remember symbols with pending entries."""
         try:
             # Live schema rejects state_group; filter open states client-side.
-            orders = [
+            orders: list[dict[str, Any]] = [
                 order
                 for order in self.broker.get_orders()
                 if str(order.get("state", "")).lower()
                 in ("queued", "confirmed", "unconfirmed", "new", "partially_filled")
             ]
+            if self.trades_crypto:
+                # Crypto orders live in their own book; without this a pending
+                # crypto entry is invisible and a second one could be stacked
+                # on top of it before the first fills.
+                crypto = self.broker.get_crypto_orders()
+                orders.extend(
+                    _with_pair_symbol(order)
+                    for order in crypto
+                    if str(order.get("state", "")).lower()
+                    in (
+                        "queued",
+                        "confirmed",
+                        "unconfirmed",
+                        "new",
+                        "partially_filled",
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 — never crash the loop on reads
             self.journal.append(
                 {"event": "open_orders_read_failed", "error": str(exc)}
@@ -466,7 +530,7 @@ class _Loop:
             snapshot = self.shadow_book.as_snapshot()
         else:
             try:
-                snapshot = self.broker.get_positions()
+                snapshot = self.live_positions()
             except Exception as exc:  # noqa: BLE001 — never trade without positions
                 self._journal_rejected(intent, f"positions_read_error: {exc}", Decimal("0"))
                 self.note_error("positions_read_error", exc)
@@ -482,11 +546,9 @@ class _Loop:
             return
 
         try:
-            symbol = intent.symbol.upper()
-            is_crypto = "-" in symbol or symbol.endswith("USD")
             account = (
                 self.broker.resolve_rhs_account_number()
-                if is_crypto
+                if is_crypto_symbol(intent.symbol)
                 else self.resolve_account()
             )
             request = build_order_request(
@@ -565,17 +627,18 @@ class _Loop:
         self.guard.persist(self.config.state_dir)
 
     def _place(self, intent: OrderIntent, request: EquityOrderRequest) -> None:
-        # Crypto has no historicals to validate against, so it may be simulated
-        # (shadow) but never submitted. _place only runs in live mode, which
-        # makes this the correct place for that refusal.
-        from agentic_trading.marketdata import is_crypto_pair
-
-        if is_crypto_pair(intent.symbol):
+        # Crypto never closes, so there is no session boundary to contain a bad
+        # fill and no closing bell to flatten into. It therefore climbs the same
+        # promotion ladder as everything else but has to reach the *top* of it:
+        # probation-sized live trading is for instruments with a session close.
+        # _place only runs in live mode, which makes this the right refusal point.
+        if is_crypto_symbol(intent.symbol) and self.stage != "live":
             self.journal.append(
                 {
                     "decision_id": intent.decision_id,
                     "event": "place_refused",
-                    "reason": "crypto_execution_disabled",
+                    "reason": "crypto_requires_live_stage",
+                    "stage": self.stage,
                     "symbol": intent.symbol,
                 }
             )

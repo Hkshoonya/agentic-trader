@@ -8,7 +8,6 @@ justified it, including every refusal.
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -19,6 +18,7 @@ from agentic_trading.backtest import CostModel
 from agentic_trading.config import Config
 from agentic_trading.evolution import EvolutionResult, evolve
 from agentic_trading.history import load_bars
+from agentic_trading import jsonio
 from agentic_trading.promotion import (
     Assessment,
     PromotionPolicy,
@@ -102,7 +102,7 @@ def write_evolution(result: EvolutionResult, state_dir: Path | str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = result.to_dict()
     payload["run_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+    path.write_text(jsonio.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
 
 

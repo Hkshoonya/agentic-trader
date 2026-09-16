@@ -1,4 +1,4 @@
-"""Schema-safe equity order requests for Robinhood Trading MCP.
+"""Schema-safe order requests for Robinhood Trading MCP (equity + crypto).
 
 Encodes the documented parameter rules for ``review_equity_order`` /
 ``place_equity_order`` so invalid orders fail locally, before a broker round
@@ -14,6 +14,14 @@ Rules encoded here (from the live tool schema):
 - extended-hours and overnight sessions execute **limit orders only**
 - fractional quantity and dollar-based orders only in
   ``regular_hours`` + ``market``, at most 6 decimal places
+
+The crypto tools (``preview_crypto_order`` / ``place_crypto_order``) share the
+quantity/limit/stop rules but differ on the envelope: they take the numeric
+``rhs_account_number``, reject ``market_hours`` entirely, spell the stop-market
+type ``stop_loss``, and only accept ``gtc`` (or the omitted default) for
+market/limit durations. Crypto quantities are fractional by nature, so the
+equity-only "fractional needs regular-hours market" rule does not apply to
+pairs.
 """
 
 from __future__ import annotations
@@ -37,9 +45,32 @@ _ORDER_TYPES = (MARKET, LIMIT, STOP_MARKET, STOP_LIMIT)
 _MARKET_HOURS = (REGULAR_HOURS, EXTENDED_HOURS, ALL_DAY_HOURS)
 _MAX_FRACTIONAL_PLACES = 6
 
+# Robinhood's crypto tools name the stop-triggered market order ``stop_loss``;
+# the equity tools call the same concept ``stop_market``. Only the wire value
+# differs, so the internal vocabulary stays equity-shaped.
+_CRYPTO_ORDER_TYPES = {
+    MARKET: MARKET,
+    LIMIT: LIMIT,
+    STOP_MARKET: "stop_loss",
+    STOP_LIMIT: STOP_LIMIT,
+}
+# Crypto ``market``/``limit`` orders accept only ``gtc`` (the default) and never
+# ``ioc``; the stop types additionally allow gfd/gfw/gfm.
+_CRYPTO_TIF_OPTIONAL_TYPES = (MARKET, LIMIT)
+
 
 class OrderValidationError(ValueError):
     """Raised when a request would be rejected by the broker schema."""
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """``BTC-USD``/``BTCUSD`` is crypto, ``SPY`` is not.
+
+    Lives here rather than in :mod:`agentic_trading.marketdata` because
+    marketdata imports broker, which imports this module.
+    """
+    text = str(symbol or "").upper()
+    return "-" in text or text.endswith("USD")
 
 
 def _as_decimal(value: Any, field: str) -> Decimal:
@@ -169,7 +200,14 @@ class EquityOrderRequest:
                     "dollar_amount requires type=market and market_hours=regular_hours"
                 )
 
-        if self.quantity is not None and _is_fractional(self.quantity):
+        # Crypto trades in fractional units 24/7, so the equity-only rule that
+        # fractional quantities need a regular-hours market order does not
+        # apply; the crypto args omit market_hours entirely anyway.
+        if (
+            self.quantity is not None
+            and _is_fractional(self.quantity)
+            and not is_crypto_symbol(self.symbol)
+        ):
             if self.order_type != MARKET or self.market_hours != REGULAR_HOURS:
                 raise OrderValidationError(
                     "fractional quantity requires type=market and "
@@ -186,24 +224,33 @@ class EquityOrderRequest:
 
         ``ref_id`` is an idempotency key for *placement only*; the live review
         tool rejects it as an unexpected property.
+
+        Crypto is a separate tool namespace with its own argument shape: the
+        numeric ``rhs_account_number`` instead of ``account_number``, no
+        ``market_hours`` at all (crypto never closes), ``stop_loss`` for the
+        stop-triggered market type, and ``gtc``-or-omit as the only
+        ``time_in_force`` for market/limit orders.
         """
-        # Crypto is a separate namespace: it wants the numeric rhs account id and
-        # rejects market_hours outright. Detected inline (not imported) because
-        # marketdata imports broker, which imports orders.
-        symbol = self.symbol.upper()
-        crypto = "-" in symbol or symbol.endswith("USD")
+        crypto = is_crypto_symbol(self.symbol)
         args: dict[str, Any] = {
             ("rhs_account_number" if crypto else "account_number"): self.account_number,
             "symbol": self.symbol,
             "side": self.side.value,
-            "type": self.order_type,
+            "type": _CRYPTO_ORDER_TYPES[self.order_type] if crypto else self.order_type,
         }
         if not crypto:
             args["time_in_force"] = self.time_in_force
             args["market_hours"] = self.market_hours
-        elif self.order_type != "market":
-            # Crypto market orders reject gfd ("use gtc or omit"); resting
-            # crypto orders still carry a time in force.
+        elif self.order_type in _CRYPTO_TIF_OPTIONAL_TYPES:
+            # Crypto ``market``/``limit`` orders accept only ``gtc``, and the
+            # tool rejects the gfd default the shared validator insists on for
+            # market orders. Omitting the field means gtc to the server, so it
+            # is only ever sent when the caller already has gtc; nothing else
+            # is valid here.
+            if self.time_in_force == "gtc":
+                args["time_in_force"] = "gtc"
+        else:
+            # Stop orders carry a real duration (gfd/gtc are both valid).
             args["time_in_force"] = self.time_in_force
         if self.quantity is not None:
             args["quantity"] = _fmt(self.quantity)

@@ -22,6 +22,17 @@ def request(**overrides) -> EquityOrderRequest:
     return EquityOrderRequest(**base)  # type: ignore[arg-type]
 
 
+def crypto_request(**overrides) -> EquityOrderRequest:
+    """A crypto order with the equity defaults replaced by a BTC pair."""
+    base = {
+        "account_number": "90000001",
+        "symbol": "BTC-USD",
+        "dollar_amount": Decimal("25.00"),
+    }
+    base.update(overrides)
+    return request(**base)
+
+
 class ValidationTests(unittest.TestCase):
     def test_dollar_market_buy_is_valid_and_normalises_symbol(self) -> None:
         req = request()
@@ -143,6 +154,76 @@ class ValidationTests(unittest.TestCase):
                 quantity=Decimal("1"),
                 limit_price=Decimal("-1"),
             )
+
+
+class CryptoArgumentShapeTests(unittest.TestCase):
+    """Crypto tools take ``rhs_account_number`` and reject equity-only fields."""
+
+    def test_market_order_omits_gfd_and_market_hours(self) -> None:
+        args = crypto_request().to_mcp_args()
+        self.assertEqual(
+            args,
+            {
+                "rhs_account_number": "90000001",
+                "symbol": "BTC-USD",
+                "side": "buy",
+                "type": "market",
+                "dollar_amount": "25.00",
+            },
+        )
+        self.assertNotIn("time_in_force", args)
+        self.assertNotIn("market_hours", args)
+        self.assertNotIn("account_number", args)
+
+    def test_limit_order_omits_the_shared_gfd_default(self) -> None:
+        args = crypto_request(
+            order_type="limit",
+            dollar_amount=None,
+            quantity=Decimal("0.01"),
+            limit_price=Decimal("118280.00"),
+        ).to_mcp_args()
+        self.assertEqual(args["type"], "limit")
+        self.assertEqual(args["limit_price"], "118280.00")
+        self.assertNotIn("time_in_force", args)
+        self.assertNotIn("market_hours", args)
+
+    def test_stop_market_becomes_stop_loss_and_keeps_its_duration(self) -> None:
+        args = crypto_request(
+            order_type="stop_market",
+            dollar_amount=None,
+            quantity=Decimal("0.01"),
+            stop_price=Decimal("110000"),
+        ).to_mcp_args()
+        self.assertEqual(args["type"], "stop_loss")
+        self.assertEqual(args["time_in_force"], "gfd")
+
+    def test_stop_limit_keeps_its_name_and_price(self) -> None:
+        args = crypto_request(
+            order_type="stop_limit",
+            dollar_amount=None,
+            quantity=Decimal("0.01"),
+            limit_price=Decimal("110100"),
+            stop_price=Decimal("110000"),
+        ).to_mcp_args()
+        self.assertEqual(args["type"], "stop_limit")
+        self.assertEqual(args["stop_price"], "110000")
+        self.assertEqual(args["limit_price"], "110100")
+
+    def test_equity_orders_are_untouched_by_the_crypto_shape(self) -> None:
+        args = request().to_mcp_args()
+        self.assertEqual(args["account_number"], "A1")
+        self.assertEqual(args["market_hours"], "regular_hours")
+        self.assertEqual(args["time_in_force"], "gfd")
+        self.assertNotIn("rhs_account_number", args)
+
+    def test_fractional_crypto_limit_orders_are_allowed(self) -> None:
+        args = crypto_request(
+            order_type="limit",
+            dollar_amount=None,
+            quantity=Decimal("0.001542"),
+            limit_price=Decimal("118000.00"),
+        ).to_mcp_args()
+        self.assertEqual(args["quantity"], "0.001542")
 
 
 if __name__ == "__main__":

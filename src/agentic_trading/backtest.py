@@ -12,6 +12,7 @@ trustworthy enough to *refuse* promotion):
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -39,6 +40,9 @@ class Genome:
     position_pct: int = 100
 
     def to_dict(self) -> dict[str, Any]:
+        # JSON has no Infinity: a run with no losing trades has an infinite
+        # profit factor in memory, but it must serialize as null or every
+        # strict reader (browsers, jq) chokes on the file.
         return {
             "mode": self.mode,
             "lookback": self.lookback,
@@ -151,7 +155,11 @@ class Metrics:
             "net_pnl": str(self.net_pnl),
             "return_pct": round(self.return_pct, 4),
             "expectancy_bps": round(self.expectancy_bps, 3),
-            "profit_factor": round(self.profit_factor, 4),
+            "profit_factor": (
+                round(self.profit_factor, 4)
+                if math.isfinite(self.profit_factor)
+                else None
+            ),
             "max_drawdown_pct": round(self.max_drawdown_pct, 4),
             "final_equity": str(self.final_equity),
             "bootstrap_p_value": round(self.bootstrap_p_value, 4),

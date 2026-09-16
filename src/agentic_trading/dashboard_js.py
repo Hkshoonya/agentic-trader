@@ -47,19 +47,35 @@ function drawChart(curve) {
     return;
   }
   const max = Math.max(...points.map(p => p.notional), 1);
-  const barW = Math.max(2, (w - 24) / points.length - 2);
+  const maxCum = Math.max(...points.map(p => p.cumulative || 0), 1);
+  // A single decision used to stretch one bar across the whole canvas. Cap the
+  // width so a sparse day reads as a bar, not a slab.
+  const barW = Math.min(26, Math.max(3, (w - 24) / points.length - 2));
+  const plotH = h - 44;
   points.forEach((p, i) => {
     const x = 12 + i * (barW + 2);
-    const barH = (p.notional / max) * (h - 44);
+    const barH = Math.max(1, (p.notional / max) * plotH);
     ctx.globalAlpha = p.mode === 'shadow' ? 0.45 : 1;
     ctx.fillStyle = p.side === 'sell' ? '#ff5f6d' : '#35d07f';
     ctx.fillRect(x, h - 22 - barH, barW, barH);
   });
   ctx.globalAlpha = 1;
+  // Cumulative notional, as promised by the legend.
+  ctx.strokeStyle = '#4aa8ff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = 12 + i * (barW + 2) + barW / 2;
+    const y = h - 22 - ((p.cumulative || 0) / maxCum) * plotH;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
   ctx.strokeStyle = '#1e2836';
+  ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(0, h - 22); ctx.lineTo(w, h - 22); ctx.stroke();
   ctx.fillStyle = '#7b8a9e'; ctx.font = '11px monospace';
-  ctx.fillText('order notionals (max $' + max.toFixed(2) + ')', 12, h - 6);
+  ctx.fillText('order notional (max $' + max.toFixed(2) + ') · cumulative $'
+    + maxCum.toFixed(2) + ' · ' + points.length + ' decisions', 12, h - 6);
 }
 
 async function refresh() {
@@ -135,8 +151,16 @@ function renderOrders(data) {
     return;
   }
   body.innerHTML = rows.map(r => {
+    // Crypto is measured in coins, never "shares"; label the unit the way the
+    // exchange does (0.00001577 BTC).
+    const symbol = r.symbol || '';
+    const isCrypto = symbol.indexOf('-') >= 0 || /USD$/.test(symbol);
     const size = r.dollar_amount ? '$' + num(r.dollar_amount) :
-      (r.quantity ? num(r.quantity, 6) + ' sh' : '—');
+      (r.quantity
+        ? (isCrypto
+          ? num(r.quantity, 8) + ' ' + symbol.split('-')[0]
+          : num(r.quantity, 4) + ' sh')
+        : '—');
     const alerts = r.alerts && Object.keys(r.alerts).length
       ? Object.keys(r.alerts).join(', ') : 'none';
     const side = r.side ? '<span class="' + (r.side === 'buy' ? 'buy' : 'sell') + '">' + r.side + '</span>' : '—';

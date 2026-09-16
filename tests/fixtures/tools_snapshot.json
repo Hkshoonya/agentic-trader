@@ -16,9 +16,13 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"}
+          "account_number": {
+            "type": "string"
+          }
         },
-        "required": ["account_number"],
+        "required": [
+          "account_number"
+        ],
         "additionalProperties": false
       }
     },
@@ -28,10 +32,16 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"},
-          "cursor": {"type": "string"}
+          "account_number": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          }
         },
-        "required": ["account_number"],
+        "required": [
+          "account_number"
+        ],
         "additionalProperties": false
       }
     },
@@ -41,9 +51,16 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "symbols": {"type": "array", "items": {"type": "string"}}
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["symbols"],
+        "required": [
+          "symbols"
+        ],
         "additionalProperties": false
       }
     },
@@ -53,9 +70,16 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "symbols": {"type": "array", "items": {"type": "string"}}
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["symbols"],
+        "required": [
+          "symbols"
+        ],
         "additionalProperties": false
       }
     },
@@ -65,10 +89,20 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"},
-          "symbols": {"type": "array", "items": {"type": "string"}}
+          "account_number": {
+            "type": "string"
+          },
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["account_number", "symbols"],
+        "required": [
+          "account_number",
+          "symbols"
+        ],
         "additionalProperties": false
       }
     },
@@ -78,18 +112,43 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"},
-          "symbol": {"type": "string"},
-          "side": {"type": "string"},
-          "type": {"type": "string"},
-          "quantity": {"type": "string"},
-          "dollar_amount": {"type": "string"},
-          "limit_price": {"type": "string"},
-          "stop_price": {"type": "string"},
-          "time_in_force": {"type": "string"},
-          "market_hours": {"type": "string"}
+          "account_number": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "dollar_amount": {
+            "type": "string"
+          },
+          "limit_price": {
+            "type": "string"
+          },
+          "stop_price": {
+            "type": "string"
+          },
+          "time_in_force": {
+            "type": "string"
+          },
+          "market_hours": {
+            "type": "string"
+          }
         },
-        "required": ["account_number", "symbol", "side", "type"],
+        "required": [
+          "account_number",
+          "symbol",
+          "side",
+          "type"
+        ],
         "additionalProperties": false
       }
     },
@@ -99,19 +158,46 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"},
-          "symbol": {"type": "string"},
-          "side": {"type": "string"},
-          "type": {"type": "string"},
-          "quantity": {"type": "string"},
-          "dollar_amount": {"type": "string"},
-          "limit_price": {"type": "string"},
-          "stop_price": {"type": "string"},
-          "time_in_force": {"type": "string"},
-          "market_hours": {"type": "string"},
-          "ref_id": {"type": "string"}
+          "account_number": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "dollar_amount": {
+            "type": "string"
+          },
+          "limit_price": {
+            "type": "string"
+          },
+          "stop_price": {
+            "type": "string"
+          },
+          "time_in_force": {
+            "type": "string"
+          },
+          "market_hours": {
+            "type": "string"
+          },
+          "ref_id": {
+            "type": "string"
+          }
         },
-        "required": ["account_number", "symbol", "side", "type"],
+        "required": [
+          "account_number",
+          "symbol",
+          "side",
+          "type"
+        ],
         "additionalProperties": false
       }
     },
@@ -121,14 +207,28 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"},
-          "order_id": {"type": "string"},
-          "state": {"type": "string"},
-          "state_group": {"type": "string"},
-          "symbol": {"type": "string"},
-          "cursor": {"type": "string"}
+          "account_number": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "state_group": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          }
         },
-        "required": ["account_number"],
+        "required": [
+          "account_number"
+        ],
         "additionalProperties": false
       }
     },
@@ -138,10 +238,17 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"},
-          "order_id": {"type": "string"}
+          "account_number": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": "string"
+          }
         },
-        "required": ["account_number", "order_id"],
+        "required": [
+          "account_number",
+          "order_id"
+        ],
         "additionalProperties": false
       }
     },
@@ -151,11 +258,21 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"},
-          "legs": {"type": "array"},
-          "quantity": {"type": "string"}
+          "account_number": {
+            "type": "string"
+          },
+          "legs": {
+            "type": "array"
+          },
+          "quantity": {
+            "type": "string"
+          }
         },
-        "required": ["account_number", "legs", "quantity"],
+        "required": [
+          "account_number",
+          "legs",
+          "quantity"
+        ],
         "additionalProperties": false
       }
     },
@@ -165,11 +282,21 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "account_number": {"type": "string"},
-          "legs": {"type": "array"},
-          "quantity": {"type": "string"}
+          "account_number": {
+            "type": "string"
+          },
+          "legs": {
+            "type": "array"
+          },
+          "quantity": {
+            "type": "string"
+          }
         },
-        "required": ["account_number", "legs", "quantity"],
+        "required": [
+          "account_number",
+          "legs",
+          "quantity"
+        ],
         "additionalProperties": false
       }
     },
@@ -178,8 +305,14 @@
       "description": "List open crypto positions for a specific brokerage account.",
       "inputSchema": {
         "type": "object",
-        "properties": {"rhs_account_number": {"type": "string"}},
-        "required": ["rhs_account_number"],
+        "properties": {
+          "rhs_account_number": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rhs_account_number"
+        ],
         "additionalProperties": false
       }
     },
@@ -188,8 +321,151 @@
       "description": "List crypto order history for an account.",
       "inputSchema": {
         "type": "object",
-        "properties": {"rhs_account_number": {"type": "string"}},
-        "required": ["rhs_account_number"],
+        "properties": {
+          "rhs_account_number": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rhs_account_number"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preview_crypto_order",
+      "description": "Simulate a crypto order without placing it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "rhs_account_number": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "dollar_amount": {
+            "type": "string"
+          },
+          "limit_price": {
+            "type": "string"
+          },
+          "stop_price": {
+            "type": "string"
+          },
+          "time_in_force": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rhs_account_number",
+          "symbol",
+          "side",
+          "type"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "place_crypto_order",
+      "description": "Place a crypto order.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "rhs_account_number": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "dollar_amount": {
+            "type": "string"
+          },
+          "limit_price": {
+            "type": "string"
+          },
+          "stop_price": {
+            "type": "string"
+          },
+          "time_in_force": {
+            "type": "string"
+          },
+          "ref_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rhs_account_number",
+          "symbol",
+          "side",
+          "type"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_crypto_quotes",
+      "description": "24/7 crypto quotes for pair symbols.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbols": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "rhs_account_number": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbols"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cancel_crypto_order",
+      "description": "Cancel a crypto order.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "rhs_account_number": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rhs_account_number",
+          "order_id"
+        ],
         "additionalProperties": false
       }
     }
