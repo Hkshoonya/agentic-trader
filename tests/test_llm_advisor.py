@@ -115,7 +115,7 @@ class DotenvTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ, {"AGENTIC_TEST_ONE": "from-env"}, clear=False
             ):
-                loaded = load_dotenv(path)
+                loaded = load_dotenv(path, force=True)
                 self.assertGreaterEqual(loaded, 1)
                 self.assertEqual(os.environ["AGENTIC_TEST_ONE"], "from-env")
                 self.assertEqual(os.environ["AGENTIC_TEST_TWO"], "quoted value")

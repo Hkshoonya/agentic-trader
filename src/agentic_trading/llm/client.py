@@ -13,12 +13,23 @@ DEFAULT_LLM_MODEL = "gpt-4o-mini"
 DEFAULT_FAKE_RESPONSE = '{"intents":[]}'
 
 
-def load_dotenv(path: Path | str = ".env", *, override: bool = False) -> int:
+def load_dotenv(
+    path: Path | str = ".env", *, override: bool = False, force: bool = False
+) -> int:
     """Load ``KEY=value`` lines from a .env file, tolerating ``export`` prefixes.
 
     Real environment variables win unless ``override`` is set, so a shell export
     still takes precedence over the file. Secrets are never logged.
+
+    Never loads during a test run: a developer's .env must not turn an LLM
+    advisor on inside the suite, which would make tests take network calls and
+    depend on whatever model happens to be configured that day.
     """
+    if not force and (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("AGENTIC_SKIP_DOTENV") == "1"
+    ):
+        return 0
     source = Path(path)
     if not source.is_file():
         return 0
