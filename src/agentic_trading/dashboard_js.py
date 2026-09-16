@@ -63,10 +63,11 @@ function drawChart(curve) {
 }
 
 async function refresh() {
-  const [summary, curve, feed] = await Promise.all([
+  const [summary, curve, feed, orders] = await Promise.all([
     fetch('/api/summary').then(r => r.json()),
     fetch('/api/equity').then(r => r.json()),
     fetch('/api/journal?offset=' + offset).then(r => r.json()),
+    fetch('/api/orders').then(r => r.json()),
   ]);
   setBadge('mode', summary.kill_switch ? 'kill switch' : summary.mode,
     summary.kill_switch ? 'kill' : (summary.mode === 'live' ? 'live' : 'shadow'));
@@ -119,6 +120,39 @@ async function refresh() {
   feed.records.forEach(renderEvent);
   offset = feed.offset;
   drawChart(curve);
+  renderOrders(orders);
+}
+
+function renderOrders(data) {
+  const rows = (data && data.rows) || [];
+  const body = document.querySelector('#orders tbody');
+  const counts = (data && data.counts) || {};
+  document.getElementById('orders-count').textContent =
+    (counts.accepted || 0) + ' accepted · ' + (counts.placed || 0) + ' placed · '
+    + (counts.rejected || 0) + ' rejected · ' + (counts.failed || 0) + ' failed';
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="11" class="sub">no decisions yet</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const size = r.dollar_amount ? '$' + num(r.dollar_amount) :
+      (r.quantity ? num(r.quantity, 6) + ' sh' : '—');
+    const alerts = r.alerts && Object.keys(r.alerts).length
+      ? Object.keys(r.alerts).join(', ') : 'none';
+    const side = r.side ? '<span class="' + (r.side === 'buy' ? 'buy' : 'sell') + '">' + r.side + '</span>' : '—';
+    const at = r.at ? new Date(r.at).toLocaleTimeString() : '—';
+    return '<tr><td>' + at + '</td>'
+      + '<td><span class="pill ' + r.event + '">' + r.event + '</span></td>'
+      + '<td>' + (r.symbol || '—') + '</td>'
+      + '<td>' + side + '</td>'
+      + '<td>' + (r.type || '—') + '</td>'
+      + '<td>' + (r.session || '—') + '</td>'
+      + '<td>' + size + '</td>'
+      + '<td>$' + num(r.notional) + '</td>'
+      + '<td>' + (r.last_price ? '$' + num(r.last_price) : '—') + '</td>'
+      + '<td>' + alerts + '</td>'
+      + '<td class="sub">' + (r.reason || '') + '</td></tr>';
+  }).join('');
 }
 
 refresh();

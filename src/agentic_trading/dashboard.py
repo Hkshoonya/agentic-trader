@@ -118,14 +118,18 @@ class DashboardState:
         """Order notionals over time, plus current RiskGuard equity state."""
         records = self.read_records()
         points: list[dict[str, Any]] = []
+        cumulative = Decimal("0")
         for record in records:
             if record.get("event") != "accepted":
                 continue
             intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+            notional = Decimal(str(record.get("notional", "0") or "0"))
+            cumulative += notional
             points.append(
                 {
                     "at": intent.get("created_at") or "",
-                    "notional": float(Decimal(str(record.get("notional", "0") or "0"))),
+                    "notional": float(notional),
+                    "cumulative": float(cumulative),
                     "side": record.get("side"),
                     "symbol": record.get("symbol"),
                     "mode": record.get("mode"),
@@ -137,6 +141,67 @@ class DashboardState:
             "baseline_equity": risk.get("baseline_equity", "0"),
             "current_equity": risk.get("current_equity", "0"),
             "daily_notional": risk.get("daily_notional", "0"),
+        }
+
+    def orders_table(self, *, limit: int = 60) -> dict[str, Any]:
+        """Every order the agent decided on today, newest first."""
+        rows: list[dict[str, Any]] = []
+        for record in self.read_records():
+            event = record.get("event")
+            if event not in ("accepted", "placed", "rejected", "place_failed"):
+                continue
+            request = (
+                record.get("order_request")
+                if isinstance(record.get("order_request"), dict)
+                else {}
+            )
+            intent = (
+                record.get("intent") if isinstance(record.get("intent"), dict) else {}
+            )
+            review = record.get("review") if isinstance(record.get("review"), dict) else {}
+            alerts = (
+                review.get("data", {}).get("order_checks")
+                if isinstance(review.get("data"), dict)
+                else review.get("order_checks")
+            )
+            quote = (
+                review.get("data", {}).get("quote_data")
+                if isinstance(review.get("data"), dict)
+                else None
+            )
+            rows.append(
+                {
+                    "at": intent.get("created_at") or record.get("at") or "",
+                    "event": event,
+                    "reason": record.get("reason", ""),
+                    "symbol": record.get("symbol") or request.get("symbol") or intent.get("symbol"),
+                    "side": record.get("side") or request.get("side") or intent.get("side"),
+                    "type": request.get("type", ""),
+                    "market_hours": request.get("market_hours", ""),
+                    "quantity": (
+                        request.get("quantity")
+                        or record.get("quantity")
+                        or intent.get("quantity")
+                    ),
+                    "dollar_amount": request.get("dollar_amount"),
+                    "limit_price": request.get("limit_price"),
+                    "notional": record.get("notional", "0"),
+                    "mode": record.get("mode", ""),
+                    "session": record.get("session", ""),
+                    "last_price": (quote or {}).get("last_trade_price"),
+                    "alerts": alerts if isinstance(alerts, dict) else {},
+                    "ref_id": request.get("ref_id"),
+                }
+            )
+        rows.reverse()
+        return {
+            "rows": rows[:limit],
+            "counts": {
+                "accepted": sum(1 for r in rows if r["event"] == "accepted"),
+                "placed": sum(1 for r in rows if r["event"] == "placed"),
+                "rejected": sum(1 for r in rows if r["event"] == "rejected"),
+                "failed": sum(1 for r in rows if r["event"] == "place_failed"),
+            },
         }
 
 
@@ -204,6 +269,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/equity":
             self._json(self.state.equity_curve())
+            return
+        if parsed.path == "/api/orders":
+            self._json(self.state.orders_table())
             return
         if parsed.path == "/api/journal":
             params = parse_qs(parsed.query)

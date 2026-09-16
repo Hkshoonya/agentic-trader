@@ -33,6 +33,21 @@ main{display:grid;gap:14px;padding:16px;grid-template-columns:repeat(12,1fr)}
 .kind{font-weight:700}
 .buy{color:var(--buy)}.sell{color:var(--sell)}.rejected{color:var(--warn)}.placed{color:var(--accent)}.shadow{color:var(--shadow)}
 canvas{width:100%;height:200px;display:block}
+.legend{display:flex;gap:16px;margin-top:8px;color:var(--muted);font-size:11px}
+.legend .dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px}
+.legend .dot.buy{background:var(--buy)}.legend .dot.sell{background:var(--sell)}
+.legend .line{display:inline-block;width:14px;height:2px;background:var(--accent);margin-right:5px;vertical-align:middle}
+.tablewrap{overflow:auto;max-height:340px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{position:sticky;top:0;background:#0f1620;color:var(--muted);text-align:left;font-weight:600;
+   text-transform:uppercase;letter-spacing:.06em;font-size:10px;padding:7px 8px;border-bottom:1px solid var(--line)}
+td{padding:6px 8px;border-bottom:1px solid #161f2b;font-variant-numeric:tabular-nums}
+tr:hover td{background:#151d28}
+.pill{padding:2px 8px;border-radius:999px;font-size:10px;font-weight:700;text-transform:uppercase}
+.pill.accepted{background:#12301f;color:var(--buy)}
+.pill.placed{background:#122a3d;color:var(--accent)}
+.pill.rejected{background:#3a2a10;color:var(--warn)}
+.pill.place_failed{background:#3a1418;color:var(--sell)}
 .flash{animation:flash .7s ease}
 @keyframes flash{from{background:#17263a}to{background:transparent}}
 @media(max-width:900px){.span3,.span4,.span5,.span7,.span8{grid-column:span 12}}
@@ -49,8 +64,16 @@ canvas{width:100%;height:200px;display:block}
 <div class="card span3"><h2>Daily notional used</h2><div class="metric" id="notional">—</div><div class="sub" id="notional-sub">—</div></div>
 <div class="card span3"><h2>Accepted / placed / rejected</h2><div class="metric" id="trades">0</div><div class="sub">today</div></div>
 <div class="card span3"><h2>Promotion streak</h2><div class="metric" id="streak">0</div><div class="sub" id="streak-sub">assessments to next stage</div><div class="gauge" style="margin-top:8px"><div id="streak-bar"></div></div></div>
-<div class="card span8"><h2>Order flow</h2><canvas id="chart"></canvas></div>
+<div class="card span8"><h2>Order flow · notional per decision &amp; cumulative</h2><canvas id="chart"></canvas>
+  <div class="legend"><span><i class="dot buy"></i>buy</span><span><i class="dot sell"></i>sell</span><span><i class="line"></i>cumulative notional</span></div></div>
 <div class="card span4"><h2>Promotion gate</h2><div id="gate"></div></div>
+<div class="card span12"><h2>Market &amp; order table</h2>
+  <div class="tablewrap"><table id="orders">
+    <thead><tr><th>time</th><th>status</th><th>symbol</th><th>side</th><th>type</th><th>session</th><th>size</th><th>notional</th><th>last</th><th>alerts</th><th>reason</th></tr></thead>
+    <tbody><tr><td colspan="11" class="sub">no decisions yet</td></tr></tbody>
+  </table></div>
+  <div class="sub" id="orders-count"></div>
+</div>
 <div class="card span7"><h2>Live execution stream</h2><div id="stream"></div></div>
 <div class="card span5"><h2>Evolution evidence</h2><div id="evolution" class="sub">no evolution run yet</div></div>
 </main>
