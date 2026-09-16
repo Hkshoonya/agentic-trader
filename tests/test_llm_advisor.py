@@ -14,6 +14,7 @@ from agentic_trading.llm.advisor import (
     parse_decision,
 )
 from agentic_trading.llm.client import FakeLlmClient, load_dotenv
+from agentic_trading.llm.client import running_under_tests
 
 
 class ParseTests(unittest.TestCase):
@@ -98,6 +99,20 @@ class EnablementTests(unittest.TestCase):
 
 
 class DotenvTests(unittest.TestCase):
+    def test_the_suite_never_loads_a_developers_dotenv(self) -> None:
+        # The runner itself must be detected, whatever command is used: the
+        # README documents `python -m unittest`, which exports no env marker.
+        self.assertTrue(running_under_tests())
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / ".env"
+            path.write_text("AGENTIC_DOTENV_LEAK=1\n", encoding="utf-8")
+            os.environ.pop("AGENTIC_DOTENV_LEAK", None)
+            self.assertEqual(load_dotenv(path), 0)
+            self.assertNotIn("AGENTIC_DOTENV_LEAK", os.environ)
+
     def test_loads_export_style_lines_without_overriding_real_env(self) -> None:
         import tempfile
         from pathlib import Path

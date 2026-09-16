@@ -262,6 +262,7 @@ class _Loop:
         self.orders_today = self._count_orders_today()
         self.consecutive_errors = 0
         self.open_order_symbols: set[str] = set()
+        self._open_orders_read_at = 0.0
         self._stopping = False
         self.stage = "shadow"
         self.last_evolution_at = 0.0
@@ -300,12 +301,40 @@ class _Loop:
         self.mode = mode
         self.guard.mode = mode
         self.apply_stage_caps()
+        self.write_live_gate_state()
+
+    def write_live_gate_state(self) -> None:
+        """Record whether the daemon is armed to submit real orders.
+
+        The console runs in its own process and cannot read the daemon's
+        environment, so the daemon publishes what it actually sees. Without
+        this the difference between "shadow because the evidence is thin" and
+        "live but disarmed" is invisible to the operator.
+        """
+        from agentic_trading import jsonio
+
+        payload = {
+            "mode": self.mode,
+            "stage": self.stage,
+            "autonomy": self.config.autonomy,
+            "allow_live": os.environ.get("AGENTIC_ALLOW_LIVE") == "1",
+            "allow_autonomy": os.environ.get("AGENTIC_ALLOW_AUTONOMY") == "1",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        path = Path(self.config.state_dir) / "live_gate.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(jsonio.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            return
+        self.journal.append({"event": "live_gate", **payload})
 
     # -- lifecycle --------------------------------------------------------
 
     def start(self) -> None:
         self.resolve_account()
         self.refresh_equity()
+        self.write_live_gate_state()
 
     def resolve_account(self) -> str:
         if self.account_number:
@@ -373,6 +402,14 @@ class _Loop:
 
     def note_open_orders(self) -> None:
         """Record open orders and remember symbols with pending entries."""
+        # Each broker read costs ~1.3s over the remote MCP gateway, and this one
+        # runs twice once crypto is in play. Pending entries only change when we
+        # place something or the broker fills it, so poll it on an interval
+        # instead of on every cycle.
+        now = time.monotonic()
+        last = self._open_orders_read_at
+        if last and (now - last) < self.config.open_order_refresh_seconds:
+            return
         try:
             # Live schema rejects state_group; filter open states client-side.
             orders: list[dict[str, Any]] = [
@@ -422,6 +459,7 @@ class _Loop:
                 }
             )
         self.open_order_symbols = symbols
+        self._open_orders_read_at = time.monotonic()
         if summary:
             self.journal.append(
                 {"event": "open_orders", "count": len(summary), "orders": summary}
@@ -620,6 +658,22 @@ class _Loop:
             return
 
         if not (decision.may_place and os.environ.get("AGENTIC_ALLOW_LIVE") == "1"):
+            if decision.may_place:
+                # The evidence gate has cleared and the stage is live: the only
+                # thing left is the operator's arming switch. Say so instead of
+                # looking identical to a normal shadow cycle.
+                self.journal.append(
+                    {
+                        "decision_id": intent.decision_id,
+                        "event": "live_gate_blocked",
+                        "reason": "AGENTIC_ALLOW_LIVE_not_set",
+                        "symbol": intent.symbol,
+                        "side": side.value,
+                        "notional": str(decision.notional),
+                        "stage": self.stage,
+                        "hint": "arm with AGENTIC_ALLOW_LIVE=1 in the daemon environment",
+                    }
+                )
             self.guard.persist(self.config.state_dir)
             return
 
@@ -792,7 +846,13 @@ def run_daemon(
         loop.start()
         last_equity_at = time.monotonic()
         journal = loop.journal
+        last_stats_at = time.monotonic()
+        cycles = 0
+        cycle_seconds = 0.0
+        fresh_total = 0
+        decisions_base = loop.orders_today
         while not loop.should_stop():
+            cycle_started = time.monotonic()
             if deadline is not None and time.monotonic() >= deadline:
                 break
 
@@ -885,6 +945,35 @@ def run_daemon(
                     loop.handle_quote(quote, session=session)
                 except Exception as exc:  # noqa: BLE001 — one bad tick is not fatal
                     loop.note_error("loop_error", exc)
+
+            # Cadence heartbeat: every broker round trip is ~1.3s over the MCP
+            # gateway, so the operator needs the measured cycle time to tell a
+            # quiet strategy apart from a slow loop.
+            cycles += 1
+            cycle_seconds += time.monotonic() - cycle_started
+            fresh_total += len(fresh)
+            stats_due = (
+                not once
+                and config.cycle_stats_seconds > 0
+                and (time.monotonic() - last_stats_at) >= config.cycle_stats_seconds
+            )
+            if stats_due:
+                journal.append(
+                    {
+                        "event": "cycle_stats",
+                        "cycles": cycles,
+                        "avg_cycle_seconds": round(cycle_seconds / max(cycles, 1), 3),
+                        "fresh_quotes": fresh_total,
+                        "decisions": loop.orders_today - decisions_base,
+                        "window_seconds": round(time.monotonic() - last_stats_at, 1),
+                        "mode": loop.mode,
+                    }
+                )
+                last_stats_at = time.monotonic()
+                cycles = 0
+                cycle_seconds = 0.0
+                fresh_total = 0
+                decisions_base = loop.orders_today
 
             if once:
                 break

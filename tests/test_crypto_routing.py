@@ -351,7 +351,51 @@ class CryptoDaemonGateTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env, clear=True):
                 _run(config, broker, stage="live")
             self.assertEqual(client.calls_named("place_crypto_order"), [])
-            self.assertTrue(any(r.get("event") == "accepted" for r in _records(config)))
+            records = _records(config)
+            self.assertTrue(any(r.get("event") == "accepted" for r in records))
+            # A proven-but-disarmed system must say so, not look like shadow.
+            blocked = [r for r in records if r.get("event") == "live_gate_blocked"]
+            self.assertEqual(len(blocked), 1, records)
+            self.assertEqual(blocked[0]["reason"], "AGENTIC_ALLOW_LIVE_not_set")
+
+    def test_live_gate_state_is_published_for_the_console(self) -> None:
+        broker, _ = self._broker()
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = load_config(_write_config(tmp, mode="live"))
+            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+                _run(config, broker, stage="live")
+            gate = json.loads((Path(config.state_dir) / "live_gate.json").read_text())
+
+        self.assertTrue(gate["allow_live"])
+        self.assertEqual(gate["mode"], "live")
+        self.assertIn("updated_at", gate)
+
+    def test_disarmed_state_is_published_when_the_switch_is_absent(self) -> None:
+        broker, _ = self._broker()
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = load_config(_write_config(tmp, mode="live"))
+            env = {k: v for k, v in os.environ.items() if k != "AGENTIC_ALLOW_LIVE"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                _run(config, broker, stage="live")
+            gate = json.loads((Path(config.state_dir) / "live_gate.json").read_text())
+
+        self.assertFalse(gate["allow_live"])
+        self.assertEqual(gate["stage"], "live")
+
+    def test_open_orders_are_read_on_an_interval_not_every_cycle(self) -> None:
+        """Each broker read is a ~1.3s round trip; don't pay it every poll."""
+        broker, client = self._broker()
+        with tempfile.TemporaryDirectory() as name:
+            config = load_config(_write_config(Path(name), mode="live"))
+            loop = _Loop(config, broker, _CryptoBuy())
+            loop.note_open_orders()
+            loop.note_open_orders()
+            loop.note_open_orders()
+            reads = len(client.calls_named("get_crypto_orders"))
+
+        self.assertEqual(reads, 1)
 
 
 if __name__ == "__main__":

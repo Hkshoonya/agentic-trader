@@ -91,6 +91,12 @@ async function refresh() {
     summary.promotion.stage === 'live' ? 'live'
       : summary.promotion.stage === 'probation' ? 'probation' : 'stage');
   setBadge('session', summary.session, summary.session_allowed ? 'stage' : 'shadow');
+  // Live mode with no arming switch looks identical to shadow in the numbers,
+  // so state it plainly: this is the difference between "not proven" and
+  // "proven but not armed".
+  setBadge('armed',
+    summary.armed ? 'LIVE ARMED' : 'disarmed',
+    summary.armed ? 'live' : 'shadow');
   document.getElementById('kill').style.display = summary.kill_switch ? '' : 'none';
   document.getElementById('generated').textContent =
     'updated ' + new Date(summary.generated_at).toLocaleTimeString()

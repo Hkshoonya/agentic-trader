@@ -116,6 +116,15 @@ def _records(config) -> list[dict]:
     ]
 
 
+def _decision_events(config) -> list[str]:
+    """Journal events minus the startup arming record."""
+    return [
+        record["event"]
+        for record in _records(config)
+        if record.get("event") != "live_gate"
+    ]
+
+
 def _run(config, broker, strategy, feed, *, session: str = "regular", **kwargs: Any):
     kwargs.setdefault("once", True)
     kwargs.setdefault("clock", lambda: FIXED_NOW)
@@ -124,6 +133,43 @@ def _run(config, broker, strategy, feed, *, session: str = "regular", **kwargs: 
 
 
 class DaemonShadowTests(unittest.TestCase):
+    def test_cycle_stats_heartbeat_reports_measured_cadence(self) -> None:
+        """Without a heartbeat a quiet strategy is indistinguishable from a
+        slow loop; the daemon journals its own measured cycle time."""
+        tools = load_tools()
+        client = FakeMcpClient(tools)
+        broker = Broker(client, tools)
+
+        class _RepeatingFeed:
+            def poll(self) -> list[dict]:
+                return [_quote()]
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = load_config(
+                _write_config(
+                    tmp,
+                    extra=["poll_seconds = 0.01", "cycle_stats_seconds = 0.01"],
+                )
+            )
+            _run(
+                config,
+                broker,
+                FixtureStrategy(),
+                _RepeatingFeed(),
+                once=False,
+                duration_seconds=0.4,
+                sleep=lambda _seconds: None,
+            )
+
+            stats = [r for r in _records(config) if r.get("event") == "cycle_stats"]
+            self.assertTrue(stats, "no cycle_stats heartbeat was written")
+            record = stats[-1]
+            self.assertGreaterEqual(record["cycles"], 1)
+            self.assertIsInstance(record["avg_cycle_seconds"], float)
+            self.assertGreater(record["fresh_quotes"], 0)
+            self.assertIn("fresh_quotes", record)
+
     def test_single_cycle_journals_and_never_places(self) -> None:
         tools = load_tools()
         client = FakeMcpClient(tools)
@@ -160,7 +206,7 @@ class DaemonShadowTests(unittest.TestCase):
                 session="weekend",
             )
             records = _records(config)
-            self.assertEqual([r["event"] for r in records], ["session_closed"])
+            self.assertEqual(_decision_events(config), ["session_closed"])
             self.assertEqual(client.calls_named("review_equity_order"), [])
             self.assertEqual(client.calls_named("place_equity_order"), [])
 
@@ -183,7 +229,7 @@ class DaemonShadowTests(unittest.TestCase):
 
             records = _records(config)
             self.assertEqual(
-                [r["event"] for r in records], ["stale_quotes_rejected"]
+                _decision_events(config), ["stale_quotes_rejected"]
             )
             self.assertEqual(client.calls_named("review_equity_order"), [])
             self.assertEqual(client.calls_named("place_equity_order"), [])
@@ -200,7 +246,7 @@ class DaemonShadowTests(unittest.TestCase):
             config = load_config(_write_config(tmp))
             _run(config, broker, FixtureStrategy(), _StubFeed([quote]))
             self.assertEqual(
-                [r["event"] for r in _records(config)], ["stale_quotes_rejected"]
+                _decision_events(config), ["stale_quotes_rejected"]
             )
 
 

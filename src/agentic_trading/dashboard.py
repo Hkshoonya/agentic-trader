@@ -107,6 +107,7 @@ class DashboardState:
         self.refresh_config()
         records = self.read_records()
         risk = _read_json(self.state_dir / "risk_guard.json") or {}
+        gate = _read_json(self.state_dir / "live_gate.json") or {}
         promotion = load_state(self.state_dir)
         evolution = _read_json(self.state_dir / "evolution.json")
         now = datetime.now(timezone.utc)
@@ -132,6 +133,11 @@ class DashboardState:
             "symbols": sorted(self.config.symbol_whitelist),
             "quote_source": self.config.quote_source,
             "autonomy": self.config.autonomy,
+            # Whether the daemon is actually armed to submit real orders (it
+            # publishes its own environment; the console cannot read it).
+            "armed": bool(gate.get("allow_live", False)),
+            "autonomy_enabled": bool(gate.get("allow_autonomy", False)),
+            "gate_updated_at": gate.get("updated_at", ""),
             "event_counts": counts,
             "promotion": {
                 "stage": promotion.stage,
@@ -266,6 +272,14 @@ def _compact(record: dict[str, Any]) -> dict[str, Any]:
         "error",
         "consecutive_errors",
         "order_request",
+        "cycles",
+        "avg_cycle_seconds",
+        "fresh_quotes",
+        "decisions",
+        "window_seconds",
+        "allow_live",
+        "allow_autonomy",
+        "stage",
     )
     compact = {key: record[key] for key in keep if key in record}
     intent = record.get("intent")

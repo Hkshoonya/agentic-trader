@@ -34,6 +34,12 @@ class Config:
     max_orders_per_day: int = 10
     max_consecutive_errors: int = 3
     max_quote_age_seconds: float = 60.0
+    # Every broker round trip costs ~1.3s over the remote MCP gateway, so the
+    # open-order read (2 calls once crypto is in play) is throttled instead of
+    # running on every poll.
+    open_order_refresh_seconds: float = 15.0
+    # Cadence heartbeat: how often the daemon journals measured cycle timing.
+    cycle_stats_seconds: float = 60.0
     # Phase 4 — self-evaluation, promotion, autonomy
     autonomy: str = "manual"  # manual | assisted | auto
     history_path: Path | None = None
@@ -66,6 +72,10 @@ class Config:
             raise ValueError("max_consecutive_errors must be >= 1")
         if self.max_quote_age_seconds <= 0:
             raise ValueError("max_quote_age_seconds must be positive")
+        if self.open_order_refresh_seconds < 0:
+            raise ValueError("open_order_refresh_seconds must be >= 0")
+        if self.cycle_stats_seconds < 0:
+            raise ValueError("cycle_stats_seconds must be >= 0")
         if self.autonomy not in ("manual", "assisted", "auto"):
             raise ValueError("autonomy must be manual|assisted|auto")
         if self.evolution_interval_minutes < 0:
@@ -113,6 +123,8 @@ def load_config(path: str | Path) -> Config:
         max_orders_per_day=int(raw.get("max_orders_per_day", 10)),
         max_consecutive_errors=int(raw.get("max_consecutive_errors", 3)),
         max_quote_age_seconds=float(raw.get("max_quote_age_seconds", 60.0)),
+        open_order_refresh_seconds=float(raw.get("open_order_refresh_seconds", 15.0)),
+        cycle_stats_seconds=float(raw.get("cycle_stats_seconds", 60.0)),
         autonomy=str(raw.get("autonomy", "manual")),
         history_path=Path(raw["history_path"]) if raw.get("history_path") else None,
         evolution_interval_minutes=int(raw.get("evolution_interval_minutes", 60)),

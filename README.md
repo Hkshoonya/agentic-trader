@@ -265,6 +265,53 @@ The console is read-only, binds to loopback, and re-reads `config/agentic.toml`
 on every request, so editing the strategy or whitelist does not require a
 restart (and cannot silently misreport what the daemon is doing).
 
+### Self-promotion vs. arming: two different switches
+
+The agent can promote itself, and that is now on (`autonomy = "auto"` plus
+`AGENTIC_ALLOW_AUTONOMY=1` in the unit). Once the evidence gate passes three
+consecutive assessments it moves itself shadow → probation → live with no
+operator action.
+
+Submitting a real order is a *separate* switch, `AGENTIC_ALLOW_LIVE=1`, and it
+is deliberately unset. So there are three states, and the console badge tells
+them apart:
+
+| State | Meaning | How it reads |
+|---|---|---|
+| `shadow` | evidence gate has not passed | `stage: shadow`, `disarmed` |
+| live + `disarmed` | gate passed, nobody armed submission | `LIVE`, `disarmed`, journal `live_gate_blocked` |
+| live + `LIVE ARMED` | gate passed and the operator armed it | `LIVE`, `LIVE ARMED`; orders are submitted |
+
+The daemon publishes what it actually sees to `state_dir/live_gate.json` (the
+console runs in its own process and cannot read the daemon's environment), and
+journals a `live_gate` record at startup and on every stage change. When a
+decision is ready and only arming is missing it journals `live_gate_blocked`
+instead of looking like a normal shadow cycle.
+
+Crypto is stricter than equities: it only submits at `stage = "live"`, never at
+`probation`, because it has no closing bell to flatten into.
+
+### How fast this can actually go
+
+Measured against the live gateway on 2026-09-16 (read-only calls):
+
+| Operation | Measured |
+|---|---|
+| one MCP round trip (quotes, account, review) | ~1.3 s |
+| one full loop cycle (quote poll + order read) | 7.9 s of work, ~10 s with the default poll |
+| LLM advisor decision (DeepSeek `deepseek-flash`) | 3.7 s |
+| full entry path once a signal fires | ~6-8 s |
+
+Every decision is one more round trip, so this is a seconds-scale system, not a
+high-frequency one: there is no colocated execution, no order-book feed, and no
+way to beat a 1.3 s API round trip. What it can do is decide continuously
+(`cycle_stats` heartbeat in the journal reports the measured cadence), trade the
+24/7 crypto book around the clock, and size up as equity grows.
+
+Levers, in order of effect: `open_order_refresh_seconds` (each poll skipped is
+two round trips), `poll_seconds`, and how often the LLM advisor sits in the
+decision path.
+
 ### Known constraints and unverified areas
 
 - **Fractional shares only trade in regular hours as market orders.** At $50,

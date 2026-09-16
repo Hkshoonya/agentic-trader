@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Callable, Optional, Protocol, Union
 
@@ -11,6 +12,20 @@ import httpx
 DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
 DEFAULT_FAKE_RESPONSE = '{"intents":[]}'
+
+
+def running_under_tests() -> bool:
+    """True when this process is a test run (pytest or `python -m unittest`).
+
+    Two runners, two signals: pytest exports ``PYTEST_CURRENT_TEST``, while
+    ``python -m unittest`` — the command the README documents — runs
+    ``unittest.__main__`` as ``__main__``. Anything else (the CLI, the daemon)
+    is a real run and may read ``.env``.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    return getattr(spec, "name", "") == "unittest.__main__"
 
 
 def load_dotenv(
@@ -26,8 +41,7 @@ def load_dotenv(
     depend on whatever model happens to be configured that day.
     """
     if not force and (
-        os.environ.get("PYTEST_CURRENT_TEST")
-        or os.environ.get("AGENTIC_SKIP_DOTENV") == "1"
+        running_under_tests() or os.environ.get("AGENTIC_SKIP_DOTENV") == "1"
     ):
         return 0
     source = Path(path)

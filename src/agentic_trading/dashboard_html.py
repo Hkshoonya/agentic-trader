@@ -59,6 +59,7 @@ tr:hover td{background:#151d28}
 <span id="mode" class="badge shadow">shadow</span>
 <span id="stage" class="badge stage">stage: shadow</span>
 <span id="session" class="badge">session</span>
+<span id="armed" class="badge">arming…</span>
 <span id="kill" class="badge kill" style="display:none">kill switch</span>
 <span class="sub" id="generated"></span></header>
 <main>
