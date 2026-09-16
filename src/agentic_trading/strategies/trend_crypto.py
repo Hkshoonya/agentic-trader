@@ -101,7 +101,16 @@ class TrendCryptoStrategy:
 
     def on_quote(self, quote: dict) -> list[OrderIntent]:
         """Rebalance once per day; ignore the intraday quote stream."""
-        symbol = str(quote.get("symbol", "")).upper()
+
+        def broker_form(normalized: str) -> str:
+            """BTCUSD (bar-file key) -> BTC-USD (broker symbol)."""
+            for known in self.symbols:
+                if known.replace("-", "").upper() == normalized.upper():
+                    return known.upper()
+            return normalized.upper()
+
+        quote_symbol = str(quote.get("symbol", "")).upper()
+        symbol = quote_symbol.replace("-", "")  # history is keyed without dashes
         if symbol not in self.history:
             return []
         observed = quote.get("observed_at")
@@ -130,7 +139,7 @@ class TrendCryptoStrategy:
             intents.append(
                 OrderIntent(
                     decision_id=new_decision_id(),
-                    symbol=exiting,
+                    symbol=broker_form(exiting),
                     side=Side.SELL,
                     quantity=quantity,
                     ref_price=Decimal(str(price)),
@@ -152,7 +161,7 @@ class TrendCryptoStrategy:
             intents.append(
                 OrderIntent(
                     decision_id=new_decision_id(),
-                    symbol=new_symbol,
+                    symbol=broker_form(new_symbol),
                     side=Side.BUY,
                     quantity=Decimal("1"),  # runtime sizes it to the cap
                     ref_price=Decimal(str(price)),
