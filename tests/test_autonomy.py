@@ -122,7 +122,15 @@ class AutonomyTests(unittest.TestCase):
             evaluated=100,
             seed=1,
         )
-        with mock.patch.dict(os.environ, env or {}, clear=False), mock.patch(
+        # Drop any ambient consent var: a test that omits it must genuinely
+        # run without it, whatever the developer's shell has exported.
+        base_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "AGENTIC_ALLOW_AUTONOMY"
+        }
+        base_env.update(env or {})
+        with mock.patch.dict(os.environ, base_env, clear=True), mock.patch(
             "agentic_trading.selfimprove.run_evolution", return_value=qualifying
         ):
             run_daemon(
@@ -174,16 +182,7 @@ class AutonomyTests(unittest.TestCase):
             client = FakeMcpClient(TOOLS, equity="500")
             broker = Broker(client, TOOLS)
 
-            env = {k: v for k, v in os.environ.items() if k != "AGENTIC_ALLOW_AUTONOMY"}
-            with mock.patch.dict(os.environ, env, clear=True):
-                run_daemon(
-                    config,
-                    broker=broker,
-                    strategy=FixtureStrategy(),
-                    feed=_EmptyFeed(),
-                    once=True,
-                    session_clock=lambda: "regular",
-                )
+            self._run_once(config, broker)
 
             events = [record.get("event") for record in _journal(config)]
             self.assertIn("promotion", events)
