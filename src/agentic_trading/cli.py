@@ -526,15 +526,53 @@ def cmd_evolve(
     population: Optional[int] = None,
     generations: Optional[int] = None,
     seed: int = 42,
+    symbols: Optional[str] = None,
+    interval: str = "5minute",
 ) -> int:
     """Run an evolution cycle, assess it, and record the verdict."""
     from agentic_trading import selfimprove
 
     config = load_config(config_path)
     try:
-        assessment, state, events = selfimprove.evaluate_and_record(
-            config, population=population, generations=generations, seed=seed
-        )
+        if symbols:
+            from agentic_trading.multisymbol import evolve_multi, load_symbol_bars
+            from agentic_trading.promotion import assess, load_state
+            from agentic_trading.promotion import policy_from_config, save_state
+            from agentic_trading.promotion import apply_assessment
+
+            wanted = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+            bar_dir = (
+                Path(config.history_path).parent
+                if config.history_path
+                else Path("data/bars")
+            )
+            symbol_bars = load_symbol_bars(bar_dir, wanted, interval=interval)
+            if not symbol_bars:
+                print(
+                    f"no bar files found in {bar_dir} for {wanted} "
+                    f"(interval={interval})",
+                    file=sys.stderr,
+                )
+                return 1
+            result = evolve_multi(
+                symbol_bars,
+                population=population or config.evolution_population,
+                generations=generations or config.evolution_generations,
+                seed=seed,
+                min_oos_trades=config.min_oos_trades,
+            )
+            selfimprove.write_evolution(result, config.state_dir)
+            assessment = assess(result, policy_from_config(config))
+            state = load_state(config.state_dir)
+            events = apply_assessment(
+                state, assessment, policy_from_config(config)
+            )
+            save_state(config.state_dir, state)
+            print(f"symbols pooled: {', '.join(sorted(symbol_bars))}")
+        else:
+            assessment, state, events = selfimprove.evaluate_and_record(
+                config, population=population, generations=generations, seed=seed
+            )
     except Exception as exc:  # noqa: BLE001 — operator-facing diagnostics
         print(f"evolve failed: {exc}", file=sys.stderr)
         return 1
@@ -726,6 +764,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     evolve_p.add_argument("--population", type=int, default=None)
     evolve_p.add_argument("--generations", type=int, default=None)
     evolve_p.add_argument("--seed", type=int, default=42)
+    evolve_p.add_argument(
+        "--symbols",
+        default=None,
+        help="Comma-separated symbols to pool, e.g. SPY,QQQ,IWM "
+        "(loads data/bars/<SYMBOL>_<interval>.jsonl)",
+    )
+    evolve_p.add_argument("--interval", default="5minute", help="Bar file interval tag")
 
     promote_p = sub.add_parser(
         "promote", help="Operator override: set promotion stage"
@@ -775,6 +820,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             population=args.population,
             generations=args.generations,
             seed=args.seed,
+            symbols=args.symbols,
+            interval=args.interval,
         )
     if args.command == "promote":
         return cmd_promote(args.config, args.stage)
