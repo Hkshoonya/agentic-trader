@@ -55,7 +55,10 @@ class AdvisorDecision:
 
 
 def advisor_enabled() -> bool:
-    """Opt-in per session: AGENTIC_LLM_ADVISOR=1."""
+    """Opt-in per session: AGENTIC_LLM_ADVISOR=1 (shell export or .env)."""
+    from agentic_trading.llm.client import load_dotenv
+
+    load_dotenv()  # so a .env-only setting still enables the advisor
     return os.environ.get("AGENTIC_LLM_ADVISOR") == "1"
 
 
