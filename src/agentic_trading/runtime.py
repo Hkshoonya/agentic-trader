@@ -158,8 +158,13 @@ def build_order_request(
             "cannot be converted safely"
         )
 
-    market_hours = market_hours_argument(session)
     side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
+    # Crypto trades 24/7 and is fractional by nature, so the equity rule that
+    # fractional orders need regular_hours does not apply; forcing regular_hours
+    # keeps the shared validator happy and the crypto args omit it anyway.
+    symbol = intent.symbol.upper()
+    is_crypto = "-" in symbol or symbol.endswith("USD")
+    market_hours = "regular_hours" if is_crypto else market_hours_argument(session)
     fractional = intent.quantity != intent.quantity.to_integral_value()
 
     if fractional and market_hours != "regular_hours":
@@ -477,9 +482,16 @@ class _Loop:
             return
 
         try:
+            symbol = intent.symbol.upper()
+            is_crypto = "-" in symbol or symbol.endswith("USD")
+            account = (
+                self.broker.resolve_rhs_account_number()
+                if is_crypto
+                else self.resolve_account()
+            )
             request = build_order_request(
                 intent,
-                account_number=self.resolve_account(),
+                account_number=account,
                 config=self.config,
                 session=session,
             )

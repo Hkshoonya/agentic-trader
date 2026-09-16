@@ -104,6 +104,24 @@ class Broker:
         self._account_number = allowed[0]
         return self._account_number
 
+    def resolve_rhs_account_number(self) -> str:
+        """Numeric account id the crypto tools require.
+
+        ``get_accounts`` returns both an alphanumeric ``account_number`` (used by
+        every equity tool) and a numeric ``rhs_account_number`` (used by every
+        crypto tool). They are not interchangeable.
+        """
+        for account in self.list_accounts():
+            if (
+                account.get("agentic_allowed") is True
+                and account.get("rhs_account_number")
+            ):
+                return str(account["rhs_account_number"])
+        raise BrokerPayloadError(
+            "no agentic_allowed account exposes rhs_account_number; "
+            "crypto tools cannot be called safely"
+        )
+
     def get_portfolio(self, account_number: str | None = None) -> dict[str, Any]:
         account = account_number or self.resolve_account_number()
         return self._call("get_portfolio", {"account_number": account})

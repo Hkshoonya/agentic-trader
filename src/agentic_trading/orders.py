@@ -187,14 +187,24 @@ class EquityOrderRequest:
         ``ref_id`` is an idempotency key for *placement only*; the live review
         tool rejects it as an unexpected property.
         """
+        # Crypto is a separate namespace: it wants the numeric rhs account id and
+        # rejects market_hours outright. Detected inline (not imported) because
+        # marketdata imports broker, which imports orders.
+        symbol = self.symbol.upper()
+        crypto = "-" in symbol or symbol.endswith("USD")
         args: dict[str, Any] = {
-            "account_number": self.account_number,
+            ("rhs_account_number" if crypto else "account_number"): self.account_number,
             "symbol": self.symbol,
             "side": self.side.value,
             "type": self.order_type,
-            "market_hours": self.market_hours,
-            "time_in_force": self.time_in_force,
         }
+        if not crypto:
+            args["time_in_force"] = self.time_in_force
+            args["market_hours"] = self.market_hours
+        elif self.order_type != "market":
+            # Crypto market orders reject gfd ("use gtc or omit"); resting
+            # crypto orders still carry a time in force.
+            args["time_in_force"] = self.time_in_force
         if self.quantity is not None:
             args["quantity"] = _fmt(self.quantity)
         if self.dollar_amount is not None:
