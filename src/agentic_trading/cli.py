@@ -528,6 +528,7 @@ def cmd_evolve(
     seed: int = 42,
     symbols: Optional[str] = None,
     interval: str = "5minute",
+    families: Optional[str] = None,
 ) -> int:
     """Run an evolution cycle, assess it, and record the verdict."""
     from agentic_trading import selfimprove
@@ -535,17 +536,19 @@ def cmd_evolve(
     config = load_config(config_path)
     try:
         if symbols:
-            from agentic_trading.multisymbol import evolve_multi, load_symbol_bars
+            from agentic_trading.families import evolve_with_families, families_for
+            from agentic_trading.multisymbol import load_symbol_bars
             from agentic_trading.promotion import assess, load_state
             from agentic_trading.promotion import policy_from_config, save_state
             from agentic_trading.promotion import apply_assessment
 
             wanted = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-            bar_dir = (
-                Path(config.history_path).parent
+            history = (
+                Path(config.history_path)
                 if config.history_path
                 else Path("data/bars")
             )
+            bar_dir = history if history.is_dir() else history.parent
             symbol_bars = load_symbol_bars(bar_dir, wanted, interval=interval)
             if not symbol_bars:
                 print(
@@ -554,8 +557,22 @@ def cmd_evolve(
                     file=sys.stderr,
                 )
                 return 1
-            result = evolve_multi(
+            allowed = families_for(interval)
+            requested = (
+                tuple(f.strip() for f in families.split(",") if f.strip())
+                if families
+                else allowed
+            )
+            usable = tuple(name for name in requested if name in allowed)
+            skipped = [name for name in requested if name not in allowed]
+            if skipped:
+                print(
+                    f"skipping intraday-only families for interval={interval}: {skipped}",
+                    file=sys.stderr,
+                )
+            result = evolve_with_families(
                 symbol_bars,
+                families=usable or (allowed[0],),
                 population=population or config.evolution_population,
                 generations=generations or config.evolution_generations,
                 seed=seed,
@@ -771,6 +788,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "(loads data/bars/<SYMBOL>_<interval>.jsonl)",
     )
     evolve_p.add_argument("--interval", default="5minute", help="Bar file interval tag")
+    evolve_p.add_argument(
+        "--families",
+        default=None,
+        help="Comma-separated families to evaluate: base,vol_regime,session_effects "
+        "(default: all that suit the interval)",
+    )
 
     promote_p = sub.add_parser(
         "promote", help="Operator override: set promotion stage"
@@ -822,6 +845,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             seed=args.seed,
             symbols=args.symbols,
             interval=args.interval,
+            families=args.families,
         )
     if args.command == "promote":
         return cmd_promote(args.config, args.stage)
