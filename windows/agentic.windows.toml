@@ -1,0 +1,68 @@
+# Windows build template. The launcher copies this to
+# <workspace>/config/agentic.toml on first run; the workspace is the working
+# directory for every child process, so these relative paths stay inside it.
+#
+# Two switches are intentionally NOT in this file, because they are session
+# environment and not policy: AGENTIC_ALLOW_LIVE (submit real orders) and
+# AGENTIC_ALLOW_AUTONOMY (let the agent promote itself). The launcher sets them
+# per session, both off until you turn them on.
+
+mode = "shadow"  # shadow | live — the state file can raise this, never lower it
+strategy = "trend_crypto"
+quote_source = "mcp"
+session_policy = "any"  # the book runs 24/7 on the crypto sleeve
+max_session_policy = "any"
+order_type = "market"
+poll_seconds = 2.0
+open_order_refresh_seconds = 15.0
+max_orders_per_day = 10
+max_consecutive_errors = 3
+max_quote_age_seconds = 60.0
+
+# Ten liquid equities plus the six crypto pairs the strategy is graded on.
+symbol_whitelist = [
+  "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
+  "BTC-USD", "ETH-USD", "SOL-USD", "LTC-USD", "LINK-USD", "BCH-USD",
+]
+
+# Per-order ceiling comes from the walk-forward evidence, not from appetite:
+# 1% per order is the largest flat size whose marked-to-market drawdown stays
+# inside the 15% gate on 11 years of this universe.
+max_order_pct = "0.01"
+daily_notional_pct = "0.04"
+daily_loss_pct = "0.03"
+max_open_positions = 4
+max_correlated_positions = 2
+correlation_threshold = 0.7
+correlation_lookback_days = 120
+
+equity_refresh_ticks = 30
+equity_refresh_seconds = 60
+timezone = "local"
+
+quotes_path = "data/spy_quotes.jsonl"
+journal_dir = "data/journal"
+state_dir = "data/state"
+history_path = "data/bars"
+tools_snapshot_path = "data/tools_snapshot.json"
+token_path = "data/tokens.json"
+mcp_url = "https://agent.robinhood.com/mcp/trading"
+
+# Bars refresh daily from the broker (equities) and Coinbase (crypto).
+history_refresh_hours = 24
+selfcheck_minutes = 30
+
+# Self-evaluation. autonomy = "auto" still requires AGENTIC_ALLOW_AUTONOMY=1 in
+# the session: policy says the agent may promote itself, the switch says whether
+# this session allows it.
+autonomy = "auto"
+evolution_interval_minutes = 60
+evolution_population = 24
+evolution_generations = 6
+promotion_cycles_required = 3
+min_oos_trades = 30
+
+# Rebuild the walk-forward report when it is older than this many days. The
+# promotion gate refuses a stale report, so this is what keeps the agent able to
+# earn its own promotion without anyone typing a command.
+evidence_refresh_days = 7.0

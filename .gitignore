@@ -11,6 +11,10 @@ data/tools_snapshot*.json
 data/journal/
 data/state/
 data/bars/
+# ...except the daily bars, which the Windows build ships so the packaged app
+# works on a fresh machine with no first-run download. Prices only, no secrets.
+!data/bars/
+!data/bars/*.jsonl
 *.egg-info/
 dist/
 build/
