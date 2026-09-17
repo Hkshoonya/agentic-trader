@@ -210,6 +210,69 @@ class CryptoOrderRoutingTests(unittest.TestCase):
 
 
 class CryptoDaemonGateTests(unittest.TestCase):
+    def test_a_confident_chop_regime_blocks_the_entry(self) -> None:
+        """The regime gate may refuse an entry; it may never create one."""
+        from agentic_trading.llm.regime import RegimeView
+
+        broker, client = self._broker()
+        with tempfile.TemporaryDirectory() as name:
+            config = load_config(_write_config(Path(name)))
+            loop = _Loop(config, broker, _CryptoBuy())
+            loop.start()
+
+            class _Gate:
+                model = "stub"
+
+                def blocks(self, symbol: str) -> RegimeView | None:
+                    return RegimeView(
+                        symbol=symbol,
+                        regime="chop",
+                        confidence=0.8,
+                        reason="range-bound",
+                        at="2026-09-16T14:00:00+00:00",
+                    )
+
+            loop.regime_gate = _Gate()
+            loop.process_intent(_CryptoBuy().on_quote(_crypto_quote())[0])
+
+            records = _records(config)
+
+        rejected = [r for r in records if r.get("event") == "rejected"]
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("regime_block", rejected[0]["reason"])
+        self.assertIn("chop", rejected[0]["reason"])
+        self.assertEqual(client.calls_named("preview_crypto_order"), [])
+
+    def test_regime_events_are_journaled_from_the_worker(self) -> None:
+        from agentic_trading.llm.regime import RegimeView
+
+        broker, _ = self._broker()
+        with tempfile.TemporaryDirectory() as name:
+            config = load_config(_write_config(Path(name)))
+            loop = _Loop(config, broker, _CryptoBuy())
+
+            class _Gate:
+                model = "stub"
+
+                def refresh_due(self, symbols, features_for, *, max_per_pass=2):
+                    return [
+                        RegimeView(
+                            symbol="BTC-USD",
+                            regime="trend_up",
+                            confidence=0.7,
+                            reason="higher highs",
+                            at="2026-09-16T14:00:00+00:00",
+                        )
+                    ]
+
+            loop.regime_gate = _Gate()
+            events = loop.refresh_regimes()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "regime")
+        self.assertEqual(events[0]["symbol"], "BTC-USD")
+        self.assertFalse(events[0]["blocks_entries"])
+
     def test_decisions_record_the_confidence_they_were_taken_under(self) -> None:
         """The order table has to explain why a row was bought or rejected."""
         from agentic_trading.llm.advisor import AdvisorDecision

@@ -358,6 +358,50 @@ look real") and are deliberately not averaged. A row rejected mechanically —
 `max_open_positions`, `over_daily_notional`, `kill_switch` — still shows both, so
 the table explains *why* it was refused, not just that it was.
 
+### What the LLM is actually allowed to do
+
+Every model capability here is bounded to **reducing** risk. A model cannot be
+backtested the way a genome can, so it never creates a trade, never sizes one,
+never extends a hold, and never touches RiskGuard. Within that line it now does
+three jobs:
+
+| job | direction | where it runs |
+|---|---|---|
+| entry veto (`advisor`) | may refuse an entry | order path, one call per entry |
+| regime gate (`regime`) | may block entries in chop/panic | off-path worker, cached 15 min |
+| hold opinion | recorded only, never acted on | order path, same call as the veto |
+
+**Grounding.** The advisor used to be shown a price and a quantity, which makes
+a veto a coin flip dressed as judgment. Both prompts now carry locally computed
+tape features — `return_1bar/5bar/20bar_pct`, `realized_vol_per_bar_pct`,
+`trend_slope_20bar_pct`, `below_recent_high_pct`, `range_position_0low_1high`,
+and the live `spread_bps` — from the same bars the backtests use. Its reasons
+changed from "no trap signals, small size" to "counter-trend long bounce within
+a 20-bar downtrend (slope -4.55%, 20-bar return -9.80%); high overnight
+volatility raises trap risk", which is the difference between a vibe and a
+judgment.
+
+**The regime gate** classifies each whitelisted symbol as `trend_up`,
+`trend_down`, `chop` or `panic`. Only `chop`/`panic` at ≥0.60 confidence do
+anything, and all they do is refuse entries (`regime_block` in the journal, and
+the row shows up in the order table). A `trend_up` never creates a trade: the
+mechanical strategy still has to signal, and RiskGuard still has to allow.
+
+Two properties make it safe to leave running:
+
+- **Never on the critical path.** Classifications are cached per symbol and
+  refreshed by a background worker (`regime_refresh_seconds`, default 180s, two
+  symbols per pass). An entry reads the cache and never waits on a model call.
+- **Failure means "no opinion".** A missing key, a timeout, or unparseable JSON
+  allows trading exactly as before, and journals `regime_failed`. The gate can
+  only ever subtract.
+
+Retired on purpose, and still refused: letting the model search for strategies
+(that is what the evolution engine and the search-corrected significance bar are
+for — a model generating hypotheses would silently multiply the comparisons and
+manufacture false positives), and letting it extend a hold past a mechanical
+exit.
+
 ### Known constraints and unverified areas
 
 - **Fractional shares only trade in regular hours as market orders.** At $50,

@@ -62,6 +62,23 @@ def advisor_enabled() -> bool:
     return os.environ.get("AGENTIC_LLM_ADVISOR") == "1"
 
 
+def build_regime_gate(
+    client: Optional[LlmClient] = None,
+    *,
+    model: str = "",
+) -> Optional["RegimeGate"]:
+    """Regime gate on the same opt-in as the advisor; ``None`` when disabled."""
+    from agentic_trading.llm.regime import RegimeGate
+    from agentic_trading.llm.client import FakeLlmClient
+
+    if not advisor_enabled():
+        return None
+    resolved = client if client is not None else build_llm_client()
+    if isinstance(resolved, FakeLlmClient):
+        return None
+    return RegimeGate(resolved, model=model or getattr(resolved, "model", ""))
+
+
 class LlmAdvisor:
     def __init__(self, client: LlmClient, *, model: str = "") -> None:
         self.client = client
@@ -86,8 +103,15 @@ class LlmAdvisor:
             f"proposed={side} quantity={quantity} at {ref_price}",
             f"strategy_reason={reason}",
         ]
+        features = (context or {}).get("market")
         for key, value in (context or {}).items():
+            if key == "market":
+                continue
             prompt_lines.append(f"{key}={value}")
+        # Ground the judgment in the tape rather than a bare price.
+        from agentic_trading.llm.market import context_lines
+
+        prompt_lines.extend(context_lines(features))
         prompt_lines.append("Respond with JSON only.")
         try:
             raw = self.client.complete(SYSTEM_PROMPT, "\n".join(prompt_lines))

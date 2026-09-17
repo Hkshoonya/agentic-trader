@@ -119,6 +119,22 @@ class DashboardState:
             event = str(record.get("event", "unknown"))
             counts[event] = counts.get(event, 0) + 1
 
+        # Latest regime classification per symbol, as the LLM gate sees it.
+        regimes: dict[str, dict[str, Any]] = {}
+        for record in records:
+            if record.get("event") != "regime":
+                continue
+            symbol = str(record.get("symbol") or "")
+            if symbol:
+                regimes[symbol] = {
+                    "regime": record.get("regime", ""),
+                    "confidence": record.get("confidence"),
+                    "reason": record.get("reason", ""),
+                    "blocks_entries": record.get("blocks_entries"),
+                    "at": record.get("at", ""),
+                    "model": record.get("model", ""),
+                }
+
         # The agent may widen trading hours within the operator's bound, so the
         # console reports the policy actually in force, not the configured one.
         effective_policy = str(limits.get("session_policy") or "") or (
@@ -147,6 +163,7 @@ class DashboardState:
             "autonomy_enabled": bool(gate.get("allow_autonomy", False)),
             "gate_updated_at": gate.get("updated_at", ""),
             "event_counts": counts,
+            "regimes": regimes,
             "risk": {
                 "max_order_pct": limits.get("max_order_pct", str(self.config.max_order_pct)),
                 "daily_notional_pct": limits.get(

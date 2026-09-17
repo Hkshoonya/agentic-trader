@@ -269,12 +269,18 @@ class _Loop:
         self.evidence_confidence: float = 0.0
         self.last_evolution_at = 0.0
         self.advisor = None
+        self.regime_gate = None
         try:
-            from agentic_trading.llm.advisor import build_advisor
+            from agentic_trading.llm.advisor import build_advisor, build_regime_gate
 
             self.advisor = build_advisor()
+            # Same opt-in as the advisor: the console of LLM features is one
+            # switch, and every part of it is bounded to reducing risk.
+            self.regime_gate = build_regime_gate()
         except Exception:  # noqa: BLE001 — advisory layer must never block startup
             self.advisor = None
+            self.regime_gate = None
+        self._feature_cache: dict[str, tuple[float, Any]] = {}
         self.apply_stage_caps()
 
     def apply_stage_caps(self) -> None:
@@ -531,10 +537,24 @@ class _Loop:
             self._journal_rejected(intent, "open_order_pending", Decimal("0"))
             return
 
+        # Regime gate: a bad regime may refuse entries, never create them. It
+        # reads a cached classification, so this costs nothing on the order path.
+        if is_entry and self.regime_gate is not None:
+            blocked = self.regime_gate.blocks(intent.symbol)
+            if blocked is not None:
+                self._journal_rejected(
+                    intent,
+                    f"regime_block: {blocked.regime} "
+                    f"c={blocked.confidence:.2f}"[:120],
+                    intent.resolved_notional(),
+                )
+                return
+
         # Advisory veto: the model may refuse an entry (reduce risk) and its
         # hold opinion is recorded, but it never overrides a mechanical exit.
         advisor_payload: Optional[dict[str, Any]] = None
         if self.advisor is not None:
+            features = self.market_features(intent.symbol)
             decision = self.advisor.review_entry(
                 symbol=intent.symbol,
                 side=side.value,
@@ -546,6 +566,7 @@ class _Loop:
                     "equity": str(self.guard.current_equity),
                     "stage": self.stage,
                     "role": "entry" if is_entry else "exit",
+                    "market": features,
                 },
             )
             if decision is not None:
@@ -810,6 +831,45 @@ class _Loop:
             payload["advisor_model"] = advisor.get("model")
         return payload
 
+    def market_features(self, symbol: str, quote: Optional[dict[str, Any]] = None) -> Any:
+        """Bars-derived features, memoised briefly: the tape does not change
+        between two intents a second apart, and re-reading a symbol's file for
+        every intent is pure overhead."""
+        now = time.monotonic()
+        cached = self._feature_cache.get(symbol)
+        if cached is not None and (now - cached[0]) < 60.0:
+            return cached[1]
+        from agentic_trading.llm.market import features_for
+
+        features = features_for(
+            symbol, history_path=self.config.history_path, quote=quote
+        )
+        self._feature_cache[symbol] = (now, features)
+        return features
+
+    def refresh_regimes(self, *, max_per_pass: int = 2) -> list[dict[str, Any]]:
+        """Refresh stale regime classifications. Worker thread only.
+
+        Each refresh is a model call (~4s), so the caller runs this off the order
+        path and only a couple of symbols are refreshed per pass: the gate is a
+        filter, and a filter that is a few minutes stale is still a filter.
+        """
+        if self.regime_gate is None:
+            return []
+        refreshed = self.regime_gate.refresh_due(
+            [s.upper() for s in self.config.symbol_whitelist],
+            lambda symbol: self.market_features(symbol),
+            max_per_pass=max_per_pass,
+        )
+        return [
+            {
+                "event": "regime",
+                "model": getattr(self.regime_gate, "model", ""),
+                **view.to_dict(),
+            }
+            for view in refreshed
+        ]
+
     def _count_orders_today(self) -> int:
         count = 0
         for record in self.journal.iter_today():
@@ -904,6 +964,7 @@ def run_daemon(
         last_equity_at = time.monotonic()
         journal = loop.journal
         last_stats_at = time.monotonic()
+        last_regime_at = 0.0
         cycles = 0
         cycle_seconds = 0.0
         fresh_total = 0
@@ -967,6 +1028,33 @@ def run_daemon(
             if (now - last_equity_at) >= config.equity_refresh_seconds:
                 loop.refresh_equity()
                 last_equity_at = now
+
+            # Regime views expire; refresh a batch on a worker so the order path
+            # only ever reads a cached classification.
+            regime_worker = getattr(loop, "regime_thread", None)
+            if (
+                loop.regime_gate is not None
+                and config.regime_refresh_seconds > 0
+                and (now - last_regime_at) >= config.regime_refresh_seconds
+                and not (regime_worker and regime_worker.is_alive())
+            ):
+                last_regime_at = now
+
+                def _refresh_regimes(_loop: _Loop = loop) -> None:
+                    try:
+                        for event in _loop.refresh_regimes():
+                            _loop.journal.append(event)
+                    except Exception as exc:  # noqa: BLE001 — never kill the loop
+                        _loop.journal.append(
+                            {"event": "regime_failed", "error": str(exc)[:200]}
+                        )
+
+                loop.regime_thread = threading.Thread(  # type: ignore[attr-defined]
+                    target=_refresh_regimes,
+                    daemon=True,
+                    name="regime-refresh",
+                )
+                loop.regime_thread.start()
             loop.note_open_orders()
 
             try:

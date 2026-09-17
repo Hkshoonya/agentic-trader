@@ -165,6 +165,21 @@ async function refresh() {
       + '<div class="row"><span>champion</span><b>' + JSON.stringify(e.champion).slice(0, 90) + '</b></div>'
       + '<div class="sub" style="margin-top:8px">ran ' + (e.run_at || 'never') + '</div>';
   }
+  // The model's read on each symbol's regime, and whether it is holding
+  // entries back. A "+trend" never creates a trade; only chop/panic stop one.
+  const regimes = summary.regimes || {};
+  const symbols = Object.keys(regimes);
+  if (symbols.length) {
+    const rows = symbols.sort().map(sym => {
+      const r = regimes[sym] || {};
+      const blocked = r.blocks_entries ? 'sell' : 'buy';
+      return '<div class="row"><span>' + sym + '</span><b class="' + blocked + '">'
+        + (r.regime || '—') + ' ' + num(r.confidence, 2)
+        + (r.blocks_entries ? ' · blocking' : '') + '</b></div>';
+    }).join('');
+    document.getElementById('regimes').innerHTML =
+      '<h2 style="margin-top:10px">LLM regime read</h2>' + rows;
+  }
 
   feed.records.forEach(renderEvent);
   offset = feed.offset;
