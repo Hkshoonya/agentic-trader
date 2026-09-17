@@ -286,7 +286,9 @@ class _Loop:
             # here, and an alert must never be able to block one.
             self.journal = NotifyingJournal(self.journal, notifier)
         self.guard = build_guard(config, self.mode)
-        self.shadow_book = ShadowBook.from_journal(self.journal)
+        # A month-long window: positions and realized P&L are meant to
+        # accumulate, and only the day-scoped counters belong to one file.
+        self.shadow_book = ShadowBook.from_journal(self.journal, days=30)
         self.guard.attach_shadow_book(self.shadow_book)
         self.guard.load(config.state_dir, self.journal)
         if self.mode == "shadow":
@@ -1199,7 +1201,12 @@ def run_daemon(
     deadline = (
         time.monotonic() + duration_seconds if duration_seconds is not None else None
     )
-    last_heartbeat = 0.0
+    # "Due now", not "not since boot": initialising these to 0 made every
+    # interval-gated event wait for the machine's monotonic clock to exceed the
+    # interval, so on a freshly booted host the operator got no session-closed
+    # notice and no back-check for up to 15 minutes.
+    last_heartbeat = time.monotonic() - _HEARTBEAT_SECONDS
+    last_selfcheck_due = time.monotonic() - max(0.0, config.selfcheck_minutes * 60)
     last_equity_at = 0.0
     try:
         loop.start()
@@ -1207,7 +1214,7 @@ def run_daemon(
         journal = loop.journal
         last_stats_at = time.monotonic()
         last_regime_at = 0.0
-        last_selfcheck_at = 0.0
+        last_selfcheck_at = last_selfcheck_due
         kill_state = loop.guard.kill_switch
         workers: list[threading.Thread] = []
         cycles = 0

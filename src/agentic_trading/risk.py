@@ -71,16 +71,33 @@ class GuardDecision:
 
 @dataclass
 class ShadowBook:
-    """Local shadow positions. ``realized_pnl`` is day-scoped when used with RiskGuard."""
+    """Local shadow positions.
+
+    ``realized_pnl`` is **day-scoped** — RiskGuard's daily-loss kill switch needs
+    today's number, not the lifetime one. ``realized_total`` is the running
+    figure that survives midnight, so the forward record the strategy is being
+    judged on is not thrown away every night.
+    """
 
     held: dict[str, Decimal] = field(default_factory=dict)
     realized_pnl: Decimal = Decimal("0")
+    realized_total: Decimal = Decimal("0")
     _avg_cost: dict[str, Decimal] = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_journal(cls, journal: Any) -> "ShadowBook":
+    def from_journal(cls, journal: Any, *, days: int = 1) -> "ShadowBook":
+        """Rebuild from the journal. ``days > 1`` makes positions persist.
+
+        Replaying only today is what made holdings and P&L vanish at midnight
+        and on every restart.
+        """
         book = cls()
-        for record in journal.iter_today():
+        iterate = (
+            journal.iter_recent(days=days)
+            if days > 1 and hasattr(journal, "iter_recent")
+            else journal.iter_today()
+        )
+        for record in iterate:
             if not _is_accepted_record(record):
                 continue
             intent = _intent_from_record(record, require_qty_price=True)
@@ -114,7 +131,9 @@ class ShadowBook:
                     f"ShadowBook oversell: qty {qty} > held {prev_qty} for {symbol}"
                 )
             avg = self._avg_cost.get(symbol, Decimal("0"))
-            self.realized_pnl += (price - avg) * qty
+            realized = (price - avg) * qty
+            self.realized_pnl += realized
+            self.realized_total += realized
             remaining = prev_qty - qty
             if remaining <= 0:
                 self.held.pop(symbol, None)
@@ -174,6 +193,12 @@ class RiskGuard:
     @property
     def shadow_realized_today(self) -> Decimal:
         return self._shadow_realized_today
+
+    @property
+    def shadow_realized_total(self) -> Decimal:
+        """Lifetime shadow P&L: the forward record, not today's slice."""
+        book = self._shadow_book
+        return book.realized_total if book is not None else Decimal("0")
 
     @property
     def kill_switch(self) -> bool:
@@ -296,6 +321,7 @@ class RiskGuard:
             "day_key": self._day_key,
             "daily_notional": str(self._daily_notional),
             "shadow_realized_today": str(self._shadow_realized_today),
+            "shadow_realized_total": str(self.shadow_realized_total),
             "mode": self.mode,
             "timezone": self.timezone,
         }

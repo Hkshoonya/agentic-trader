@@ -524,6 +524,30 @@ bootstrap p `0.053 → 0.178` — and the risk budget followed it *down*
 (`confidence_down`). The old number was partly flattery from symbols the agent
 cannot trade.
 
+### Shadow P&L accumulates
+
+`ShadowBook.realized_pnl` is **day-scoped** on purpose — RiskGuard's daily-loss
+kill switch needs today's number. But the forward record the strategy is being
+judged on was being reset every midnight along with it, and positions were
+rebuilt from a single day's journal, so a position opened yesterday simply
+vanished from the book at 00:00.
+
+Now there are two figures and two windows:
+
+| | scope | used for |
+|---|---|---|
+| `realized_pnl` | today | the daily-loss kill switch |
+| `realized_total` | since inception | the forward record, shown on the console |
+
+The book is rebuilt from a rolling window (`ShadowBook.from_journal(journal,
+days=30)`, `journal.iter_recent`) rather than one file, so holdings and the
+running P&L survive midnight, restarts and redeploys. `roll_day()` resets only
+the day figure.
+
+Verified live: the day-scoped rebuild of the current journal holds nothing,
+while the 30-day rebuild holds the open `BTC-USD` position — the difference
+between a book that forgets and one that accumulates.
+
 ### The back-check agent
 
 Every failure in this repo so far was found by a human noticing something odd — a

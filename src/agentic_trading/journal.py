@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -55,3 +55,31 @@ class DecisionJournal:
                 if not line:
                     continue
                 yield json.loads(line)
+
+    def iter_recent(self, *, days: int = 30) -> Iterator[dict[str, Any]]:
+        """Records from the last ``days`` journal files, oldest first.
+
+        A day-scoped view is right for daily counters and wrong for positions:
+        the book has to be rebuildable after a restart or a midnight rollover,
+        so anything accumulating reads a window rather than one file.
+        """
+        today = date.today()
+        for offset in range(max(1, days) - 1, -1, -1):
+            path = self._journal_dir / (
+                today - timedelta(days=offset)
+            ).isoformat()
+            file = path.with_suffix(".jsonl")
+            if not file.exists():
+                continue
+            try:
+                text = file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
