@@ -19,9 +19,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -40,10 +40,17 @@ jobs:
           # against the bare example config instead would fail every run: that
           # config has no history_path, so the analysis checks have nothing to
           # analyse, which is correct behaviour and a useless gate.
+          #
+          # Start-Process, not a bare call: the launcher is a GUI-subsystem
+          # executable, so PowerShell does not wait for it and $LASTEXITCODE is
+          # left unset — which fails the job even when the app worked.
           $smoke = Join-Path $env:TEMP "agentic-smoke"
-          ./dist/AgenticTrader/AgenticTrader.exe --selftest --workspace $smoke
-          if ($LASTEXITCODE -ne 0) { throw "launcher self-test failed" }
-          ./dist/AgenticTrader/agentic-trading.exe selfcheck --offline --config "$smoke/config/agentic.toml"
+          $launcher = Start-Process -FilePath "./dist/AgenticTrader/AgenticTrader.exe" `
+            -ArgumentList "--selftest", "--workspace", $smoke -Wait -PassThru -NoNewWindow
+          if ($launcher.ExitCode -ne 0) { throw "launcher self-test failed ($($launcher.ExitCode))" }
+
+          # The CLI is a console app, so a bare call is fine here.
+          & "./dist/AgenticTrader/agentic-trading.exe" selfcheck --offline --config "$smoke/config/agentic.toml"
           if ($LASTEXITCODE -ne 0) { throw "frozen CLI self-check failed" }
 
       - name: Package
