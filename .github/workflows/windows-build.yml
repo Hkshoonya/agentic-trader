@@ -1,4 +1,5 @@
 name: windows-build
+run-name: Build the Windows app (${{ github.ref_name }})
 
 # Builds the Windows app on a Windows runner, so a machine with no Windows and
 # no Wine can still produce the executable. The zip is attached to the run; a
