@@ -79,12 +79,21 @@ function drawChart(curve) {
 }
 
 async function refresh() {
-  const [summary, curve, feed, orders] = await Promise.all([
-    fetch('/api/summary').then(r => r.json()),
-    fetch('/api/equity').then(r => r.json()),
-    fetch('/api/journal?offset=' + offset).then(r => r.json()),
-    fetch('/api/orders').then(r => r.json()),
-  ]);
+  let summary, curve, feed, orders;
+  try {
+    [summary, curve, feed, orders] = await Promise.all([
+      fetch('/api/summary').then(r => r.json()),
+      fetch('/api/equity').then(r => r.json()),
+      fetch('/api/journal?offset=' + offset).then(r => r.json()),
+      fetch('/api/orders').then(r => r.json()),
+    ]);
+  } catch (err) {
+    // The console is restarted by systemd on deploys and failures; an open tab
+    // must say so and keep retrying instead of throwing on every poll.
+    document.getElementById('generated').textContent =
+      'console unreachable — retrying…';
+    return;
+  }
   setBadge('mode', summary.kill_switch ? 'kill switch' : summary.mode,
     summary.kill_switch ? 'kill' : (summary.mode === 'live' ? 'live' : 'shadow'));
   setBadge('stage', 'stage: ' + summary.promotion.stage,
