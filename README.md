@@ -710,7 +710,16 @@ Read-only, stdlib-only, binds to `127.0.0.1`. It auto-refreshes every 2 seconds
 and shows: mode/session/kill-switch badges, account equity and daily notional
 against the cap, accepted/placed/rejected counters, the promotion streak gauge,
 the gate's verdict with every unmet requirement listed, an animated order-flow
-chart, the live execution stream, and the latest evolution evidence.
+chart, the live execution stream, the latest evolution evidence, and the
+walk-forward evidence the current order size is justified by.
+
+Each row of the market/order table carries three confidences, because they
+answer three different questions: `ev` is the strategy-level evidence grade
+(one number for the strategy, and it only moves when the evaluation moves),
+`order` is that order's own grade from the tape it was decided on, and `ai` is
+the model's opinion when one was consulted. For decisions made before per-order
+grading existed, the console rebuilds the grade from the market snapshot the
+journal recorded at the time and labels the row's grade `journal`.
 
 ### Typical loop
 
@@ -719,8 +728,38 @@ agentic-trading auth --config config/agentic.toml
 agentic-trading fetch-history --config config/agentic.toml \
     --symbol SPY --start 2025-01-01T00:00:00Z --interval 5minute
 agentic-trading evolve --config config/agentic.toml        # verdict + evidence
+agentic-trading walkforward --config config/agentic.toml   # what the rule earns, and at what size
 agentic-trading dashboard --config config/agentic.toml --open
 ```
+
+### Walk-forward evidence (`walkforward`)
+
+`evolve` searches genomes and pays the multiple-comparisons price for it, so its
+significance bar is nearly unreachable. `walkforward` runs the opposite
+experiment: **one fixed rule**, the same one the daemon trades, for which the
+bar is a plain `p < 0.05`.
+
+It prices three things on the bars in `history_path`:
+
+- `production` — the rule at the size the confidence ladder would trade today.
+- `inverse_vol` — the strategy's own specification: each slot sized to carry the
+  same risk (`notional = per_order_pct / sigma`) instead of the same dollars,
+  never rescaled to fill the budget.
+- `gate_size` — the largest flat size whose out-of-sample drawdown still fits
+  inside the 15% ceiling, selected on the same sample and therefore reported as
+  a *ceiling on size*, not as evidence of a larger edge.
+
+Drawdown is measured on the marked-to-market account, so a position that is
+30% under water shows up before it is sold. The result is written to
+`data/state/strategy_evidence.json`, shown on the console, and checked by the
+back-check agent: if the live per-order size is larger than `gate_size`, the
+`evidence` check fails.
+
+On 11 years of the current 16-symbol universe (to 2026-09-17) the rule returns
+the same `+856 bps` expectancy per trade at every flat size, and drawdown scales
+with the size: 3.0% per order → 30.5% max drawdown, 1.5% → 19.2%, 1.0% → 14.0%.
+The config ceiling is therefore `max_order_pct = "0.01"`, with the ladder trading
+0.25%–1.0% underneath it.
 
 ### Reality check on the current data
 

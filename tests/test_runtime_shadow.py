@@ -149,6 +149,84 @@ class ShadowRuntimeTests(unittest.TestCase):
 
             self.assertTrue(Path(config.tools_snapshot_path).is_file())
 
+    def test_every_decision_carries_its_own_confidence(self) -> None:
+        """`evidence` is one number for the strategy; `order` must be per order.
+
+        The operator asked why the number beside each order never moved. It did
+        not, because it is the strategy-level evidence grade. The per-order
+        grade is what has to vary — and it must be present on records the
+        strategy never got to trade, or a rejection cannot be explained.
+        """
+        tools = load_tools()
+        client = FakeMcpClient(tools)
+        broker = Broker(client, tools)
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            quotes_path = tmp / "quotes.jsonl"
+            quotes_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "symbol": "SPY",
+                                "observed_at": "2026-09-15T07:58:49Z",
+                                "quote_at": "2026-09-15T07:58:42Z",
+                                "bid": "100.00",
+                                "ask": "100.10",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "symbol": "SPY",
+                                "observed_at": "2026-09-15T07:59:49Z",
+                                "quote_at": "2026-09-15T07:59:42Z",
+                                "bid": "100.05",
+                                "ask": "100.15",
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config_path = _write_config(tmp, quotes_path=quotes_path)
+            config = load_config(config_path)
+
+            run_loop(
+                config,
+                broker=broker,
+                strategy=FixtureStrategy(),
+                tools=tools,
+            )
+
+            journal_file = (
+                Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+            )
+            records = [
+                json.loads(line)
+                for line in journal_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        decisions = [
+            record
+            for record in records
+            if record.get("event") in ("accepted", "rejected", "place_failed")
+        ]
+        self.assertTrue(decisions, "the run must produce at least one decision")
+        for record in decisions:
+            confidence = record.get("confidence") or {}
+            self.assertIn("evidence", confidence)
+            self.assertIn("order", confidence, f"no per-order grade on {record}")
+            order = confidence["order"]
+            self.assertIn("score", order)
+            self.assertIn(
+                order["verdict"],
+                ("buy", "marginal", "weak", "rejected", "unknown"),
+            )
+            self.assertIn("notes", order)
+
     def test_shadow_runtime_with_repo_quotes_file(self) -> None:
         """Premarket recording + fractional orders = not placeable (by design).
 

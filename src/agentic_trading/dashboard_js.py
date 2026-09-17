@@ -172,6 +172,7 @@ async function refresh() {
   // The model's read on each symbol's regime, and whether it is holding
   // entries back. A "+trend" never creates a trade; only chop/panic stop one.
   const regimes = summary.regimes || {};
+  renderEvidence(summary);
   renderAgents(summary);
   const symbols = Object.keys(regimes);
   if (symbols.length) {
@@ -194,6 +195,44 @@ async function refresh() {
 
 // Who is actually making decisions: the bot is a small team of workers, and
 // the daemon publishes their state so this is their roster, not a guess.
+// The walk-forward evidence: the account's own history, priced at the size the
+// bot would trade today versus the largest size the 15% drawdown ceiling allows.
+// This is the number that decides whether "we can size up" is a fact or a mood.
+function renderEvidence(summary) {
+  const e = summary.evidence;
+  const box = document.getElementById('evidence');
+  if (!box) return;
+  if (!e) {
+    box.innerHTML = 'no evidence report yet — run: '
+      + '<code>agentic-trading walkforward --config config/agentic.toml</code>';
+    return;
+  }
+  const line = (name, s) => {
+    if (!s) return '';
+    return '<div class="row"><span>' + name + '</span><b>'
+      + num(Number(s.per_order_pct || 0) * 100) + '% / order · '
+      + (s.trades ?? '—') + ' trades · ' + num(s.expectancy_bps) + ' bps · DD '
+      + num(s.max_drawdown_pct) + '% · $' + num(s.final_equity) + ' · p '
+      + num(s.bootstrap_p_value, 4)
+      + (s.eligible ? ' · inside gate' : '') + '</b></div>';
+  };
+  const age = e.generated_at
+    ? Math.round((Date.now() - new Date(e.generated_at)) / 86400000) : null;
+  box.innerHTML =
+    line('risk-parity spec', e.inverse_vol)
+    + line('gate size (in-sample)', e.gate_size)
+    + line('production size', e.production)
+    + '<div class="sub" style="margin-top:6px">'
+      + (e.symbols || []).length + ' symbols · ' + (e.bars ?? '—') + ' bars · '
+      + (e.folds ?? '—') + ' walk-forward folds · drawdown ceiling '
+      + num(e.drawdown_ceiling_pct) + '%'
+      + (age === null ? '' : ' · report ' + age + 'd old')
+      + (e.gate_reason ? ' · ' + e.gate_reason : '')
+    + '</div>'
+    + (e.notes || []).map(note => '<div class="sub">note: ' + note + '</div>').join('');
+}
+
+
 function renderAgents(summary) {
   const agents = summary.agents || [];
   const box = document.getElementById('agents');
@@ -276,18 +315,31 @@ function renderOrders(data) {
       ? Object.keys(r.alerts).join(', ') : 'none';
     const side = r.side ? '<span class="' + (r.side === 'buy' ? 'buy' : 'sell') + '">' + r.side + '</span>' : '—';
     const at = r.at ? new Date(r.at).toLocaleTimeString() : '—';
-    // Two different questions, two numbers: how real the edge looks (evidence)
-    // and how sure the model was about this specific order (advisor).
+    // Three different questions, three numbers. `ev` is the strategy-level
+    // evidence grade: it is computed from the evaluation and is identical for
+    // every order until that evaluation changes. `order` is this order's own
+    // grade and moves order to order; `ai` is the model's opinion.
     const c = r.confidence || {};
     const ai = (c.advisor === null || c.advisor === undefined) ? null : Number(c.advisor);
     const ev = (c.evidence === null || c.evidence === undefined) ? null : Number(c.evidence);
-    const confidence = (ai === null && ev === null) ? '<span class="sub">—</span>'
+    const oc = c.order || {};
+    const os = (oc.score === null || oc.score === undefined) ? null : Number(oc.score);
+    const verdictClass = oc.verdict === 'buy' ? 'buy' : (oc.verdict === 'rejected' ? 'sell' : 'sub');
+    const note = Object.values(oc.notes || {}).join('; ');
+    const hasVerdict = !!oc.verdict;
+    const confidence = (ai === null && ev === null && os === null && !hasVerdict)
+      ? '<span class="sub">—</span>'
       : '<span class="conf">'
+        + (!hasVerdict ? ''
+          : '<span class="' + verdictClass + '">' + oc.verdict
+            + (os === null ? '' : ' ' + os.toFixed(2)) + '</span>')
+        + (os !== null && ai !== null ? '<br>' : '')
         + (ai === null ? ''
           : '<span class="' + (c.advisor_action === 'veto' ? 'sell' : 'buy') + '">ai '
             + ai.toFixed(2) + '</span>')
-        + (ai !== null && ev !== null ? '<br>' : '')
+        + ((os !== null || ai !== null) && ev !== null ? '<br>' : '')
         + (ev === null ? '' : '<span class="sub">ev ' + ev.toFixed(2) + '</span>')
+        + (note ? '<br><span class="sub">' + note.slice(0, 120) + '</span>' : '')
         + '</span>';
     return '<tr><td>' + at + '</td>'
       + '<td><span class="pill ' + r.event + '">' + r.event + '</span></td>'

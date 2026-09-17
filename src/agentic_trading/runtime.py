@@ -332,9 +332,13 @@ class _Loop:
         else:
             self.guard.max_order_pct = self.config.max_order_pct
         # The agent's stored limits may only ever tighten what the operator set.
-        from agentic_trading.limits import apply_to_guard, load_limits
+        from agentic_trading.limits import apply_to_guard, load_limits, reconcile
 
         self.guard.daily_notional_pct = self.config.daily_notional_pct
+        # A ceiling lowered in the config must show up on the console now, not
+        # at the next evaluation — evaluations are skipped while the bars are
+        # unchanged, which is most days.
+        reconcile(self.config)
         apply_to_guard(self.guard, self.config)
         stored = load_limits(self.config.state_dir)
         # Confidence in force right now, so every decision can record the
@@ -924,7 +928,9 @@ class _Loop:
                 "order_request": request.to_mcp_args(),
                 "review": review,
                 "intent": _intent_payload(intent),
-                "confidence": self._confidence_payload(advisor_payload),
+                "confidence": self._confidence_payload(
+                    advisor_payload, symbol=intent.symbol
+                ),
                 "symbol": intent.symbol,
                 "side": side.value,
                 "quantity": (
@@ -1057,25 +1063,79 @@ class _Loop:
             "notional": str(notional),
             "mode": self.mode,
             "intent": _intent_payload(intent),
-            "confidence": self._confidence_payload(advisor),
+            "confidence": self._confidence_payload(
+                advisor, symbol=intent.symbol, blocked_by=reason
+            ),
         }
         self.journal.append(record)
 
     def _confidence_payload(
-        self, advisor: Optional[dict[str, Any]] = None
+        self,
+        advisor: Optional[dict[str, Any]] = None,
+        *,
+        symbol: Optional[str] = None,
+        blocked_by: Optional[str] = None,
     ) -> dict[str, Any]:
         """The confidences behind one decision, for the order table.
 
         ``evidence`` is the system-level grade the risk budget was sized from;
         ``advisor`` is the model's own confidence in this specific order, when
-        the advisor was consulted. Reporting both keeps "the edge looks real"
-        and "this order looks sane" from being mistaken for each other.
+        the advisor was consulted; ``order`` is this order's own grade, built
+        from the features the strategy saw. Reporting all three keeps "the edge
+        looks real", "the tape looks right", and "the model likes it" from
+        being mistaken for each other — and unlike ``evidence``, ``order``
+        moves from one order to the next.
         """
         payload: dict[str, Any] = {"evidence": round(self.evidence_confidence, 4)}
         if advisor:
             payload["advisor"] = round(float(advisor.get("confidence", 0.0)), 3)
             payload["advisor_action"] = advisor.get("action")
             payload["advisor_model"] = advisor.get("model")
+        if symbol:
+            payload["order"] = self._order_confidence(
+                symbol, advisor=advisor, blocked_by=blocked_by
+            )
+        return payload
+
+    def _order_confidence(
+        self,
+        symbol: str,
+        *,
+        advisor: Optional[dict[str, Any]] = None,
+        blocked_by: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """This order's own grade. Reporting only — it gates nothing."""
+        from agentic_trading.confidence import grade_order
+
+        try:
+            features = self.market_features(symbol)
+        except Exception:  # noqa: BLE001 — a missing grade must not fail a trade
+            features = None
+        regime = None
+        if self.regime_gate is not None:
+            view = None
+            look_up = getattr(self.regime_gate, "view", None)
+            if callable(look_up):
+                try:
+                    view = look_up(symbol)
+                except Exception:  # noqa: BLE001 — a grade is not worth a fault
+                    view = None
+            if view is not None:
+                to_dict = getattr(view, "to_dict", None)
+                regime = to_dict() if callable(to_dict) else None
+        if features is None and regime is None:
+            # No bar history and no regime read: an empty grade would render as
+            # nothing at all, which reads like "fine". Say what is missing.
+            return {
+                "score": None,
+                "verdict": "unknown",
+                "parts": {},
+                "notes": {"data": "no bar history for this symbol"},
+            }
+        payload = grade_order(
+            features, regime=regime, advisor=advisor, blocked_by=blocked_by
+        ).to_dict()
+        payload["source"] = "live"
         return payload
 
     def market_features(self, symbol: str, quote: Optional[dict[str, Any]] = None) -> Any:

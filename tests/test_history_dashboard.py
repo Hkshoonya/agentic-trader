@@ -304,6 +304,100 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(confidences["evidence"], 0.5252)
         self.assertEqual(rows[0]["reason"], "max_open_positions")
 
+    def test_a_decision_made_before_grading_existed_is_still_graded(self) -> None:
+        """The journal's regime record holds the snapshot; grade from that.
+
+        Without this the operator sees only the flat strategy-level `ev` number
+        beside every old row — the exact complaint that led to per-order grades.
+        """
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            journal = Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            snapshot = {
+                "bars": 60,
+                "last_close": 76528.79,
+                "ret_1_pct": 0.5,
+                "ret_5_pct": -0.95,
+                "ret_20_pct": -1.68,
+                "vol_pct": 2.07,
+                "trend_pct": -3.44,
+                "from_high_pct": 5.83,
+                "range_position": 0.74,
+                "volume_z": -0.5,
+                "volume_coverage": 1.0,
+                "spread_bps": None,
+            }
+            journal.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "event": "regime",
+                                "symbol": "BTC-USD",
+                                "regime": "chop",
+                                "confidence": 0.65,
+                                "blocks_entries": True,
+                                "market": snapshot,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "decision_id": "d-2",
+                                "event": "rejected",
+                                "reason": "regime_block: chop c=0.65",
+                                "symbol": "BTC-USD",
+                                "side": "buy",
+                                "notional": "1.45",
+                                "confidence": {"evidence": 0.4547},
+                                "intent": {"created_at": "2026-09-17T09:44:32Z"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            rows = DashboardState(config).orders_table()["rows"]
+
+        self.assertEqual(len(rows), 1)
+        grade = rows[0]["confidence"]["order"]
+        self.assertIsNotNone(grade, "the journaled snapshot must be gradeable")
+        assert grade is not None
+        self.assertEqual(grade["verdict"], "rejected")
+        self.assertEqual(grade["source"], "journal")
+        self.assertLess(grade["score"], 0.5, "a chop-blocked downtrend is not a buy")
+        self.assertIn("trend", grade["notes"])
+
+    def test_a_row_with_no_snapshot_is_not_graded(self) -> None:
+        """No observed features means no grade — not an invented one."""
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            journal = Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            journal.write_text(
+                json.dumps(
+                    {
+                        "decision_id": "d-3",
+                        "event": "rejected",
+                        "reason": "max_orders_per_day",
+                        "symbol": "SPY",
+                        "side": "buy",
+                        "notional": "1.00",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            rows = DashboardState(config).orders_table()["rows"]
+
+        self.assertIsNone(rows[0]["confidence"]["order"])
+
+
     def test_http_surface_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)

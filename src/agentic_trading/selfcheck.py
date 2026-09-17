@@ -247,6 +247,60 @@ def check_analysis(config: Any) -> Check:
     return _timed("analysis", run)
 
 
+def check_evidence(config: Any, *, max_age_days: int = 30) -> Check:
+    """The evidence report must exist, be fresh, and still cover the size traded.
+
+    This is the check that answers "is the analysis behind the order size still
+    real?": if the walk-forward report is older than a month, or the book is now
+    larger than the largest size the report found inside the drawdown ceiling,
+    the number on the console no longer justifies the risk being taken.
+    """
+
+    def run() -> tuple[str, str]:
+        from agentic_trading.evidence import read_report
+        from agentic_trading.limits import load_limits
+
+        report = read_report(config)
+        if not report:
+            return WARN, "no strategy_evidence.json yet (run: agentic-trading walkforward)"
+        generated = str(report.get("generated_at") or "")
+        try:
+            age_days = (
+                datetime.now(timezone.utc) - datetime.fromisoformat(generated)
+            ).total_seconds() / 86_400
+        except ValueError:
+            return WARN, f"evidence report has unreadable timestamp {generated!r}"
+        if age_days > max_age_days:
+            return WARN, (
+                f"evidence report is {age_days:.0f} days old "
+                f"(refresh: agentic-trading walkforward)"
+            )
+        gate = report.get("gate_size") or {}
+        stored = load_limits(config.state_dir)
+        live = (
+            float(stored.max_order_pct)
+            if stored is not None
+            else float(config.max_order_pct)
+        )
+        ceiling = float(gate.get("per_order_pct") or 0.0)
+        if ceiling and live > ceiling * 1.001:
+            return FAIL, (
+                f"trading {live:.4f} per order but the evidence only supports "
+                f"{ceiling:.4f} inside the {report.get('drawdown_ceiling_pct')}% "
+                "drawdown ceiling"
+            )
+        gate_dd = gate.get("max_drawdown_pct")
+        detail = (
+            f"evidence {age_days:.0f}d old; {live * 100:.2f}%/order vs gate "
+            f"{ceiling * 100:.2f}%"
+        )
+        if gate_dd is not None:
+            detail += f" (maxDD {float(gate_dd):.1f}%)"
+        return OK, detail
+
+    return _timed("evidence", run)
+
+
 def check_broker(config: Any, broker: Any) -> Check:
     """Read-only round trips: can we still see the account and the market?"""
 
@@ -346,6 +400,7 @@ def run_checks(
     report.checks.append(check_state_files(config))
     report.checks.append(check_data(config))
     report.checks.append(check_analysis(config))
+    report.checks.append(check_evidence(config))
     if include_broker and broker is not None:
         report.checks.append(check_broker(config, broker))
     report.checks.append(check_plumbing(config, port=port))

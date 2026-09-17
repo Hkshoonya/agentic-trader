@@ -14,6 +14,7 @@ from agentic_trading.limits import (
     apply_to_guard,
     load_limits,
     propose,
+    reconcile,
     save_limits,
 )
 
@@ -24,6 +25,102 @@ def config(tmp: Path) -> SimpleNamespace:
         daily_notional_pct=Decimal("0.20"),
         state_dir=tmp,
     )
+
+
+class ReconcileTests(unittest.TestCase):
+    """Lowering a ceiling must show up immediately, not at the next evaluation.
+
+    Evaluations are skipped while the bars are unchanged — which is most days —
+    so without this the state file (and every screen reading it) would keep
+    advertising a budget the operator has already withdrawn.
+    """
+
+    def _stored(self, tmp: Path) -> Limits:
+        stored = Limits(
+            max_order_pct="0.03",
+            daily_notional_pct="0.12",
+            reason="confidence_target",
+            updated_at="2026-01-01T00:00:00+00:00",
+            confidence="0.5",
+        )
+        save_limits(tmp, stored)
+        return stored
+
+    def test_lowered_ceiling_clamps_the_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._stored(tmp)
+            cfg = SimpleNamespace(
+                max_order_pct=Decimal("0.01"),
+                daily_notional_pct=Decimal("0.04"),
+                state_dir=tmp,
+            )
+            updated = reconcile(cfg)
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(Decimal(updated.max_order_pct), Decimal("0.01"))
+            self.assertEqual(Decimal(updated.daily_notional_pct), Decimal("0.04"))
+            self.assertEqual(updated.reason, "ceiling_lowered")
+            self.assertEqual(
+                updated.details.get("reconciled_from_max_order_pct"), "0.03"
+            )
+            stored = load_limits(tmp)
+            assert stored is not None
+            self.assertEqual(stored.max_order_pct, "0.01")
+
+    def test_a_raised_ceiling_is_not_permission(self) -> None:
+        """Only ever tightens: the agent may not grant itself the extra room."""
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._stored(tmp)
+            cfg = SimpleNamespace(
+                max_order_pct=Decimal("0.50"),
+                daily_notional_pct=Decimal("2.00"),
+                state_dir=tmp,
+            )
+            updated = reconcile(cfg)
+            assert updated is not None
+            self.assertEqual(updated.max_order_pct, "0.03")
+            self.assertEqual(updated.daily_notional_pct, "0.12")
+
+    def test_reconciliation_settles_instead_of_churning(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._stored(tmp)
+            cfg = SimpleNamespace(
+                max_order_pct=Decimal("0.01"),
+                daily_notional_pct=Decimal("0.04"),
+                state_dir=tmp,
+            )
+            first = reconcile(cfg)
+            second = reconcile(cfg)
+            third = reconcile(cfg)
+            assert first is not None and second is not None and third is not None
+            self.assertEqual(first.updated_at, second.updated_at)
+            self.assertEqual(second.to_dict(), third.to_dict())
+
+    def test_no_stored_limits_is_not_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            cfg = SimpleNamespace(
+                max_order_pct=Decimal("0.01"),
+                daily_notional_pct=Decimal("0.04"),
+                state_dir=Path(name),
+            )
+            self.assertIsNone(reconcile(cfg))
+
+    def test_floor_is_respected(self) -> None:
+        """A ceiling below the floor still cannot disable the strategy entirely."""
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._stored(tmp)
+            cfg = SimpleNamespace(
+                max_order_pct=Decimal("0.0001"),
+                daily_notional_pct=Decimal("0.0001"),
+                state_dir=tmp,
+            )
+            updated = reconcile(cfg)
+            assert updated is not None
+            self.assertEqual(Decimal(updated.max_order_pct), MIN_ORDER_PCT)
 
 
 class ProposeTests(unittest.TestCase):

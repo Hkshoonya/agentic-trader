@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agentic_trading.config import load_config
@@ -14,6 +15,7 @@ from agentic_trading.selfcheck import (
     WARN,
     check_analysis,
     check_data,
+    check_evidence,
     check_state_files,
     run_checks,
     write_report,
@@ -189,6 +191,83 @@ class AnalysisCheckTests(unittest.TestCase):
         self.assertEqual(check.status, FAIL)
 
 
+class EvidenceCheckTests(unittest.TestCase):
+    """The check that ties the traded size back to the walk-forward evidence."""
+
+    def _write(self, config, *, age_days: float, gate_pct: float | None) -> None:
+        import json as _json
+        from datetime import timedelta
+
+        generated = datetime.now(timezone.utc) - timedelta(days=age_days)
+        report = {
+            "generated_at": generated.isoformat(),
+            "drawdown_ceiling_pct": 15.0,
+            "gate_size": (
+                {"per_order_pct": gate_pct, "max_drawdown_pct": 13.9, "eligible": True}
+                if gate_pct is not None
+                else {"per_order_pct": None, "eligible": False, "reason": "none held"}
+            ),
+        }
+        Path(config.state_dir, "strategy_evidence.json").write_text(
+            _json.dumps(report)
+        )
+
+    def test_missing_report_warns_rather_than_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name), symbols=["SPY"], bars={"SPY": 400})
+            check = check_evidence(config)
+        self.assertEqual(check.status, WARN)
+        self.assertIn("walkforward", check.detail)
+
+    def test_stale_report_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name), symbols=["SPY"], bars={"SPY": 400})
+            self._write(config, age_days=45, gate_pct=0.01)
+            check = check_evidence(config)
+        self.assertEqual(check.status, WARN)
+        self.assertIn("days old", check.detail)
+
+    def test_trading_bigger_than_the_evidence_supports_fails(self) -> None:
+        """The whole point: a 5% book under a 13.9%-drawdown report must fail."""
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"], bars={"SPY": 400})
+            self._write(config, age_days=1, gate_pct=0.01)
+            from agentic_trading.limits import Limits, save_limits
+
+            save_limits(
+                config.state_dir,
+                Limits(
+                    max_order_pct="0.05",
+                    daily_notional_pct="0.20",
+                    reason="test",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            check = check_evidence(config)
+        self.assertEqual(check.status, FAIL)
+        self.assertIn("drawdown ceiling", check.detail)
+
+    def test_size_inside_the_gate_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"], bars={"SPY": 400})
+            self._write(config, age_days=1, gate_pct=0.01)
+            from agentic_trading.limits import Limits, save_limits
+
+            save_limits(
+                config.state_dir,
+                Limits(
+                    max_order_pct="0.006",
+                    daily_notional_pct="0.024",
+                    reason="test",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            check = check_evidence(config)
+        self.assertEqual(check.status, OK)
+
+
 class ReportTests(unittest.TestCase):
     def test_offline_report_covers_state_data_and_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as name:
@@ -199,7 +278,9 @@ class ReportTests(unittest.TestCase):
             payload = json.loads(path.read_text())
 
         names = {check.name for check in report.checks}
-        self.assertEqual(names, {"state", "data", "analysis", "plumbing"})
+        self.assertEqual(
+            names, {"state", "data", "analysis", "evidence", "plumbing"}
+        )
         self.assertIn("healthy", payload)
         self.assertIn("checks", payload)
 

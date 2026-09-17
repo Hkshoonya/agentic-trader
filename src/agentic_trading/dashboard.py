@@ -38,6 +38,105 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
+def _grade_from_journal(
+    record: dict[str, Any],
+    *,
+    symbol: Optional[str],
+    advisor: dict[str, Any],
+    regime: dict[str, dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Grade an order from the snapshot the journal recorded at decision time.
+
+    Older records predate per-order grading. The features they were decided on
+    are still in the regime record's ``market`` block, so the grade can be
+    rebuilt from observed data rather than guessed — and it is labelled
+    ``journal`` so it is never confused with a grade the runtime computed.
+    """
+    if not symbol:
+        return None
+    view = regime.get(str(symbol).upper())
+    market = (view or {}).get("market") if isinstance(view, dict) else None
+    if not isinstance(market, dict) or not market:
+        return None
+    try:
+        from agentic_trading.confidence import grade_order
+        from agentic_trading.llm.market import MarketFeatures
+
+        features = MarketFeatures(
+            symbol=str(symbol),
+            bars=int(market.get("bars") or 0),
+            last_close=float(market.get("last_close") or 0.0),
+            ret_1_pct=float(market.get("ret_1_pct") or 0.0),
+            ret_5_pct=float(market.get("ret_5_pct") or 0.0),
+            ret_20_pct=float(market.get("ret_20_pct") or 0.0),
+            vol_pct=float(market.get("vol_pct") or 0.0),
+            trend_pct=float(market.get("trend_pct") or 0.0),
+            from_high_pct=float(market.get("from_high_pct") or 0.0),
+            range_position=float(market.get("range_position") or 0.0),
+            spread_bps=(
+                None
+                if market.get("spread_bps") is None
+                else float(market["spread_bps"])
+            ),
+            volume_z=(
+                None if market.get("volume_z") is None else float(market["volume_z"])
+            ),
+            volume_coverage=float(market.get("volume_coverage") or 0.0),
+        )
+        grade = grade_order(
+            features,
+            regime=view,
+            advisor=advisor or None,
+            blocked_by=(
+                str(record.get("reason", "")) if record.get("event") == "rejected" else None
+            ),
+        )
+    except (TypeError, ValueError):
+        return None
+    payload = grade.to_dict()
+    payload["source"] = "journal"
+    return payload
+
+
+def _evidence_view(report: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Trim the walk-forward report to what the console shows.
+
+    Kept deliberately short: the console answers "is the size I am trading still
+    justified?", and the two numbers that do that are the drawdown of the size
+    being traded and the largest size the ceiling allows.
+    """
+    if not report:
+        return None
+    configs = report.get("configs") if isinstance(report.get("configs"), dict) else {}
+
+    def pick(entry: Any) -> Optional[dict[str, Any]]:
+        if not isinstance(entry, dict):
+            return None
+        return {
+            "per_order_pct": entry.get("per_order_pct"),
+            "trades": entry.get("trades"),
+            "expectancy_bps": entry.get("expectancy_bps"),
+            "max_drawdown_pct": entry.get("max_drawdown_pct"),
+            "final_equity": entry.get("final_equity"),
+            "bootstrap_p_value": entry.get("bootstrap_p_value"),
+            "profit_factor": entry.get("profit_factor"),
+            "eligible": entry.get("eligible"),
+        }
+
+    return {
+        "generated_at": report.get("generated_at", ""),
+        "drawdown_ceiling_pct": report.get("drawdown_ceiling_pct"),
+        "symbols": (report.get("series") or {}).get("symbols", []),
+        "bars": (report.get("series") or {}).get("bars"),
+        "folds": report.get("folds"),
+        "notes": report.get("notes") or [],
+        "production": pick(configs.get("production")),
+        "inverse_vol": pick(configs.get("inverse_vol")),
+        "gate_size": pick(report.get("gate_size")),
+        "gate_reason": (report.get("gate_size") or {}).get("reason"),
+    }
+
+
 class DashboardState:
     """Reads bot state from disk. Every method is read-only."""
 
@@ -215,6 +314,9 @@ class DashboardState:
                 "updated_at": promotion.updated_at,
             },
             "evolution": evolution,
+            # The walk-forward evidence the order size is justified by. Written
+            # by `agentic-trading walkforward`; absent until that has run once.
+            "evidence": _evidence_view(_read_json(self.state_dir / "strategy_evidence.json")),
             "generated_at": now.isoformat(),
         }
 
@@ -266,10 +368,16 @@ class DashboardState:
         # decision_id, so join it back in: it is the per-order confidence, as
         # opposed to the system-wide evidence grade.
         advisor_by_decision: dict[str, dict[str, Any]] = {}
+        regime_by_symbol: dict[str, dict[str, Any]] = {}
         for record in records:
             decision_id = record.get("decision_id")
             if decision_id and record.get("event") == "advisor":
                 advisor_by_decision[str(decision_id)] = record
+            # The regime record carries the market snapshot the model was
+            # shown, so a decision made before per-order grading existed can
+            # still be graded from what was actually observed at the time.
+            if record.get("event") == "regime" and record.get("symbol"):
+                regime_by_symbol[str(record["symbol"]).upper()] = record
 
         for record in records:
             event = record.get("event")
@@ -330,6 +438,17 @@ class DashboardState:
                         ),
                         "advisor_model": confidence.get(
                             "advisor_model", advisor.get("model")
+                        ),
+                        "order": confidence.get("order")
+                        or _grade_from_journal(
+                            record,
+                            symbol=(
+                                record.get("symbol")
+                                or request.get("symbol")
+                                or intent.get("symbol")
+                            ),
+                            advisor=advisor,
+                            regime=regime_by_symbol,
                         ),
                     },
                 }

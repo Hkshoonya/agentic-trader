@@ -108,6 +108,14 @@ def _clamp(value: Decimal, ceiling: Decimal, floor: Decimal) -> Decimal:
     return max(floor, min(value, ceiling))
 
 
+def _target_for_confidence(ceiling: Decimal, confidence: float) -> Decimal:
+    """The budget a given confidence justifies under a given ceiling."""
+    scale = MIN_SCALE + (Decimal(1) - MIN_SCALE) * Decimal(
+        str(round(max(0.0, min(1.0, confidence)), 6))
+    )
+    return _clamp(ceiling * scale, ceiling, MIN_ORDER_PCT)
+
+
 def propose(
     config: Any,
     *,
@@ -190,7 +198,7 @@ def propose_from_assessment(
     confidence = round(confidence, 4)
 
     scale = MIN_SCALE + (Decimal(1) - MIN_SCALE) * Decimal(str(round(confidence, 6)))
-    target_order = _clamp(ceiling_order * scale, ceiling_order, MIN_ORDER_PCT)
+    target_order = _target_for_confidence(ceiling_order, confidence)
     target_daily = _clamp(ceiling_daily * scale, ceiling_daily, MIN_DAILY_PCT)
 
     previous_confidence = (
@@ -280,3 +288,63 @@ def apply_to_guard(guard: Any, config: Any) -> None:
         Decimal(str(guard.daily_notional_pct)),
         _clamp(Decimal(stored.daily_notional_pct), ceiling_daily, MIN_DAILY_PCT),
     )
+
+
+def reconcile(config: Any) -> Optional[Limits]:
+    """Pull the stored budget back under the operator's *current* ceilings.
+
+    The ladder only re-prices itself when a full evaluation runs, and the
+    evaluation is deliberately skipped when the bars have not changed. Without
+    this, lowering a ceiling in the config would leave the state file — and
+    every screen that reads it — advertising a budget the operator no longer
+    authorises, even though the guard itself clamps the live order path.
+
+    Only ever tightens: a raised ceiling is not permission the agent may grant
+    itself, it just stops the next assessment from being capped.
+    """
+    from dataclasses import replace
+
+    stored = load_limits(config.state_dir)
+    if stored is None:
+        return None
+    ceiling_order = Decimal(str(config.max_order_pct))
+    ceiling_daily = Decimal(str(config.daily_notional_pct))
+    order = _clamp(Decimal(stored.max_order_pct), ceiling_order, MIN_ORDER_PCT)
+    daily = _clamp(Decimal(stored.daily_notional_pct), ceiling_daily, MIN_DAILY_PCT)
+    unchanged = order == Decimal(stored.max_order_pct) and daily == Decimal(
+        stored.daily_notional_pct
+    )
+    reason = "ceiling_reconciled" if unchanged else "ceiling_lowered"
+    confidence = float(stored.confidence or 0.0)
+    details = dict(stored.details or {})
+    if not unchanged:
+        # Only record the cut when there was one: rewriting this on every
+        # restart would churn the file (and its timestamp) forever.
+        details["reconciled_from_max_order_pct"] = stored.max_order_pct
+    details["ceiling_max_order_pct"] = str(ceiling_order)
+    details["ceiling_daily_notional_pct"] = str(ceiling_daily)
+    details["target_max_order_pct"] = str(
+        round(_target_for_confidence(ceiling_order, confidence), 6)
+    )
+    daily_scale = MIN_SCALE + (Decimal(1) - MIN_SCALE) * Decimal(
+        str(round(max(0.0, min(1.0, confidence)), 6))
+    )
+    details["target_daily_notional_pct"] = str(
+        round(_clamp(ceiling_daily * daily_scale, ceiling_daily, MIN_DAILY_PCT), 6)
+    )
+    # The stored budget may already fit the new ceiling while the ceiling it was
+    # priced under is still recorded in ``details`` — that record has to move
+    # too, or the console shows a budget that was justified by a limit the
+    # operator has since withdrawn.
+    if unchanged and details == dict(stored.details or {}):
+        return stored
+    updated = replace(
+        stored,
+        max_order_pct=str(order),
+        daily_notional_pct=str(daily),
+        reason=reason,
+        updated_at=_now(),
+        details=details,
+    )
+    save_limits(config.state_dir, updated)
+    return updated

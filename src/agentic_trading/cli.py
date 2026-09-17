@@ -634,6 +634,74 @@ def cmd_evolve(
     return 0
 
 
+def cmd_walkforward(
+    config_path: str,
+    *,
+    per_order_pct: Optional[float] = None,
+    max_positions: Optional[int] = None,
+    folds: int = 6,
+    out: Optional[str] = None,
+) -> int:
+    """Price the fixed rule on the bars in the config's history path.
+
+    Writes ``strategy_evidence.json`` next to the rest of the state so the
+    console can show it, and prints the same table to the terminal.
+    """
+    from agentic_trading.evidence import build_report, write_report
+    from agentic_trading.walkforward import GATE_SIZE_GRID
+
+    config = load_config(config_path)
+    try:
+        report = build_report(
+            config,
+            per_order_pct=per_order_pct,
+            max_positions=max_positions,
+            folds=folds,
+            grid=GATE_SIZE_GRID,
+        )
+    except Exception as exc:  # noqa: BLE001 — operator-facing diagnostics
+        print(f"walk-forward failed: {exc}", file=sys.stderr)
+        return 1
+    path = write_report(config, report, out=out)
+    print(_format_evidence(report))
+    print(f"\nwritten: {path}")
+    return 0
+
+
+def _format_evidence(report: dict[str, Any]) -> str:
+    lines = [
+        f"symbols: {len(report['series']['symbols'])}  "
+        f"bars: {report['series']['bars']}  folds: {report['folds']}",
+        f"{'config':>14} {'per%':>6} {'trades':>7} {'exp_bps':>8} "
+        f"{'maxDD%':>7} {'final$':>9} {'p':>7}  eligible",
+    ]
+    for name, entry in report["configs"].items():
+        lines.append(
+            f"{name:>14} {entry['per_order_pct'] * 100:>6.2f} "
+            f"{entry['trades']:>7} {entry['expectancy_bps']:>8.0f} "
+            f"{entry['max_drawdown_pct']:>7.2f} {entry['final_equity']:>9.2f} "
+            f"{entry['bootstrap_p_value']:>7.4f}  {entry['eligible']}"
+        )
+    gate = report.get("gate_size") or {}
+    if gate.get("per_order_pct"):
+        lines.append(
+            f"{'gate_size':>14} {gate['per_order_pct'] * 100:>6.2f} "
+            f"{gate['trades']:>7} {gate['expectancy_bps']:>8.0f} "
+            f"{gate['max_drawdown_pct']:>7.2f} {gate['final_equity']:>9.2f} "
+            f"{gate['bootstrap_p_value']:>7.4f}  {gate['eligible']}"
+        )
+        lines.append(
+            "  gate_size = largest flat size whose drawdown fits the "
+            f"{report['drawdown_ceiling_pct']:.0f}% ceiling (selected on this "
+            "sample: a ceiling on size, not a promise of return)"
+        )
+    else:
+        lines.append(f"{'gate_size':>14} {'—':>6}  {gate.get('reason', '')}")
+    for note in report.get("notes", []):
+        lines.append(f"  note: {note}")
+    return "\n".join(lines)
+
+
 def cmd_promote(config_path: str, stage: str) -> int:
     """Operator override: set the promotion stage explicitly."""
     from agentic_trading import selfimprove
@@ -859,6 +927,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "(default: all that suit the interval)",
     )
 
+    wf_p = sub.add_parser(
+        "walkforward",
+        help="Price the fixed rule walk-forward and record the evidence report",
+    )
+    wf_p.add_argument("--config", required=True)
+    wf_p.add_argument(
+        "--per-order",
+        type=float,
+        default=None,
+        dest="per_order",
+        help="Per-order fraction of equity (default: today's effective ceiling)",
+    )
+    wf_p.add_argument("--max-positions", type=int, default=None)
+    wf_p.add_argument("--folds", type=int, default=6)
+    wf_p.add_argument("--out", default=None, help="Where to write the report")
+
     promote_p = sub.add_parser(
         "promote", help="Operator override: set promotion stage"
     )
@@ -910,6 +994,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             symbols=args.symbols,
             interval=args.interval,
             families=args.families,
+        )
+    if args.command == "walkforward":
+        return cmd_walkforward(
+            args.config,
+            per_order_pct=args.per_order,
+            max_positions=args.max_positions,
+            folds=args.folds,
+            out=args.out,
         )
     if args.command == "promote":
         return cmd_promote(args.config, args.stage)
