@@ -22,3 +22,6 @@ build/
 output/
 results/
 data/intraday/
+
+# Built Windows artifacts: downloadable from the Actions run, not committed.
+windows/dist/
