@@ -49,9 +49,28 @@ jobs:
             -ArgumentList "--selftest", "--workspace", $smoke -Wait -PassThru -NoNewWindow
           if ($launcher.ExitCode -ne 0) { throw "launcher self-test failed ($($launcher.ExitCode))" }
 
-          # The CLI is a console app, so a bare call is fine here.
-          & "./dist/AgenticTrader/agentic-trading.exe" selfcheck --offline --config "$smoke/config/agentic.toml"
-          if ($LASTEXITCODE -ne 0) { throw "frozen CLI self-check failed" }
+          # Start the frozen console and prove it answers over HTTP — on
+          # Windows, where the dashboard has never run before.
+          $dash = Start-Process -FilePath "./dist/AgenticTrader/agentic-trading.exe" `
+            -ArgumentList "dashboard", "--config", "$smoke/config/agentic.toml", "--port", "8787" `
+            -PassThru -NoNewWindow
+          try {
+            $ok = $false
+            foreach ($i in 1..20) {
+              Start-Sleep -Seconds 2
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:8787/api/summary" -UseBasicParsing -TimeoutSec 5
+                if ($r.StatusCode -eq 200 -and $r.Content -match '"mode"') { $ok = $true; break }
+              } catch { }
+            }
+            if (-not $ok) { throw "frozen dashboard never answered" }
+
+            # The CLI is a console app, so a bare call is fine here.
+            & "./dist/AgenticTrader/agentic-trading.exe" selfcheck --offline --config "$smoke/config/agentic.toml"
+            if ($LASTEXITCODE -ne 0) { throw "frozen CLI self-check failed" }
+          } finally {
+            if ($dash -and -not $dash.HasExited) { Stop-Process -Id $dash.Id -Force }
+          }
 
       - name: Package
         shell: pwsh

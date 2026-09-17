@@ -377,9 +377,17 @@ def check_plumbing(config: Any, *, port: Optional[int] = None) -> Check:
                 if response.status == 200:
                     notes.append("console answering")
                 else:
-                    problems.append(f"console returned {response.status}")
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            problems.append(f"console unreachable: {type(exc).__name__}")
+                    notes.append(f"console returned {response.status}")
+        except (urllib.error.URLError, OSError, ValueError):
+            # A stopped console is not a broken agent: the daemon trades, journals
+            # and self-evaluates with no dashboard attached. Reporting it as a
+            # failure made a headless run look unhealthy — and made the check
+            # pass on any machine where *some* console happened to answer on the
+            # port, including another workspace's.
+            notes.append(
+                f"console not running on port {resolved_port} "
+                "(start it with: agentic-trading dashboard)"
+            )
 
         if problems:
             return FAIL, "; ".join(problems)

@@ -287,3 +287,46 @@ class ReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConsoleProbeTests(unittest.TestCase):
+    """A stopped console is not a broken agent.
+
+    The Windows CI smoke test failed on this: nothing was serving the dashboard
+    on the runner, so `plumbing` returned FAIL and the packaged app looked
+    unhealthy. Worse, locally the same check passed because *this* machine's
+    production console happened to answer on the port, which is the kind of
+    green light that means nothing.
+    """
+
+    def test_a_missing_console_is_a_warning_with_a_hint(self) -> None:
+        from agentic_trading.selfcheck import check_plumbing
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name), symbols=["SPY"])
+            with mock.patch("urllib.request.urlopen", side_effect=OSError("refused")):
+                check = check_plumbing(config, port=1)
+        self.assertEqual(check.status, OK)
+        self.assertIn("console not running", check.detail)
+        self.assertIn("agentic-trading dashboard", check.detail)
+
+    def test_an_answering_console_is_reported_as_such(self) -> None:
+        from agentic_trading.selfcheck import check_plumbing
+        from unittest import mock
+
+        class _Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name), symbols=["SPY"])
+            with mock.patch("urllib.request.urlopen", return_value=_Response()):
+                check = check_plumbing(config, port=8787)
+        self.assertEqual(check.status, OK)
+        self.assertIn("console answering", check.detail)
