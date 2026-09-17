@@ -17,7 +17,7 @@ Two design choices keep it from becoming a latency or reliability problem:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -50,6 +50,7 @@ class RegimeView:
     confidence: float
     reason: str
     at: str
+    market: dict[str, Any] = field(default_factory=dict)
 
     @property
     def blocks_entries(self) -> bool:
@@ -63,6 +64,7 @@ class RegimeView:
             "reason": self.reason,
             "at": self.at,
             "blocks_entries": self.blocks_entries,
+            "market": dict(self.market),
         }
 
 
@@ -231,6 +233,16 @@ class RegimeGate:
             self.errors += 1
             self.last_error = f"unparseable regime output: {raw[:200]!r}"
             return None
+        if features is not None:
+            # Record the numbers the classification was based on.
+            view = RegimeView(
+                symbol=view.symbol,
+                regime=view.regime,
+                confidence=view.confidence,
+                reason=view.reason,
+                at=view.at,
+                market=features.to_dict(),
+            )
         self.last_error = ""
         self._views[view.symbol] = view
         self.save()

@@ -817,6 +817,9 @@ class _Loop:
                         "role": "entry" if is_entry else "exit",
                         "symbol": intent.symbol,
                         "reused": bool(getattr(self.advisor, "last_reused", False)),
+                        # What the model was shown, so its verdict is auditable
+                        # rather than only quotable.
+                        "market": features.to_dict() if features else None,
                         **decision.to_dict(),
                     }
                 )

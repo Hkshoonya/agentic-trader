@@ -74,6 +74,29 @@ class MarketFeatures:
             )
         return lines
 
+    def to_dict(self) -> dict[str, Any]:
+        """The same numbers as a record, so a verdict can be audited later.
+
+        Without this the journal shows what the model *said* but not what it was
+        shown, which makes an AI decision impossible to check or reproduce.
+        """
+        return {
+            "bars": self.bars,
+            "last_close": round(self.last_close, 6),
+            "ret_1_pct": round(self.ret_1_pct, 3),
+            "ret_5_pct": round(self.ret_5_pct, 3),
+            "ret_20_pct": round(self.ret_20_pct, 3),
+            "vol_pct": round(self.vol_pct, 3),
+            "trend_pct": round(self.trend_pct, 3),
+            "from_high_pct": round(self.from_high_pct, 3),
+            "range_position": round(self.range_position, 3),
+            "volume_z": None if self.volume_z is None else round(self.volume_z, 3),
+            "volume_coverage": round(self.volume_coverage, 3),
+            "spread_bps": (
+                None if self.spread_bps is None else round(self.spread_bps, 3)
+            ),
+        }
+
 
 def _tone(value: float) -> str:
     if value > 0:
