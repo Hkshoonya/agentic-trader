@@ -20,6 +20,9 @@ from typing import Any, Iterable, Optional
 # Enough bars for a trend and a range without turning every prompt into a
 # data dump.
 LOOKBACK = 60
+# Volume features need most bars to carry real volume; below this they are
+# dropped for that symbol rather than reported as signal.
+VOLUME_COVERAGE_FLOOR = 0.8
 
 # Bars are written undashed (BTCUSD_day.jsonl) by the fetcher, while the
 # whitelist and the crypto tools use pairs (BTC-USD). Try both.
@@ -39,6 +42,12 @@ class MarketFeatures:
     from_high_pct: float
     range_position: float  # 0 = at the low, 1 = at the high
     spread_bps: Optional[float]
+    # Volume is only reported when the bar file actually carries it: some
+    # crypto files record zero volume on 80%+ of days, and a z-score computed
+    # on that is an artefact, not activity.
+    volume_z: Optional[float] = None
+    volume_trend: Optional[float] = None
+    volume_coverage: float = 0.0
 
     def describe(self) -> list[str]:
         """One ``key=value`` line per feature, for the prompt."""
@@ -55,6 +64,14 @@ class MarketFeatures:
         ]
         if self.spread_bps is not None:
             lines.append(f"spread_bps={self.spread_bps:.1f}")
+        if self.volume_z is not None:
+            lines.append(f"volume_z_score={self.volume_z:+.2f}")
+        if self.volume_trend is not None:
+            lines.append(f"volume_5v20_ratio={self.volume_trend:.2f}")
+        if self.volume_coverage and self.volume_z is None:
+            lines.append(
+                f"volume=unreliable (present on {self.volume_coverage:.0%} of bars)"
+            )
         return lines
 
 
@@ -80,8 +97,8 @@ def bar_path(history_path: Path | str, symbol: str, interval: str) -> Optional[P
     return None
 
 
-def _load_closes(path: Path, limit: int) -> list[float]:
-    """Tail the file: the newest ``limit`` closes, oldest first."""
+def _load_closes(path: Path, limit: int) -> tuple[list[float], list[float]]:
+    """Tail the file: the newest ``limit`` closes (oldest first) and their volumes."""
     rows: list[str] = []
     try:
         with path.open(encoding="utf-8") as stream:
@@ -91,11 +108,12 @@ def _load_closes(path: Path, limit: int) -> list[float]:
                     if len(rows) > limit * 2:
                         del rows[: limit]
     except OSError:
-        return []
+        return [], []
 
     import json
 
     closes: list[float] = []
+    volumes: list[float] = []
     for line in rows[-limit:]:
         try:
             payload = json.loads(line)
@@ -104,7 +122,11 @@ def _load_closes(path: Path, limit: int) -> list[float]:
             continue
         if math.isfinite(close) and close > 0:
             closes.append(close)
-    return closes
+            try:
+                volumes.append(float(payload.get("volume") or 0.0))
+            except (TypeError, ValueError):
+                volumes.append(0.0)
+    return closes, volumes
 
 
 def _stdev(values: Iterable[float]) -> float:
@@ -121,6 +143,7 @@ def features_from_closes(
     closes: list[float],
     *,
     spread_bps: Optional[float] = None,
+    volumes: Optional[list[float]] = None,
 ) -> Optional[MarketFeatures]:
     if len(closes) < 6:
         return None
@@ -157,6 +180,7 @@ def features_from_closes(
     trend_pct = ((slope * count) / last) * 100.0 if last else 0.0
     high, low = max(window), min(window)
     span = high - low
+    volume_z, volume_trend, volume_coverage = _volume_features(volumes, len(window))
     return MarketFeatures(
         symbol=symbol,
         bars=len(window),
@@ -169,7 +193,35 @@ def features_from_closes(
         from_high_pct=((high - last) / high) * 100.0 if high else 0.0,
         range_position=((last - low) / span) if span else 0.5,
         spread_bps=spread_bps,
+        volume_z=volume_z,
+        volume_trend=volume_trend,
+        volume_coverage=volume_coverage,
     )
+
+
+def _volume_features(
+    volumes: Optional[list[float]], window: int
+) -> tuple[Optional[float], Optional[float], float]:
+    """(z-score, 5-vs-20 ratio, coverage). All ``None`` when unusable."""
+    if not volumes:
+        return None, None, 0.0
+    recent = volumes[-window:] if len(volumes) > window else list(volumes)
+    positive = [value for value in recent if value > 0]
+    coverage = len(positive) / len(recent) if recent else 0.0
+    if coverage < VOLUME_COVERAGE_FLOOR or len(positive) < 21:
+        return None, None, coverage
+    mean = sum(positive) / len(positive)
+    spread = _stdev(positive)
+    last = recent[-1]
+    z_score = (last - mean) / spread if spread > 0 else 0.0
+    last_five = [value for value in recent[-5:] if value > 0]
+    last_twenty = [value for value in recent[-20:] if value > 0]
+    trend = (
+        (sum(last_five) / len(last_five)) / (sum(last_twenty) / len(last_twenty))
+        if last_five and last_twenty and sum(last_twenty) > 0
+        else 1.0
+    )
+    return z_score, trend, coverage
 
 
 def features_for(
@@ -195,8 +247,10 @@ def features_for(
         path = bar_path(history_path, symbol, interval)
         if path is None:
             continue
-        closes = _load_closes(path, LOOKBACK)
-        features = features_from_closes(symbol, closes, spread_bps=spread_bps)
+        closes, volumes = _load_closes(path, LOOKBACK)
+        features = features_from_closes(
+            symbol, closes, spread_bps=spread_bps, volumes=volumes
+        )
         if features is not None:
             return features
     return None

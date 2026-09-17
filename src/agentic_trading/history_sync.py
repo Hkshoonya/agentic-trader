@@ -19,7 +19,7 @@ This module closes that loop:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -42,6 +42,8 @@ class SyncResult:
     total: int
     last_start: str
     source: str
+    issues: list[str] = field(default_factory=list)
+    volume_usable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,7 +52,115 @@ class SyncResult:
             "total": self.total,
             "last_start": self.last_start,
             "source": self.source,
+            "issues": list(self.issues),
+            "volume_usable": self.volume_usable,
         }
+
+
+@dataclass(frozen=True)
+class QualityReport:
+    """What is wrong with a bar file, before anything is allowed to learn from it."""
+
+    symbol: str
+    bars: int
+    first_start: str
+    last_start: str
+    volume_coverage: float
+    issues: list[str]
+
+    @property
+    def volume_usable(self) -> bool:
+        return self.volume_coverage >= VOLUME_COVERAGE_FLOOR
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "bars": self.bars,
+            "first_start": self.first_start[:10],
+            "last_start": self.last_start[:10],
+            "volume_coverage": round(self.volume_coverage, 3),
+            "volume_usable": self.volume_usable,
+            "issues": list(self.issues),
+        }
+
+
+# Below this share of bars carrying real volume, volume features are dropped for
+# that symbol: a mostly-zero volume column is a data artefact, and a z-score
+# computed on it is noise dressed as signal.
+VOLUME_COVERAGE_FLOOR = 0.8
+# A single-bar move this large is a data error far more often than a real move.
+SPIKE_PCT = 60.0
+
+
+def check_records(symbol: str, records: list[dict[str, Any]]) -> QualityReport:
+    """Validate a bar file: ordering, duplicates, spikes, gaps, volume coverage."""
+    issues: list[str] = []
+    if not records:
+        return QualityReport(symbol, 0, "", "", 0.0, ["no bars"])
+
+    starts = [str(record.get("start") or "") for record in records]
+    if any(not start for start in starts):
+        issues.append("bars without a start timestamp")
+    ordered = [start for start in starts if start]
+    if ordered != sorted(ordered):
+        issues.append("bars are not in chronological order")
+    duplicates = len(ordered) - len(set(ordered))
+    if duplicates:
+        issues.append(f"{duplicates} duplicate timestamps")
+
+    closes: list[float] = []
+    volumes: list[float] = []
+    for record in records:
+        try:
+            closes.append(float(record["close"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        try:
+            volumes.append(float(record.get("volume") or 0.0))
+        except (TypeError, ValueError):
+            volumes.append(0.0)
+
+    if any(close <= 0 for close in closes):
+        issues.append("non-positive prices")
+    spikes = [
+        index
+        for index in range(1, len(closes))
+        if closes[index - 1] > 0
+        and abs(closes[index] / closes[index - 1] - 1.0) * 100.0 > SPIKE_PCT
+    ]
+    if spikes:
+        issues.append(f"{len(spikes)} single-bar moves over {SPIKE_PCT:.0f}%")
+
+    gaps = 0
+    for index in range(1, len(starts)):
+        try:
+            left = datetime.fromisoformat(starts[index - 1])
+            right = datetime.fromisoformat(starts[index])
+        except ValueError:
+            continue
+        # Crypto trades every day; equities pause for weekends. Allow a week so
+        # only genuine holes are flagged.
+        if (right - left).days > 7:
+            gaps += 1
+    if gaps:
+        issues.append(f"{gaps} gaps longer than a week")
+
+    coverage = (
+        sum(1 for volume in volumes if volume > 0) / len(volumes) if volumes else 0.0
+    )
+    if not volumes:
+        issues.append("no volume column")
+    elif coverage < VOLUME_COVERAGE_FLOOR:
+        issues.append(f"volume present on only {coverage:.0%} of bars")
+
+    return QualityReport(
+        symbol=symbol,
+        bars=len(records),
+        first_start=ordered[0] if ordered else "",
+        last_start=ordered[-1] if ordered else "",
+        volume_coverage=coverage,
+        issues=issues,
+    )
 
 
 def bar_stem(symbol: str) -> str:
@@ -166,6 +276,7 @@ def sync_symbol(
     existing = read_records(file)
     merged, added = merge_records(existing, incoming)
     write_records(file, merged)
+    report = check_records(symbol, merged)
     return SyncResult(
         symbol=symbol,
         path=str(file),
@@ -173,7 +284,13 @@ def sync_symbol(
         total=len(merged),
         last_start=str(merged[-1]["start"]) if merged else "",
         source="fetch",
+        issues=report.issues,
+        volume_usable=report.volume_usable,
     )
+
+
+def quality_for(path: Path | str, *, symbol: str) -> QualityReport:
+    return check_records(symbol, read_records(path))
 
 
 def sync_history(
@@ -196,6 +313,7 @@ def sync_history(
 
     results: list[SyncResult] = []
     errors: list[str] = []
+    quality: list[QualityReport] = []
     for symbol in wanted:
         stem = bar_stem(symbol)
         path = directory / f"{stem}_day.jsonl"
@@ -217,6 +335,18 @@ def sync_history(
             continue
         if result is not None:
             results.append(result)
+            quality.append(check_records(symbol, read_records(path)))
+    if quality:
+        try:
+            jsonio.write_text(
+                Path(config.state_dir) / "history_quality.json",
+                jsonio.dumps(
+                    {"reports": [report.to_dict() for report in quality]}, indent=2
+                )
+                + "\n",
+            )
+        except OSError:
+            pass
     return results, errors
 
 

@@ -67,6 +67,27 @@ class MarketFeatureTests(unittest.TestCase):
         assert features is not None
         self.assertEqual(features.bars, 30)
 
+    def test_volume_features_are_reported_when_the_data_is_real(self) -> None:
+        closes = [100.0 + i for i in range(40)]
+        volumes = [10.0] * 39 + [80.0]
+        features = features_from_closes("BTC-USD", closes, volumes=volumes)
+        self.assertIsNotNone(features.volume_z)
+        self.assertGreater(features.volume_z, 1.0)
+        # The spike is inside the 5-bar window, so the ratio is above 1.
+        self.assertGreater(features.volume_trend, 1.0)
+        self.assertIn("volume_z_score", " ".join(features.describe()))
+
+    def test_volume_is_dropped_when_the_column_is_mostly_zeros(self) -> None:
+        """A z-score on an artefact column is noise dressed as activity."""
+        closes = [100.0 + i for i in range(40)]
+        volumes = [0.0] * 35 + [10.0] * 5  # only 12% coverage
+        features = features_from_closes("SOL-USD", closes, volumes=volumes)
+        self.assertIsNone(features.volume_z)
+        self.assertLess(features.volume_coverage, 0.8)
+        text = " ".join(features.describe())
+        self.assertIn("volume=unreliable", text)
+        self.assertNotIn("volume_z_score", text)
+
     def test_spread_is_taken_from_the_live_quote(self) -> None:
         closes = [100.0 + i for i in range(30)]
         quote = {"bid": "99.99", "ask": "100.01"}

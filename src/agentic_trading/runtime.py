@@ -1334,12 +1334,26 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                 from agentic_trading.history_sync import sync_history
 
                 results, errors = sync_history(config, loop.broker)
+                flagged = [
+                    result.to_dict()
+                    for result in results
+                    if result.issues
+                ]
                 journal.append(
                     {
                         "event": "history_sync",
                         "symbols": len(results),
                         "added": sum(result.added for result in results),
-                        "details": [result.to_dict() for result in results],
+                        "details": [
+                            {
+                                "symbol": result.symbol,
+                                "added": result.added,
+                                "newest": result.last_start[:10],
+                                "volume_usable": result.volume_usable,
+                            }
+                            for result in results
+                        ],
+                        "quality_issues": flagged,
                         "errors": errors,
                     }
                 )

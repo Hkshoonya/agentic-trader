@@ -10,6 +10,7 @@ from pathlib import Path
 from agentic_trading.config import load_config
 from agentic_trading.history_sync import (
     bar_stem,
+    check_records,
     coinbase_row_to_record,
     fingerprint,
     merge_records,
@@ -205,6 +206,43 @@ class SyncHistoryTests(unittest.TestCase):
 
 
 class HistoryPlanTests(unittest.TestCase):
+
+    def test_quality_flags_duplicates_spikes_and_missing_volume(self) -> None:
+        # No volume column at all, plus a duplicate and an impossible move.
+        def bare(start: str, close: str) -> dict:
+            record = bar(start, close)
+            record.pop("volume")
+            return record
+
+        records = [bare("2026-09-14T00:00:00+00:00", "100")]
+        records.append(bare("2026-09-14T00:00:00+00:00", "100"))  # duplicate
+        records.append(bare("2026-09-15T00:00:00+00:00", "500"))  # +400% spike
+        report = check_records("BTC-USD", records)
+        self.assertEqual(report.bars, 3)
+        self.assertFalse(report.volume_usable)
+        joined = " | ".join(report.issues)
+        self.assertIn("duplicate", joined)
+        self.assertIn("60%", joined)
+        self.assertIn("volume", joined)
+
+    def test_quality_passes_a_clean_file(self) -> None:
+        records = []
+        for day in range(1, 25):
+            record = bar(f"2026-08-{day:02d}T00:00:00+00:00", str(100 + day))
+            record["volume"] = "10"
+            records.append(record)
+        report = check_records("BTC-USD", records)
+        self.assertEqual(report.issues, [])
+        self.assertTrue(report.volume_usable)
+
+    def test_quality_flags_a_week_long_hole(self) -> None:
+        records = [
+            bar("2026-08-01T00:00:00+00:00", "100"),
+            bar("2026-09-01T00:00:00+00:00", "101"),
+        ]
+        report = check_records("BTC-USD", records)
+        self.assertTrue(any("gap" in issue for issue in report.issues))
+
     def test_the_evaluation_universe_is_the_traded_whitelist(self) -> None:
         """Grading an edge on instruments the agent may not trade is a lie."""
         with tempfile.TemporaryDirectory() as name:
