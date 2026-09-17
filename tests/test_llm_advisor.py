@@ -15,6 +15,133 @@ from agentic_trading.llm.advisor import (
 )
 from agentic_trading.llm.client import FakeLlmClient, load_dotenv
 from agentic_trading.llm.client import running_under_tests
+from agentic_trading.llm.market import features_from_closes
+
+
+class _CountingClient:
+    model = "counting"
+
+    def __init__(self, reply: str = '{"action":"veto","confidence":0.8,"reason":"trap"}') -> None:
+        self.reply = reply
+        self.calls = 0
+
+    def complete(self, system: str, user: str) -> str:
+        self.calls += 1
+        return self.reply
+
+
+class BurstControlTests(unittest.TestCase):
+    """A signal burst must not queue a model call per symbol inside the loop."""
+
+    def _advisor(self, client, clock=None, **kwargs) -> LlmAdvisor:
+        return LlmAdvisor(client, model="counting", clock=clock, **kwargs)
+
+    def test_the_same_situation_reuses_one_verdict(self) -> None:
+        client = _CountingClient()
+        advisor = self._advisor(client)
+        features = features_from_closes("BTC-USD", [100.0 + i for i in range(40)])
+        for _ in range(5):
+            advisor.review_entry(
+                symbol="BTC-USD",
+                side="buy",
+                ref_price="139",
+                quantity="0.01",
+                reason="trend",
+                context={"market": features},
+            )
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(advisor.cache_hits, 4)
+        self.assertTrue(advisor.last_reused)
+
+    def test_a_different_situation_is_asked_again(self) -> None:
+        client = _CountingClient()
+        advisor = self._advisor(client)
+        rising = features_from_closes("BTC-USD", [100.0 + i for i in range(40)])
+        falling = features_from_closes("BTC-USD", [140.0 - i for i in range(40)])
+        advisor.review_entry(
+            symbol="BTC-USD", side="buy", ref_price="139", quantity="0.01",
+            reason="trend", context={"market": rising},
+        )
+        advisor.review_entry(
+            symbol="BTC-USD", side="buy", ref_price="101", quantity="0.01",
+            reason="trend", context={"market": falling},
+        )
+        self.assertEqual(client.calls, 2)
+
+    def test_the_other_side_is_a_different_question(self) -> None:
+        client = _CountingClient()
+        advisor = self._advisor(client)
+        features = features_from_closes("BTC-USD", [100.0 + i for i in range(40)])
+        for side in ("buy", "sell"):
+            advisor.review_entry(
+                symbol="BTC-USD", side=side, ref_price="139", quantity="0.01",
+                reason="exit", context={"market": features},
+            )
+        self.assertEqual(client.calls, 2)
+
+    def test_a_verdict_expires(self) -> None:
+        now = [0.0]
+        client = _CountingClient()
+        advisor = self._advisor(client, clock=lambda: now[0], cache_seconds=60.0)
+        features = features_from_closes("BTC-USD", [100.0 + i for i in range(40)])
+        advisor.review_entry(
+            symbol="BTC-USD", side="buy", ref_price="139", quantity="0.01",
+            reason="trend", context={"market": features},
+        )
+        now[0] = 61.0
+        advisor.review_entry(
+            symbol="BTC-USD", side="buy", ref_price="139", quantity="0.01",
+            reason="trend", context={"market": features},
+        )
+        self.assertEqual(client.calls, 2)
+
+    def test_the_per_minute_budget_degrades_to_no_opinion(self) -> None:
+        now = [0.0]
+        client = _CountingClient()
+        advisor = self._advisor(
+            client, clock=lambda: now[0], max_calls_per_minute=2, cache_seconds=0.0
+        )
+        features = [
+            features_from_closes("BTC-USD", [100.0 + i + j * 40 for i in range(40)])
+            for j in range(5)
+        ]
+        results = [
+            advisor.review_entry(
+                symbol="BTC-USD", side="buy", ref_price="139", quantity="0.01",
+                reason="trend", context={"market": feature},
+            )
+            for feature in features
+        ]
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(advisor.budget_skips, 3)
+        self.assertIn("budget", advisor.last_error)
+        self.assertIsNone(results[-1])
+
+    def test_the_budget_refills_after_a_minute(self) -> None:
+        now = [0.0]
+        client = _CountingClient()
+        advisor = self._advisor(
+            client, clock=lambda: now[0], max_calls_per_minute=1, cache_seconds=0.0
+        )
+        first = features_from_closes("BTC-USD", [100.0 + i for i in range(40)])
+        second = features_from_closes("BTC-USD", [140.0 - i for i in range(40)])
+        advisor.review_entry(
+            symbol="BTC-USD", side="buy", ref_price="139", quantity="0.01",
+            reason="trend", context={"market": first},
+        )
+        self.assertIsNone(
+            advisor.review_entry(
+                symbol="BTC-USD", side="buy", ref_price="101", quantity="0.01",
+                reason="trend", context={"market": second},
+            )
+        )
+        now[0] = 61.0
+        self.assertIsNotNone(
+            advisor.review_entry(
+                symbol="BTC-USD", side="buy", ref_price="101", quantity="0.01",
+                reason="trend", context={"market": second},
+            )
+        )
 
 
 class ParseTests(unittest.TestCase):

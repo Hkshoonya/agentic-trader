@@ -396,6 +396,24 @@ Two properties make it safe to leave running:
   allows trading exactly as before, and journals `regime_failed`. The gate can
   only ever subtract.
 
+**Burst control.** The advisor sits in the decision path, so a burst of signals
+used to cost one ~4s model call each. Two bounds now apply:
+
+- a **situation cache** (5 min) keyed on symbol + side + coarse market state
+  (trend bucket, range position, volatility, spread). The same question asked
+  again reuses the verdict and journals `reused: true`. The key is deliberately
+  coarse: the bucket has to be stable across a few seconds of tape movement, or
+  it would never match.
+- a **per-minute budget** (20 calls, `AGENTIC_ADVISOR_MAX_CALLS_PER_MINUTE`).
+  Past it the advisor degrades to "no opinion" and journals `advisor_budget`
+  rather than stalling the loop behind a queue of model calls. The veto is an
+  optional filter; RiskGuard, the regime gate and the correlation limit still
+  apply.
+
+Measured live: calls arrive per symbol and mostly distinct — 4 calls in 5
+minutes across BCH/BTC/ETH/LINK, all vetoes — so the cache correctly does not
+fire yet. It is insurance against the burst shape, not a claim of savings today.
+
 Retired on purpose, and still refused: letting the model search for strategies
 (that is what the evolution engine and the search-corrected significance bar are
 for — a model generating hypotheses would silently multiply the comparisons and

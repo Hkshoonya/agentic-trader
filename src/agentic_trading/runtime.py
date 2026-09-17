@@ -426,6 +426,9 @@ class _Loop:
                 "model": getattr(self.advisor, "model", ""),
                 "calls": len(getattr(self.advisor, "decisions", None) or []),
                 "errors": getattr(self.advisor, "errors", 0),
+                "cache_hits": getattr(self.advisor, "cache_hits", 0),
+                "reused": getattr(self.advisor, "cache_hits", 0),
+                "budget_skips": getattr(self.advisor, "budget_skips", 0),
                 "last_error": getattr(self.advisor, "last_error", ""),
             },
             {
@@ -711,6 +714,7 @@ class _Loop:
                     "confidence": decision.confidence,
                     "action": decision.action,
                     "model": getattr(self.advisor, "model", ""),
+                    "reused": bool(getattr(self.advisor, "last_reused", False)),
                 }
                 self.journal.append(
                     {
@@ -719,6 +723,7 @@ class _Loop:
                         "model": getattr(self.advisor, "model", ""),
                         "role": "entry" if is_entry else "exit",
                         "symbol": intent.symbol,
+                        "reused": bool(getattr(self.advisor, "last_reused", False)),
                         **decision.to_dict(),
                     }
                 )
@@ -736,7 +741,11 @@ class _Loop:
                 self.journal.append(
                     {
                         "decision_id": intent.decision_id,
-                        "event": "advisor_error",
+                        "event": (
+                            "advisor_budget"
+                            if "budget" in str(self.advisor.last_error)
+                            else "advisor_error"
+                        ),
                         "error": self.advisor.last_error,
                         "model": getattr(self.advisor, "model", ""),
                     }
