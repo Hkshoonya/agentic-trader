@@ -160,6 +160,9 @@ async function refresh() {
     const e = summary.evolution;
     document.getElementById('evolution').innerHTML =
       '<div class="row"><span>genomes evaluated</span><b>' + (e.evaluated ?? '—') + '</b></div>'
+      + '<div class="row"><span>universe</span><b>'
+        + ((e.symbols || []).length ? (e.symbols || []).join(',') : 'all bar files')
+        + '</b></div>'
       + '<div class="row"><span>train / test bars</span><b>' + (e.train_bars ?? '—') + ' / ' + (e.test_bars ?? '—') + '</b></div>'
       + '<div class="row"><span>seed</span><b>' + (e.seed ?? '—') + '</b></div>'
       + '<div class="row"><span>champion</span><b>' + JSON.stringify(e.champion).slice(0, 90) + '</b></div>'

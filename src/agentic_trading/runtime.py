@@ -1320,6 +1320,53 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
         return
     loop.last_evolution_at = now
 
+    # Refresh the bars first: without new data the same deterministic search
+    # returns the same evidence every hour, so confidence and the risk budget
+    # can never move.
+    if config.history_refresh_hours > 0:
+        if (
+            not hasattr(loop, "last_history_sync")
+            or (now - getattr(loop, "last_history_sync", 0.0))
+            >= config.history_refresh_hours * 3600
+        ):
+            loop.last_history_sync = now  # set first: a failure must not spin
+            try:
+                from agentic_trading.history_sync import sync_history
+
+                results, errors = sync_history(config, loop.broker)
+                journal.append(
+                    {
+                        "event": "history_sync",
+                        "symbols": len(results),
+                        "added": sum(result.added for result in results),
+                        "details": [result.to_dict() for result in results],
+                        "errors": errors,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 — never kill the loop
+                journal.append({"event": "history_sync_failed", "error": str(exc)[:200]})
+
+    # Skip the (minutes-long) search when nothing the evaluation reads has
+    # changed: the journal then explains why confidence is not moving.
+    if config.history_path is not None:
+        from agentic_trading.history_sync import fingerprint
+        from agentic_trading.selfimprove import history_plan
+
+        directory = Path(config.history_path)
+        if directory.is_dir():
+            _, _, planned = history_plan(directory, config)
+            current = fingerprint(directory, planned)
+            if current and current == getattr(loop, "history_fingerprint", None):
+                journal.append(
+                    {
+                        "event": "evaluation_skipped",
+                        "reason": "history_unchanged",
+                        "symbols": planned,
+                    }
+                )
+                return
+            loop.history_fingerprint = current
+
     if config.history_path is None:
         journal.append(
             {

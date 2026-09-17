@@ -454,6 +454,40 @@ shows the actual workers rather than a drawing of them: `strategy`, `advisor`
 (calls/errors), `regime` (views, worker live), `risk guard` (the caps in force),
 `evolution` (stage), `notifier` (channels, sent). Recent alerts appear beneath it.
 
+### The evidence has to be able to change
+
+`ev` in the order table is the system-wide evidence grade. Seeing it sit at the
+same value across hundreds of rejections is correct — but it exposed a real bug:
+nothing was refreshing the bar files, and the search is deterministic, so every
+hourly evaluation re-ran the same search over the same frozen data and returned
+the same number forever. The risk budget could never move.
+
+Two fixes:
+
+- **History refresh** (`history_refresh_hours`, default 24): the daemon
+  re-fetches daily bars — equities through the broker's historicals tool, crypto
+  through Coinbase's public candles (Robinhood has no crypto historicals tool at
+  all). Fetches are **merged** on bar start time, so a request that returns only
+  the recent window extends history instead of truncating it.
+- **Skip the search when nothing changed**: re-running a deterministic search
+  over identical files cannot produce different evidence, so the daemon
+  fingerprints the bar files it would read and journals
+  `evaluation_skipped: history_unchanged` instead of burning minutes of CPU. That
+  event is the honest answer to "why is confidence not moving".
+
+It also fixes what the search was grading. `run_evolution` used to pool **every**
+bar file on disk — 30 symbols — while the agent may only trade the 7 in its
+whitelist. Grading an edge on instruments you cannot trade is how a gate promotes
+a strategy that cannot run, so the evaluation universe is now the whitelist
+(`evolution.json` records it, and the console shows it), falling back to all
+files only if none of the whitelist has history.
+
+First run under the honest universe: confidence moved `0.5252 → 0.523`, out-of-
+sample trades `23 → 29`, expectancy `125 → 78 bps`, drawdown `7.97% → 13.79%`,
+bootstrap p `0.053 → 0.178` — and the risk budget followed it *down*
+(`confidence_down`). The old number was partly flattery from symbols the agent
+cannot trade.
+
 ### Known constraints and unverified areas
 
 - **Fractional shares only trade in regular hours as market orders.** At $50,

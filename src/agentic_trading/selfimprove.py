@@ -37,6 +37,30 @@ def autonomy_enabled() -> bool:
     return os.environ.get("AGENTIC_ALLOW_AUTONOMY") == "1"
 
 
+def history_plan(
+    directory: Path, config: Config
+) -> tuple[str, list[str], list[str]]:
+    """Which interval and which symbols the evaluation should read.
+
+    The universe is restricted to the operator's whitelist whenever those files
+    exist. Grading an edge on instruments the agent is not allowed to trade is
+    how a gate ends up promoting a strategy it cannot actually run.
+
+    Returns ``(interval, available_symbols, selected_symbols)``.
+    """
+    from agentic_trading.history_sync import bar_stem
+
+    day_files = sorted(directory.glob("*_day.jsonl"))
+    interval = "day" if day_files else "5minute"
+    available = sorted(
+        path.name[: -len(f"_{interval}.jsonl")]
+        for path in directory.glob(f"*_{interval}.jsonl")
+    )
+    wanted = {bar_stem(symbol) for symbol in (config.symbol_whitelist or [])}
+    selected = [name for name in available if name in wanted] if wanted else []
+    return interval, available, selected or available
+
+
 def run_evolution(
     config: Config,
     *,
@@ -62,12 +86,9 @@ def run_evolution(
         from agentic_trading.multisymbol import evolve_multi, load_symbol_bars
 
         directory = Path(config.history_path)
-        day_files = sorted(directory.glob("*_day.jsonl"))
-        interval = "day" if day_files else "5minute"
-        symbols = sorted(
-            path.name[: -len(f"_{interval}.jsonl")]
-            for path in directory.glob(f"*_{interval}.jsonl")
-        )
+        interval, available, symbols = history_plan(directory, config)
+        if not available:
+            raise ValueError(f"no usable bar files in {directory}")
         symbol_bars = load_symbol_bars(directory, symbols, interval=interval)
         if not symbol_bars:
             raise ValueError(f"no usable bar files in {directory}")
@@ -97,11 +118,18 @@ def run_evolution(
     )
 
 
-def write_evolution(result: EvolutionResult, state_dir: Path | str) -> Path:
+def write_evolution(
+    result: EvolutionResult,
+    state_dir: Path | str,
+    *,
+    symbols: Optional[list[str]] = None,
+) -> Path:
     path = Path(state_dir) / "evolution.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = result.to_dict()
     payload["run_at"] = datetime.now(timezone.utc).isoformat()
+    if symbols is not None:
+        payload["symbols"] = list(symbols)
     path.write_text(jsonio.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
 
@@ -119,7 +147,10 @@ def evaluate_and_record(
     result = run_evolution(
         config, population=population, generations=generations, seed=seed
     )
-    write_evolution(result, config.state_dir)
+    evaluated_symbols: list[str] = []
+    if config.history_path is not None and Path(config.history_path).is_dir():
+        _, _, evaluated_symbols = history_plan(Path(config.history_path), config)
+    write_evolution(result, config.state_dir, symbols=evaluated_symbols)
     assessment = assess(result, policy)
     state = load_state(config.state_dir)
     events = apply_assessment(state, assessment, policy, equity=equity)
