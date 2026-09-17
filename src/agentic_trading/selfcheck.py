@@ -251,22 +251,36 @@ def check_broker(config: Any, broker: Any) -> Check:
     """Read-only round trips: can we still see the account and the market?"""
 
     def run() -> tuple[str, str]:
-        started = time.perf_counter()
-        equity = broker.get_equity()
-        elapsed = time.perf_counter() - started
         crypto = [s for s in config.symbol_whitelist if is_crypto_symbol(s)][:6]
-        equity_symbols = [s for s in config.symbol_whitelist if not is_crypto_symbol(s)][
-            :20
-        ]
-        quotes = 0
-        if crypto:
-            quotes += len(broker.get_crypto_quotes(crypto) or {})
-        if equity_symbols:
-            quotes += len(broker.get_quotes(equity_symbols) or {})
-        return OK, (
-            f"account {equity} in {elapsed * 1000:.0f}ms; "
-            f"quotes for {len(crypto) + len(equity_symbols)} symbols"
-        )
+        equity_symbols = [
+            s for s in config.symbol_whitelist if not is_crypto_symbol(s)
+        ][:20]
+        # One retry: the first back-check runs seconds after a boot, and a cold
+        # resolver can fail once while the daemon reconnects fine moments later.
+        # Marking the whole system unhealthy for that is a false alarm.
+        last_error: Optional[Exception] = None
+        for attempt in range(2):
+            started = time.perf_counter()
+            try:
+                equity = broker.get_equity()
+                quotes = 0
+                if crypto:
+                    quotes += len(broker.get_crypto_quotes(crypto) or {})
+                if equity_symbols:
+                    quotes += len(broker.get_quotes(equity_symbols) or {})
+            except Exception as exc:  # noqa: BLE001 — reported, not raised
+                last_error = exc
+                if attempt == 0:
+                    time.sleep(2.0)
+                    continue
+                raise
+            elapsed = time.perf_counter() - started
+            note = "" if attempt == 0 else " (after one retry)"
+            return OK, (
+                f"account {equity} in {elapsed * 1000:.0f}ms; "
+                f"quotes for {len(crypto) + len(equity_symbols)} symbols{note}"
+            )
+        raise last_error if last_error else RuntimeError("broker check failed")
 
     return _timed("broker", run)
 
