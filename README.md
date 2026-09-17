@@ -446,6 +446,24 @@ Verified by restarting the live daemon mid-session: stage, streak, mode, budget,
 confidence, daily notional, equity, kill switch, accepted-order count and the
 journal were all intact, and two regime classifications came back from disk.
 
+**The strategy's own book was the exception, and it was the dangerous one.** A
+deliberate audit of a quiet overnight run found three defects in
+`strategies/trend_crypto.py`:
+
+- it recorded a position the moment it *emitted* an entry intent, so a vetoed or
+  capped entry still marked the symbol as held ("phantom" positions);
+- fills were keyed `BTC-USD` while lookups used `BTCUSD`, so the exit quantity
+  always read `0` and **the strategy could never close a position**;
+- holdings and the once-per-day rebalance guard lived in memory, so every
+  restart re-ran that day's rebalance and forgot what was open.
+
+Holdings are now derived from a ledger that only a reported fill changes, keyed
+the way the bar files are, persisted to `state_dir/strategy_trend_crypto.json`,
+and reconciled at start-up against the runtime's view — plus a replay of recent
+`accepted` records, because the runtime's own shadow book is day-scoped and
+legitimately forgets yesterday. An empty runtime view is treated as "no
+information", never as "you hold nothing".
+
 ### Alerts, and the roster on the console
 
 Unattended means the events that change the risk posture have to reach you

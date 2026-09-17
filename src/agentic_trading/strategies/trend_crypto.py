@@ -15,6 +15,7 @@ order itself and holds no broker reference.
 
 from __future__ import annotations
 
+import json
 import math
 import statistics
 from datetime import datetime, timezone
@@ -41,11 +42,13 @@ class TrendCryptoStrategy:
         symbols: list[str],
         max_positions: int = 5,
         min_vote: float = 0.5,
+        state_path: Path | str | None = None,
     ) -> None:
         self.bar_dir = Path(bar_dir)
         self.symbols = [s.upper() for s in symbols]
         self.max_positions = max_positions
         self.min_vote = min_vote
+        self.state_path = Path(state_path) if state_path else None
         self.history: dict[str, list[Bar]] = {}
         for symbol in self.symbols:
             # Bar files are named without the dash (BTCUSD_day.jsonl) while the
@@ -56,8 +59,86 @@ class TrendCryptoStrategy:
                 bars = load_bars(path)
                 if bars:
                     self.history[key] = bars
-        self._held: set[str] = set()
+        # Holdings are keyed the way the bar files are (BTCUSD), and are only
+        # ever changed by a *reported fill* — never by emitting an intent.
+        self._quantities: dict[str, Decimal] = {}
         self._last_decision_date = ""
+        self._load_state()
+
+    # -- position bookkeeping --------------------------------------------
+
+    def _key(self, symbol: str) -> str:
+        """Normalise any spelling (BTC-USD, BTCUSD, btc-usd) to the bar key."""
+        return str(symbol).replace("-", "").upper()
+
+    @property
+    def _held(self) -> set[str]:
+        """Positions actually held. Derived, so it cannot drift from the ledger."""
+        return {key for key, quantity in self._quantities.items() if quantity > 0}
+
+    def _load_state(self) -> None:
+        if self.state_path is None or not self.state_path.is_file():
+            return
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        if not isinstance(payload, dict):
+            return
+        quantities = payload.get("quantities")
+        if isinstance(quantities, dict):
+            for symbol, value in quantities.items():
+                try:
+                    quantity = Decimal(str(value))
+                except (TypeError, ValueError, ArithmeticError):
+                    continue
+                if quantity > 0:
+                    self._quantities[self._key(symbol)] = quantity
+        self._last_decision_date = str(payload.get("last_decision_date", ""))
+
+    def _save_state(self) -> None:
+        if self.state_path is None:
+            return
+        from agentic_trading import jsonio
+
+        payload = {
+            "last_decision_date": self._last_decision_date,
+            "quantities": {key: str(value) for key, value in self._quantities.items()},
+        }
+        try:
+            jsonio.write_text(
+                self.state_path, jsonio.dumps(payload, indent=2) + "\n"
+            )
+        except OSError:
+            return
+
+    def seed_positions(self, positions: dict[str, Any]) -> int:
+        """Adopt the runtime's view of what is held (it owns the truth).
+
+        Called at start-up so a restart — or a fresh state file — still knows
+        which positions need exits, and so the strategy cannot believe it holds
+        something that was vetoed or never filled.
+
+        An **empty** view is treated as "no information" rather than "you hold
+        nothing": the runtime's shadow book is day-scoped, so it is legitimately
+        empty at the start of a new day, and wiping the strategy's remembered
+        positions on that basis would strand exactly the exits we need.
+        """
+        if not positions:
+            return 0
+        seeded = 0
+        reconciled: dict[str, Decimal] = {}
+        for symbol, quantity in (positions or {}).items():
+            try:
+                value = Decimal(str(quantity))
+            except (TypeError, ValueError, ArithmeticError):
+                continue
+            if value > 0:
+                reconciled[self._key(symbol)] = value
+                seeded += 1
+        self._quantities = reconciled
+        self._save_state()
+        return seeded
 
     # -- signal ----------------------------------------------------------
 
@@ -126,6 +207,7 @@ class TrendCryptoStrategy:
             return []
 
         self._last_decision_date = day
+        self._save_state()  # a restart must not re-run today's rebalance
         targets = set(self.target_symbols(as_of=stamp))
         intents: list[OrderIntent] = []
 
@@ -150,9 +232,6 @@ class TrendCryptoStrategy:
                     created_at=stamp,
                 )
             )
-            self._held.discard(exiting)
-            self._held_quantity(exiting, clear=True)
-
         entering = sorted(targets - self._held)
         for new_symbol in entering:
             price = quote.get("ask") if new_symbol == symbol else None
@@ -172,25 +251,33 @@ class TrendCryptoStrategy:
                     created_at=stamp,
                 )
             )
-            self._held.add(new_symbol)
 
         return intents
 
     # -- position bookkeeping --------------------------------------------
 
     def _held_quantity(self, symbol: str, *, clear: bool = False) -> Decimal:
-        ledger = getattr(self, "_quantities", None)
-        if ledger is None:
-            ledger = {}
-            self._quantities = ledger
+        key = self._key(symbol)
         if clear:
-            return ledger.pop(symbol, Decimal("0"))
-        return ledger.get(symbol, Decimal("0"))
+            return self._quantities.pop(key, Decimal("0"))
+        return self._quantities.get(key, Decimal("0"))
 
-    def note_fill(self, symbol: str, quantity: Decimal) -> None:
-        """Called by the runtime when a shadow fill is recorded."""
-        ledger = getattr(self, "_quantities", None)
-        if ledger is None:
-            ledger = {}
-            self._quantities = ledger
-        ledger[symbol.upper()] = ledger.get(symbol.upper(), Decimal("0")) + quantity
+    def note_fill(self, symbol: str, quantity: Any) -> Decimal:
+        """Record an actual fill. Signed: sells are negative.
+
+        Called by the runtime for accepted shadow fills. Emitting an intent does
+        *not* change holdings — a vetoed or capped intent must not leave the
+        strategy believing it holds something it never bought.
+        """
+        key = self._key(symbol)
+        try:
+            delta = Decimal(str(quantity))
+        except (TypeError, ValueError, ArithmeticError):
+            return self._quantities.get(key, Decimal("0"))
+        updated = self._quantities.get(key, Decimal("0")) + delta
+        if updated <= 0:
+            self._quantities.pop(key, None)
+        else:
+            self._quantities[key] = updated
+        self._save_state()
+        return self._quantities.get(key, Decimal("0"))

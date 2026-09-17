@@ -283,6 +283,7 @@ def build_strategy(
             bar_dir=bar_dir,
             symbols=symbols,
             max_positions=config.max_open_positions * 5,
+            state_path=Path(config.state_dir) / "strategy_trend_crypto.json",
         )
     raise ValueError(f"unknown strategy: {name}")
 

@@ -12,11 +12,12 @@ session permitted by ``session_policy``, and a RiskGuard allow decision.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
@@ -492,8 +493,98 @@ class _Loop:
     def start(self) -> None:
         self.resolve_account()
         self.refresh_equity()
+        self.seed_strategy_positions()
         self.write_live_gate_state()
         self.write_agent_state()
+
+    def seed_strategy_positions(self) -> None:
+        """Tell the strategy what is actually held before it decides anything.
+
+        A restarted strategy otherwise believes the book is empty: it re-runs
+        the daily rebalance, and it can never emit an exit for a position it
+        does not know it has. The runtime owns the truth, so it hands it over.
+
+        The runtime's own shadow book is day-scoped, so "what is held" is taken
+        from the journal across recent days as well, which is where a position
+        opened yesterday actually lives.
+        """
+        seed = getattr(self.strategy, "seed_positions", None)
+        if not callable(seed):
+            return
+        held: dict[str, Decimal] = {}
+        try:
+            if self.mode == "shadow":
+                held.update(dict(self.shadow_book.as_snapshot().held))
+            else:
+                held.update(dict(self.live_positions().held))
+        except Exception as exc:  # noqa: BLE001 — never block start-up
+            self.journal.append({"event": "strategy_seed_failed", "error": str(exc)[:200]})
+            return
+        replayed = self.held_from_journal()
+        for symbol, quantity in replayed.items():
+            # The broker view wins when both exist; the journal covers the
+            # positions it has already forgotten (a new day, a restart).
+            held.setdefault(symbol, quantity)
+        if not held:
+            return
+        try:
+            count = seed({symbol: str(quantity) for symbol, quantity in held.items()})
+        except Exception as exc:  # noqa: BLE001
+            self.journal.append({"event": "strategy_seed_failed", "error": str(exc)[:200]})
+            return
+        if count:
+            self.journal.append(
+                {
+                    "event": "strategy_seeded",
+                    "positions": count,
+                    "from_journal": sorted(replayed),
+                    "mode": self.mode,
+                }
+            )
+
+    def held_from_journal(self, *, days: int = 10) -> dict[str, Decimal]:
+        """Net position per symbol from recent *accepted* decisions.
+
+        Accepted means "the runtime treated it as filled" in shadow, and "it was
+        submitted" in live — either way it is the best record of what the book
+        should contain once the day-scoped view has moved on.
+        """
+        held: dict[str, Decimal] = {}
+        today = date.today()
+        for offset in range(days - 1, -1, -1):
+            path = Path(self.config.journal_dir) / (
+                today - timedelta(days=offset)
+            ).isoformat()
+            file = path.with_suffix(".jsonl")
+            if not file.is_file():
+                continue
+            try:
+                lines = file.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("event") != "accepted":
+                    continue
+                intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+                symbol = str(record.get("symbol") or intent.get("symbol") or "").upper()
+                quantity = record.get("quantity") or intent.get("quantity")
+                if not symbol or quantity in (None, ""):
+                    continue
+                try:
+                    amount = Decimal(str(quantity))
+                except (TypeError, ValueError, ArithmeticError):
+                    continue
+                if str(record.get("side")).lower() == "sell":
+                    amount = -amount
+                held[symbol] = held.get(symbol, Decimal("0")) + amount
+        return {symbol: quantity for symbol, quantity in held.items() if quantity > 0}
 
     def resolve_account(self) -> str:
         if self.account_number:
@@ -851,7 +942,12 @@ class _Loop:
             # them as oversell (leaving the shadow book unable to flatten).
             note_fill = getattr(self.strategy, "note_fill", None)
             if callable(note_fill) and intent.quantity is not None:
-                note_fill(intent.symbol, intent.quantity)
+                # Signed: a sell reduces the strategy's book, otherwise it
+                # accumulates phantom positions and never exits them.
+                note_fill(
+                    intent.symbol,
+                    -intent.quantity if side is Side.SELL else intent.quantity,
+                )
             self.guard.persist(self.config.state_dir)
             return
 
