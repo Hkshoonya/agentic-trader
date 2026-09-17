@@ -36,6 +36,9 @@ hiddenimports = [
     "agentic_trading.evidence",
     "agentic_trading.walkforward",
     "agentic_trading.selfcheck",
+    "agentic_trading.tz",
+    # Windows has no zone database of its own.
+    "tzdata",
     "paper_scalper",
     "reporting",
     "tkinter",

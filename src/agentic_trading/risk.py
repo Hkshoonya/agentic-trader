@@ -46,7 +46,6 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Optional
-from zoneinfo import ZoneInfo
 
 from agentic_trading.types import OrderIntent, Side
 
@@ -370,7 +369,9 @@ class RiskGuard:
     def _today_key(self) -> str:
         if self.timezone in ("local", ""):
             return date.today().isoformat()
-        return datetime.now(ZoneInfo(self.timezone)).date().isoformat()
+        from agentic_trading.tz import zone
+
+        return datetime.now(zone(self.timezone)).date().isoformat()
 
     def _cap_equity(self) -> Decimal:
         eq = self.current_equity if self.current_equity > 0 else self.baseline_equity

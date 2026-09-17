@@ -18,7 +18,6 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from agentic_trading.backtest import (
     CostModel,
@@ -39,7 +38,9 @@ from agentic_trading.evolution import (
 )
 from agentic_trading.history import Bar
 
-ET = ZoneInfo("America/New_York")
+from agentic_trading.tz import eastern
+
+ET = eastern()
 SESSION_OPEN_MINUTE = 9 * 60 + 30
 
 BASE = "base"

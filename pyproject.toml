@@ -8,7 +8,12 @@ version = "0.1.0"
 description = "Local Robinhood MCP trading agent (shadow-first)"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27"]
+dependencies = [
+    "httpx>=0.27",
+    # Windows ships no timezone database and zoneinfo raises without one; the
+    # packaged app must not die at import because of the host OS.
+    "tzdata>=2024.1; platform_system == 'Windows'",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

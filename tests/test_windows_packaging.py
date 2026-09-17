@@ -330,3 +330,58 @@ class PathIsolationTests(unittest.TestCase):
         self.assertTrue(
             str(Path(config.state_dir)).startswith(workspace.as_posix())
         )
+
+
+class TimezoneTests(unittest.TestCase):
+    """Windows ships no tz database: the app must not die without one.
+
+    Caught by the Windows CI job: the frozen build failed at import with
+    ``ZoneInfoNotFoundError: 'No time zone found with key America/New_York'``.
+    Two defences now exist, and this pins the second one — the code path that
+    runs when tzdata is missing anyway, on a machine where nobody can install it.
+    """
+
+    def test_the_windows_dependency_is_declared(self) -> None:
+        text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("tzdata", text)
+        self.assertIn("platform_system == 'Windows'", text)
+        spec = (PACKAGE / "AgenticTrader.spec").read_text(encoding="utf-8")
+        self.assertIn('"tzdata"', spec)
+
+    def test_eastern_time_survives_a_missing_database(self) -> None:
+        """Simulate the Windows failure: no zone data, no crash."""
+        import sys
+        import types
+
+        from agentic_trading import tz as module
+
+        module.zone.cache_clear()
+        original = sys.modules["zoneinfo"]
+
+        class _ExplodingZoneInfo:
+            def __init__(self, key: str) -> None:
+                raise original.ZoneInfoNotFoundError(key)
+
+        stub = types.SimpleNamespace(
+            ZoneInfo=_ExplodingZoneInfo,
+            ZoneInfoNotFoundError=original.ZoneInfoNotFoundError,
+        )
+        sys.modules["zoneinfo"] = stub  # type: ignore[assignment]
+        try:
+            from datetime import datetime
+
+            resolved = module.zone("America/New_York")
+            offset = datetime(2026, 1, 15, tzinfo=resolved).utcoffset()
+        finally:
+            sys.modules["zoneinfo"] = original
+            module.zone.cache_clear()
+        self.assertIsNotNone(offset)
+        # Whatever fallback is chosen, it must be a plausible US offset, not UTC
+        # by accident: the trading calendar depends on it.
+        self.assertIn(offset.total_seconds() / 3600, (-5.0, -4.0))
+
+    def test_an_unknown_zone_falls_back_instead_of_raising(self) -> None:
+        from agentic_trading.tz import zone
+
+        resolved = zone("Mars/Olympus_Mons")
+        self.assertIsNotNone(resolved)

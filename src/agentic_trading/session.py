@@ -11,9 +11,10 @@ session policy except ``any`` (an explicit operator override used for testing).
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo
 
-ET = ZoneInfo("America/New_York")
+from agentic_trading.tz import eastern
+
+ET = eastern()
 
 PREMARKET_OPEN = time(4, 0)
 REGULAR_OPEN = time(9, 30)
