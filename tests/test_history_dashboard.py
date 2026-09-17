@@ -599,3 +599,159 @@ class CandidateTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
         self.assertIn("rows", payload)
+
+
+class OrderTableAccuracyTests(unittest.TestCase):
+    """The table has to be right, not just populated.
+
+    Each of these pins a way it was wrong: the last price missing on rejected
+    rows, the per-order grade taken from a snapshot hours after the decision,
+    and last night's decisions counted as today's.
+    """
+
+    def _config(self, tmp: Path) -> Any:
+        config = DashboardTests()._config(tmp)
+        Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+        Path(config.journal_dir).mkdir(parents=True, exist_ok=True)
+        return config
+
+    def _write(self, tmp: Path, day: str, records: list[dict]) -> None:
+        path = tmp / "journal" / f"{day}.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    def _snapshot(self, ret_20: float) -> dict:
+        return {
+            "bars": 60,
+            "last_close": 100.0,
+            "ret_1_pct": 0.0,
+            "ret_5_pct": 0.0,
+            "ret_20_pct": ret_20,
+            "vol_pct": 1.0,
+            "trend_pct": ret_20,
+            "from_high_pct": 1.0,
+            "range_position": 0.5,
+            "volume_z": 0.0,
+            "volume_coverage": 1.0,
+            "spread_bps": None,
+        }
+
+    def _reject(self, *, at: str, symbol: str = "BTC-USD", decision_id: str = "d") -> dict:
+        return {
+            "decision_id": decision_id,
+            "event": "rejected",
+            "reason": "regime_block: chop c=0.65",
+            "symbol": symbol,
+            "side": "buy",
+            "notional": "1.50",
+            "confidence": {"evidence": 0.4547},
+            "intent": {
+                "created_at": at,
+                "symbol": symbol,
+                "side": "buy",
+                "quantity": "0.00002",
+                "ref_price": "76459.39",
+            },
+        }
+
+    def test_a_rejected_row_still_shows_the_price_it_was_decided_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            self._write(
+                tmp,
+                date.today().isoformat(),
+                [self._reject(at="2026-09-17T09:44:32Z")],
+            )
+            rows = DashboardState(config).orders_table()["rows"]
+        self.assertEqual(rows[0]["last_price"], "76459.39")
+        self.assertEqual(rows[0]["last_price_source"], "decision")
+
+    def test_a_broker_quote_wins_over_the_decision_price(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            record = self._reject(at="2026-09-17T09:44:32Z")
+            record["event"] = "accepted"
+            record["review"] = {"data": {"quote_data": {"last_trade_price": "76500.00"}}}
+            record["order_request"] = {"type": "market"}
+            record["session"] = "regular"  # the runtime records it top-level
+            self._write(tmp, date.today().isoformat(), [record])
+            row = DashboardState(config).orders_table()["rows"][0]
+        self.assertEqual(row["last_price"], "76500.00")
+        self.assertEqual(row["last_price_source"], "quote")
+        self.assertEqual(row["type"], "market")
+        self.assertEqual(row["session"], "regular")
+
+    def test_the_grade_uses_the_snapshot_from_decision_time(self) -> None:
+        """A reading taken eleven hours later describes a different market."""
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            self._write(
+                tmp,
+                date.today().isoformat(),
+                [
+                    {
+                        "event": "regime",
+                        "symbol": "BTC-USD",
+                        "regime": "chop",
+                        "confidence": 0.65,
+                        "blocks_entries": True,
+                        "at": "2026-09-17T09:40:00Z",
+                        "market": self._snapshot(-20.0),
+                    },
+                    self._reject(at="2026-09-17T09:44:32Z"),
+                    {
+                        "event": "regime",
+                        "symbol": "BTC-USD",
+                        "regime": "trend_up",
+                        "confidence": 0.9,
+                        "blocks_entries": False,
+                        "at": "2026-09-17T20:00:00Z",
+                        "market": self._snapshot(25.0),
+                    },
+                ],
+            )
+            row = DashboardState(config).orders_table()["rows"][0]
+        grade = row["confidence"]["order"]
+        self.assertIsNotNone(grade)
+        assert grade is not None
+        self.assertEqual(grade["snapshot_at"], "2026-09-17T09:40:00Z")
+        self.assertTrue(grade["snapshot_exact"])
+        self.assertEqual(grade["parts"]["trend"], 0.0)
+
+    def test_a_row_with_no_snapshot_is_left_ungraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            self._write(
+                tmp,
+                date.today().isoformat(),
+                [self._reject(at="2026-09-17T09:44:32Z")],
+            )
+            row = DashboardState(config).orders_table()["rows"][0]
+        self.assertIsNone(row["confidence"]["order"])
+
+    def test_counters_are_today_but_the_table_reaches_back(self) -> None:
+        """Journals are named by local date; timestamps inside are UTC."""
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            # A decision made at 20:00 local yesterday is stamped *today* in UTC.
+            self._write(
+                tmp,
+                yesterday,
+                [self._reject(at=f"{date.today().isoformat()}T00:10:00Z", decision_id="d-old")],
+            )
+            self._write(
+                tmp,
+                date.today().isoformat(),
+                [self._reject(at="2026-09-17T09:44:32Z", decision_id="d-new")],
+            )
+            payload = DashboardState(config).orders_table()
+        self.assertEqual(payload["counts"]["rejected"], 1, "counted as today by mistake")
+        self.assertEqual(len(payload["rows"]), 2)
+        self.assertEqual(payload["older_rows"], 1)
+        older = next(row for row in payload["rows"] if row["older"])
+        self.assertEqual(older["day"], yesterday)

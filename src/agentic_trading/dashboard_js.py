@@ -349,7 +349,11 @@ function renderOrders(data) {
   const counts = (data && data.counts) || {};
   document.getElementById('orders-count').textContent =
     (counts.accepted || 0) + ' accepted · ' + (counts.placed || 0) + ' placed · '
-    + (counts.rejected || 0) + ' rejected · ' + (counts.failed || 0) + ' failed';
+    + (counts.rejected || 0) + ' rejected · ' + (counts.failed || 0) + ' failed today'
+    + (data.older_rows
+      ? ' · table shows ' + (data.rows || []).length + ' decisions over the last '
+        + (data.days_shown || 3) + ' days (' + data.older_rows + ' older)'
+      : '');
   if (!rows.length) {
     body.innerHTML = '<tr><td colspan="12" class="sub">no decisions yet</td></tr>';
     return;
@@ -368,7 +372,11 @@ function renderOrders(data) {
     const alerts = r.alerts && Object.keys(r.alerts).length
       ? Object.keys(r.alerts).join(', ') : 'none';
     const side = r.side ? '<span class="' + (r.side === 'buy' ? 'buy' : 'sell') + '">' + r.side + '</span>' : '—';
-    const at = r.at ? new Date(r.at).toLocaleTimeString() : '—';
+    // Rows can come from the last three journals, so an older row must show its
+    // date — a bare 5:44 AM would read as this morning's decision.
+    const at = r.at ? (r.older
+      ? new Date(r.at).toLocaleString(undefined, {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'})
+      : new Date(r.at).toLocaleTimeString()) : '—';
     // Three different questions, three numbers. `ev` is the strategy-level
     // evidence grade: it is computed from the evaluation and is identical for
     // every order until that evaluation changes. `order` is this order's own
@@ -380,6 +388,9 @@ function renderOrders(data) {
     const os = (oc.score === null || oc.score === undefined) ? null : Number(oc.score);
     const verdictClass = oc.verdict === 'buy' ? 'buy' : (oc.verdict === 'rejected' ? 'sell' : 'sub');
     const note = Object.values(oc.notes || {}).join('; ');
+    // Rows journaled before per-order grading existed have no snapshot to grade
+    // from. Saying so beats an empty cell that reads like a zero.
+    const noGrade = !c.order && ev !== null;
     const hasVerdict = !!oc.verdict;
     const confidence = (ai === null && ev === null && os === null && !hasVerdict)
       ? '<span class="sub">—</span>'
@@ -394,6 +405,7 @@ function renderOrders(data) {
         + ((os !== null || ai !== null) && ev !== null ? '<br>' : '')
         + (ev === null ? '' : '<span class="sub">ev ' + ev.toFixed(2) + '</span>')
         + (note ? '<br><span class="sub">' + note.slice(0, 120) + '</span>' : '')
+        + (noGrade ? '<br><span class="sub">order grade: no snapshot</span>' : '')
         + '</span>';
     return '<tr><td>' + at + '</td>'
       + '<td><span class="pill ' + r.event + '">' + r.event + '</span></td>'
@@ -404,7 +416,10 @@ function renderOrders(data) {
       + '<td>' + (r.session || '—') + '</td>'
       + '<td>' + size + '</td>'
       + '<td>$' + num(r.notional) + '</td>'
-      + '<td>' + (r.last_price ? '$' + num(r.last_price) : '—') + '</td>'
+      + '<td>' + (r.last_price
+        ? '$' + num(r.last_price)
+          + (r.last_price_source === 'decision' ? ' <span class="sub">dec</span>' : '')
+        : '—') + '</td>'
       + '<td>' + alerts + '</td>'
       + '<td class="sub">' + (r.reason || '') + '</td></tr>';
   }).join('');

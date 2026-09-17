@@ -49,20 +49,28 @@ def _grade_from_journal(
     record: dict[str, Any],
     *,
     symbol: Optional[str],
+    at: str = "",
     advisor: dict[str, Any],
-    regime: dict[str, dict[str, Any]],
+    regime: dict[str, list[dict[str, Any]]],
 ) -> Optional[dict[str, Any]]:
     """Grade an order from the snapshot the journal recorded at decision time.
 
     Older records predate per-order grading. The features they were decided on
     are still in the regime record's ``market`` block, so the grade can be
-    rebuilt from observed data rather than guessed — and it is labelled
-    ``journal`` so it is never confused with a grade the runtime computed.
+    rebuilt from observed data rather than guessed. The snapshot is the last one
+    taken *at or before* the decision: grading with a reading from eleven hours
+    later would describe a different market and quietly mis-explain the trade.
+    The payload is labelled ``journal`` and carries the snapshot time, so what
+    it was built from can be checked.
     """
     if not symbol:
         return None
-    view = regime.get(str(symbol).upper())
-    market = (view or {}).get("market") if isinstance(view, dict) else None
+    entries = regime.get(str(symbol).upper()) or []
+    if not entries:
+        return None
+    at_or_before = [entry for entry in entries if not at or str(entry.get("at") or "") <= at]
+    view = at_or_before[-1] if at_or_before else entries[0]
+    market = view.get("market") if isinstance(view, dict) else None
     if not isinstance(market, dict) or not market:
         return None
     try:
@@ -102,6 +110,8 @@ def _grade_from_journal(
         return None
     payload = grade.to_dict()
     payload["source"] = "journal"
+    payload["snapshot_at"] = str(view.get("at") or "")
+    payload["snapshot_exact"] = bool(at) and str(view.get("at") or "") <= at
     return payload
 
 
@@ -195,6 +205,42 @@ class DashboardState:
         path = self.journal_path()
         if not path.is_file():
             return []
+        return self._read_file(path, limit=limit)
+
+    def recent_records(self, *, days: int = 3, limit: int = 4000) -> list[dict[str, Any]]:
+        """The last few journals, oldest first.
+
+        The order table is decision-driven and this strategy decides once a day,
+        so a today-only table is empty every morning until the rebalance fires —
+        which reads as a broken console. Counters still come from today's file;
+        only the table looks back far enough to have something to say.
+        """
+        try:
+            files = sorted(
+                (
+                    path
+                    for path in self.journal_dir.glob("*.jsonl")
+                    if path.name[:1].isdigit()
+                ),
+                key=lambda path: path.name,
+            )[-days:]
+        except OSError:
+            return []
+        records: list[dict[str, Any]] = []
+        for path in files:
+            # Journal files are named by *local* date while every timestamp
+            # inside is UTC, so the only reliable way to know which day a
+            # decision belongs to is to remember which file it came from.
+            # Comparing the UTC date to the local date silently counted last
+            # night's decisions as today's.
+            records.extend(
+                {**record, "_journal_day": path.stem}
+                for record in self._read_file(path, limit=limit)
+            )
+        return records[-limit:]
+
+    @staticmethod
+    def _read_file(path: Path, *, limit: int = 2000) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
@@ -521,12 +567,18 @@ class DashboardState:
         """Every order the agent decided on today, newest first."""
         self.refresh_config()
         rows: list[dict[str, Any]] = []
-        records = self.read_records()
+        # Three days, not one: a daily-rebalance strategy would otherwise show an
+        # empty table every morning, which is indistinguishable from a broken one.
+        records = self.recent_records(days=3)
+        today = date.today().isoformat()
         # The advisor's opinion is journaled as its own record keyed by
         # decision_id, so join it back in: it is the per-order confidence, as
         # opposed to the system-wide evidence grade.
         advisor_by_decision: dict[str, dict[str, Any]] = {}
-        regime_by_symbol: dict[str, dict[str, Any]] = {}
+        # Every regime read, in time order, so a decision can be graded from the
+        # snapshot that was current when it was taken rather than from whatever
+        # the model happened to say hours later.
+        regime_by_symbol: dict[str, list[dict[str, Any]]] = {}
         for record in records:
             decision_id = record.get("decision_id")
             if decision_id and record.get("event") == "advisor":
@@ -535,7 +587,10 @@ class DashboardState:
             # shown, so a decision made before per-order grading existed can
             # still be graded from what was actually observed at the time.
             if record.get("event") == "regime" and record.get("symbol"):
-                regime_by_symbol[str(record["symbol"]).upper()] = record
+                symbol = str(record["symbol"]).upper()
+                regime_by_symbol.setdefault(symbol, []).append(record)
+        for entries in regime_by_symbol.values():
+            entries.sort(key=lambda entry: str(entry.get("at") or ""))
 
         for record in records:
             event = record.get("event")
@@ -566,12 +621,21 @@ class DashboardState:
                 else {}
             )
             advisor = advisor_by_decision.get(str(record.get("decision_id") or ""), {})
+            symbol = (
+                record.get("symbol")
+                or request.get("symbol")
+                or intent.get("symbol")
+            )
+            at = intent.get("created_at") or record.get("at") or ""
+            day = str(record.get("_journal_day") or str(at)[:10])
             rows.append(
                 {
-                    "at": intent.get("created_at") or record.get("at") or "",
+                    "at": at,
+                    "day": day,
+                    "older": bool(day) and day != today,
                     "event": event,
                     "reason": record.get("reason", ""),
-                    "symbol": record.get("symbol") or request.get("symbol") or intent.get("symbol"),
+                    "symbol": symbol,
                     "side": record.get("side") or request.get("side") or intent.get("side"),
                     "type": request.get("type", ""),
                     "market_hours": request.get("market_hours", ""),
@@ -585,7 +649,16 @@ class DashboardState:
                     "notional": record.get("notional", "0"),
                     "mode": record.get("mode", ""),
                     "session": record.get("session", ""),
-                    "last_price": (quote or {}).get("last_trade_price"),
+                    # A rejected order never reaches the broker's quote review,
+                    # but the decision itself carries the price it was made at.
+                    # Showing "—" there hides the only price the row has.
+                    "last_price": (quote or {}).get("last_trade_price")
+                    or intent.get("ref_price"),
+                    "last_price_source": (
+                        "quote" if (quote or {}).get("last_trade_price") else (
+                            "decision" if intent.get("ref_price") else ""
+                        )
+                    ),
                     "alerts": alerts if isinstance(alerts, dict) else {},
                     "ref_id": request.get("ref_id"),
                     "confidence": {
@@ -600,11 +673,8 @@ class DashboardState:
                         "order": confidence.get("order")
                         or _grade_from_journal(
                             record,
-                            symbol=(
-                                record.get("symbol")
-                                or request.get("symbol")
-                                or intent.get("symbol")
-                            ),
+                            symbol=symbol,
+                            at=at,
                             advisor=advisor,
                             regime=regime_by_symbol,
                         ),
@@ -612,14 +682,23 @@ class DashboardState:
                 }
             )
         rows.reverse()
+        today_rows = [row for row in rows if not row["older"]]
+        shown = rows[:limit]
         return {
-            "rows": rows[:limit],
+            "rows": shown,
+            # The card above the table says "today", so these must stay scoped to
+            # today even though the table itself reaches back far enough to have
+            # something in it on a quiet morning.
             "counts": {
-                "accepted": sum(1 for r in rows if r["event"] == "accepted"),
-                "placed": sum(1 for r in rows if r["event"] == "placed"),
-                "rejected": sum(1 for r in rows if r["event"] == "rejected"),
-                "failed": sum(1 for r in rows if r["event"] == "place_failed"),
+                "accepted": sum(1 for r in today_rows if r["event"] == "accepted"),
+                "placed": sum(1 for r in today_rows if r["event"] == "placed"),
+                "rejected": sum(1 for r in today_rows if r["event"] == "rejected"),
+                "failed": sum(1 for r in today_rows if r["event"] == "place_failed"),
             },
+            "days_shown": 3,
+            # Counted on the slice the table actually renders, so the footer
+            # cannot claim more rows than are on screen.
+            "older_rows": sum(1 for r in shown if r["older"]),
         }
 
 
