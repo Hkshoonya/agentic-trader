@@ -10,6 +10,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -32,10 +35,14 @@ jobs:
       - name: Smoke-test the frozen build
         shell: pwsh
         run: |
+          # The launcher seeds a workspace and reports what it found. Testing
+          # against the bare example config instead would fail every run: that
+          # config has no history_path, so the analysis checks have nothing to
+          # analyse, which is correct behaviour and a useless gate.
           $smoke = Join-Path $env:TEMP "agentic-smoke"
           ./dist/AgenticTrader/AgenticTrader.exe --selftest --workspace $smoke
           if ($LASTEXITCODE -ne 0) { throw "launcher self-test failed" }
-          ./dist/AgenticTrader/agentic-trading.exe selfcheck --offline --config config/agentic.example.toml
+          ./dist/AgenticTrader/agentic-trading.exe selfcheck --offline --config "$smoke/config/agentic.toml"
           if ($LASTEXITCODE -ne 0) { throw "frozen CLI self-check failed" }
 
       - name: Package
