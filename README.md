@@ -488,6 +488,49 @@ bootstrap p `0.053 → 0.178` — and the risk budget followed it *down*
 (`confidence_down`). The old number was partly flattery from symbols the agent
 cannot trade.
 
+### The back-check agent
+
+Every failure in this repo so far was found by a human noticing something odd — a
+stalled feed that looked like a quiet market, a truncated bar file that looked
+like a strategy with no signals, a frozen evidence grade that looked like
+patience. `selfcheck.py` runs the things the bot depends on and reports instead:
+
+| check | proves |
+|---|---|
+| `state` | every state file the loop reads still parses, caps inside their ceiling, confidence a probability |
+| `data` | every whitelisted symbol has bars, recent enough to trade, passing the quality gate |
+| `analysis` | bars load and a backtest actually runs on them — files existing is not proof |
+| `broker` | read-only round trips still work (skipped offline) |
+| `plumbing` | journal writable, alert channels resolvable, LLM enabled, console answering |
+
+It runs every `selfcheck_minutes` (default 30) on a worker thread, journals a
+`selfcheck` event, writes `state_dir/health.json`, and shows the result in the
+console's **Back-check** panel. Run it by hand with
+`agentic-trading selfcheck --config config/agentic.toml [--offline]`; the exit
+code is non-zero when something is failing. It never repairs anything — a
+failure is a finding, and fixing is either the operator's call or the daemon's
+existing self-healing.
+
+It earned its keep immediately: its first run failed on `'frozenset' object is
+not subscriptable` — a bug in the checker itself, which is exactly the category
+of mistake it exists to catch.
+
+### The widened book
+
+The whitelist now carries ten liquid equities (`SPY, QQQ, IWM, AAPL, MSFT, NVDA,
+AMZN, GOOGL, META, TSLA`) alongside the six 24/7 crypto pairs, all with five
+years of daily history already on disk. Widening is not the same as payoff: the
+bot still holds **one** position at a time (`max_open_positions`), so a wider
+universe adds opportunity, not exposure, and the re-run under the new universe
+did not produce an edge — out-of-sample trades fell to 7, expectancy 240 bps,
+max drawdown 2.5%, `p = 0.057` against a Bonferroni bar of `0.000347`, and the
+budget was cut again (2.955%/order, confidence 0.4547). The gate still says no.
+
+The broker's equity-only tools (`get_equity_news`, `get_earnings_calendar`,
+`get_equity_price_book`, `get_equity_technical_indicators`,
+`get_pnl_trade_history`) only become worth wiring now that the equity book is
+more than SPY.
+
 ### Known constraints and unverified areas
 
 - **Fractional shares only trade in regular hours as market orders.** At $50,

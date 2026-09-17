@@ -676,6 +676,26 @@ def cmd_dashboard(
     return 0
 
 
+def cmd_selfcheck(config_path: str, *, offline: bool = False) -> int:
+    """Read-only: verify state, data, analysis path, broker and plumbing."""
+    from agentic_trading.selfcheck import run_checks, write_report
+
+    config = load_config(config_path)
+    broker = None
+    if not offline:
+        try:
+            broker, _ = build_broker(config)
+        except Exception as exc:  # noqa: BLE001 — report rather than crash
+            print(f"broker unavailable ({exc}); running the offline checks only")
+    report = run_checks(config, broker, include_broker=broker is not None)
+    for check in report.checks:
+        print(f"{check.status.upper():5s} {check.name:9s} {check.ms:7.0f}ms  {check.detail}")
+    write_report(config, report)
+    print()
+    print("healthy" if report.healthy else "ATTENTION REQUIRED")
+    return 0 if report.healthy else 1
+
+
 def cmd_snapshot_tools(config_path: str) -> int:
     config = load_config(config_path)
     if not _token_available(config):
@@ -765,6 +785,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     reset_p = sub.add_parser("reset-kill-switch", help="Clear RiskGuard kill switch")
     reset_p.add_argument("--config", required=True)
+    check_p = sub.add_parser(
+        "selfcheck",
+        help="Read-only: verify state, data, analysis path, broker and plumbing",
+    )
+    check_p.add_argument("--config", required=True)
+    check_p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip the broker round trips (no network)",
+    )
 
     auth_p = sub.add_parser("auth", help="OAuth 2.1 PKCE desktop flow; save tokens")
     auth_p.add_argument("--config", required=True)
@@ -892,6 +922,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_flip_mode(args.config, args.mode)
     if args.command == "reset-kill-switch":
         return cmd_reset_kill_switch(args.config)
+    if args.command == "selfcheck":
+        return cmd_selfcheck(args.config, offline=args.offline)
     if args.command == "auth":
         return cmd_auth(args.config, profile=args.profile)
     if args.command == "snapshot-tools":

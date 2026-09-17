@@ -78,7 +78,7 @@ tr:hover td{background:#151d28}
   <div class="sub" id="orders-count"></div>
 </div>
 <div class="card span7"><h2>Live execution stream</h2><div id="stream"></div></div>
-<div class="card span5"><h2>Agents on duty</h2><div id="agents" class="sub">starting…</div><div id="alerts"></div></div>
+<div class="card span5"><h2>Agents on duty</h2><div id="agents" class="sub">starting…</div><div id="alerts"></div><div id="health"></div></div>
 <div class="card span5"><h2>Evolution evidence</h2><div id="evolution" class="sub">no evolution run yet</div><div id="regimes"></div></div>
 </main>
 <script>

@@ -1090,7 +1090,9 @@ def run_daemon(
         journal = loop.journal
         last_stats_at = time.monotonic()
         last_regime_at = 0.0
+        last_selfcheck_at = 0.0
         kill_state = loop.guard.kill_switch
+        workers: list[threading.Thread] = []
         cycles = 0
         cycle_seconds = 0.0
         fresh_total = 0
@@ -1157,6 +1159,43 @@ def run_daemon(
 
             # Regime views expire; refresh a batch on a worker so the order path
             # only ever reads a cached classification.
+            selfcheck_worker = getattr(loop, "selfcheck_thread", None)
+            if (
+                not once
+                and config.selfcheck_minutes > 0
+                and (now - last_selfcheck_at) >= config.selfcheck_minutes * 60
+                and not (selfcheck_worker and selfcheck_worker.is_alive())
+            ):
+                last_selfcheck_at = now
+
+                def _selfcheck(_loop: _Loop = loop) -> None:
+                    try:
+                        from agentic_trading.selfcheck import run_checks, write_report
+
+                        report = run_checks(_loop.config, _loop.broker)
+                        write_report(_loop.config, report)
+                        _loop.journal.append(
+                            {
+                                "event": "selfcheck",
+                                "healthy": report.healthy,
+                                "ok": sum(
+                                    1 for c in report.checks if c.status == "ok"
+                                ),
+                                "warnings": [c.to_dict() for c in report.warnings],
+                                "failures": [c.to_dict() for c in report.failures],
+                            }
+                        )
+                    except Exception as exc:  # noqa: BLE001 — never kill the loop
+                        _loop.journal.append(
+                            {"event": "selfcheck_failed", "error": str(exc)[:200]}
+                        )
+
+                loop.selfcheck_thread = threading.Thread(  # type: ignore[attr-defined]
+                    target=_selfcheck, daemon=True, name="selfcheck"
+                )
+                loop.selfcheck_thread.start()
+                workers.append(loop.selfcheck_thread)
+
             regime_worker = getattr(loop, "regime_thread", None)
             if (
                 loop.regime_gate is not None
@@ -1181,6 +1220,7 @@ def run_daemon(
                     name="regime-refresh",
                 )
                 loop.regime_thread.start()
+                workers.append(loop.regime_thread)
             loop.note_open_orders()
 
             try:
@@ -1268,6 +1308,12 @@ def run_daemon(
     finally:
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
+        # Let in-flight workers finish before the loop exits: a worker still
+        # writing into a caller's directory after shutdown is how "the daemon
+        # was stopped" turns into a half-written state file.
+        for worker in workers:
+            if worker.is_alive():
+                worker.join(timeout=10)
         loop.finish()
 
 

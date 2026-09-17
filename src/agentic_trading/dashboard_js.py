@@ -230,6 +230,23 @@ function renderAgents(summary) {
         .map(a => '<div class="row"><span>' + (a.title || a.key) + '</span><b class="sub">'
           + ((a.channels || []).join('+') || 'no channel') + '</b></div>').join('')
     : '';
+  // Back-check results: is the backend, the data and the analysis path sound?
+  const health = summary.health || {};
+  const healthBox = document.getElementById('health');
+  if (health.checked_at === undefined) {
+    healthBox.innerHTML = '';
+  } else {
+    const cls = health.healthy ? 'buy' : 'sell';
+    const detail = health.healthy
+      ? (health.ok || 0) + ' checks passed'
+      : (health.failures || []).length + ' failing';
+    const problems = (health.failures || []).concat(health.warnings || []);
+    healthBox.innerHTML = '<h2 style="margin-top:10px">Back-check</h2>'
+      + '<div class="row"><span>' + (health.healthy ? 'all systems' : 'attention')
+      + '</span><b class="' + cls + '">' + detail + '</b></div>'
+      + '<div class="sub">checked ' + new Date(health.checked_at).toLocaleTimeString() + '</div>'
+      + problems.map(p => '<div class="sub">• <b>' + p.name + '</b> ' + p.detail + '</div>').join('');
+  }
 }
 
 function renderOrders(data) {

@@ -130,7 +130,8 @@ def write_evolution(
     payload["run_at"] = datetime.now(timezone.utc).isoformat()
     if symbols is not None:
         payload["symbols"] = list(symbols)
-    path.write_text(jsonio.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    # Atomic: the console reads this file while the worker writes it.
+    jsonio.write_text(path, jsonio.dumps(payload, indent=2) + "\n")
     return path
 
 

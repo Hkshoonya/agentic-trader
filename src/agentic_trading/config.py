@@ -50,6 +50,8 @@ class Config:
     # Without this the evaluation re-runs the same search over frozen files and
     # confidence can never move.
     history_refresh_hours: float = 24.0
+    # How often the back-check agent verifies data, state and analysis paths.
+    selfcheck_minutes: float = 30.0
     # Phase 4 — self-evaluation, promotion, autonomy
     autonomy: str = "manual"  # manual | assisted | auto
     history_path: Path | None = None
@@ -102,6 +104,8 @@ class Config:
             raise ValueError("regime_refresh_seconds must be >= 0")
         if self.history_refresh_hours < 0:
             raise ValueError("history_refresh_hours must be >= 0")
+        if self.selfcheck_minutes < 0:
+            raise ValueError("selfcheck_minutes must be >= 0")
         if self.autonomy not in ("manual", "assisted", "auto"):
             raise ValueError("autonomy must be manual|assisted|auto")
         if self.evolution_interval_minutes < 0:
@@ -154,6 +158,7 @@ def load_config(path: str | Path) -> Config:
         cycle_stats_seconds=float(raw.get("cycle_stats_seconds", 60.0)),
         regime_refresh_seconds=float(raw.get("regime_refresh_seconds", 180.0)),
         history_refresh_hours=float(raw.get("history_refresh_hours", 24.0)),
+        selfcheck_minutes=float(raw.get("selfcheck_minutes", 30.0)),
         autonomy=str(raw.get("autonomy", "manual")),
         history_path=Path(raw["history_path"]) if raw.get("history_path") else None,
         evolution_interval_minutes=int(raw.get("evolution_interval_minutes", 60)),
