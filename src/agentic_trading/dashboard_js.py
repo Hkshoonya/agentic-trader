@@ -397,7 +397,11 @@ function renderOrders(data) {
       : '<span class="conf">'
         + (!hasVerdict ? ''
           : '<span class="' + verdictClass + '">' + oc.verdict
-            + (os === null ? '' : ' ' + os.toFixed(2)) + '</span>')
+            + (os === null ? '' : ' ' + os.toFixed(2))
+            // A rebuilt grade is not the reading the model was shown; say so on
+            // the row rather than letting the two be compared as equals.
+            + (oc.source === 'bars_asof' ? ' <span class="sub">as-of</span>' : '')
+            + '</span>')
         + (os !== null && ai !== null ? '<br>' : '')
         + (ai === null ? ''
           : '<span class="' + (c.advisor_action === 'veto' ? 'sell' : 'buy') + '">ai '

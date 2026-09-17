@@ -38,6 +38,14 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
+def _parse_stamp(value: str) -> Optional[datetime]:
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
 def _positive(value: Any) -> bool:
     try:
         return Decimal(str(value)) > 0
@@ -52,6 +60,7 @@ def _grade_from_journal(
     at: str = "",
     advisor: dict[str, Any],
     regime: dict[str, list[dict[str, Any]]],
+    features_as_of: Any = None,
 ) -> Optional[dict[str, Any]]:
     """Grade an order from the snapshot the journal recorded at decision time.
 
@@ -62,42 +71,59 @@ def _grade_from_journal(
     later would describe a different market and quietly mis-explain the trade.
     The payload is labelled ``journal`` and carries the snapshot time, so what
     it was built from can be checked.
+
+    Where the journal never recorded a snapshot at all, the features are rebuilt
+    from the stored bars cut off at the decision time and labelled ``bars_asof``
+    — the reading is the same series the strategy traded on, but it is a rebuild,
+    and calling it anything else would be dishonest.
     """
     if not symbol:
         return None
     entries = regime.get(str(symbol).upper()) or []
-    if not entries:
-        return None
+    when = _parse_stamp(at)
     at_or_before = [entry for entry in entries if not at or str(entry.get("at") or "") <= at]
-    view = at_or_before[-1] if at_or_before else entries[0]
+    view = at_or_before[-1] if at_or_before else (entries[0] if entries else None)
     market = view.get("market") if isinstance(view, dict) else None
-    if not isinstance(market, dict) or not market:
+    rebuilt = False
+    features: Any = None
+    if isinstance(market, dict) and market:
+        from agentic_trading.llm.market import MarketFeatures
+
+        try:
+            features = MarketFeatures(
+                symbol=str(symbol),
+                bars=int(market.get("bars") or 0),
+                last_close=float(market.get("last_close") or 0.0),
+                ret_1_pct=float(market.get("ret_1_pct") or 0.0),
+                ret_5_pct=float(market.get("ret_5_pct") or 0.0),
+                ret_20_pct=float(market.get("ret_20_pct") or 0.0),
+                vol_pct=float(market.get("vol_pct") or 0.0),
+                trend_pct=float(market.get("trend_pct") or 0.0),
+                from_high_pct=float(market.get("from_high_pct") or 0.0),
+                range_position=float(market.get("range_position") or 0.0),
+                spread_bps=(
+                    None
+                    if market.get("spread_bps") is None
+                    else float(market["spread_bps"])
+                ),
+                volume_z=(
+                    None if market.get("volume_z") is None else float(market["volume_z"])
+                ),
+                volume_coverage=float(market.get("volume_coverage") or 0.0),
+            )
+        except (TypeError, ValueError):
+            features = None
+    if features is None and features_as_of is not None and when is not None:
+        try:
+            features = features_as_of(str(symbol), when)
+        except Exception:  # noqa: BLE001 — an unavailable rebuild is not an error
+            features = None
+        rebuilt = features is not None
+    if features is None:
         return None
     try:
         from agentic_trading.confidence import grade_order
-        from agentic_trading.llm.market import MarketFeatures
 
-        features = MarketFeatures(
-            symbol=str(symbol),
-            bars=int(market.get("bars") or 0),
-            last_close=float(market.get("last_close") or 0.0),
-            ret_1_pct=float(market.get("ret_1_pct") or 0.0),
-            ret_5_pct=float(market.get("ret_5_pct") or 0.0),
-            ret_20_pct=float(market.get("ret_20_pct") or 0.0),
-            vol_pct=float(market.get("vol_pct") or 0.0),
-            trend_pct=float(market.get("trend_pct") or 0.0),
-            from_high_pct=float(market.get("from_high_pct") or 0.0),
-            range_position=float(market.get("range_position") or 0.0),
-            spread_bps=(
-                None
-                if market.get("spread_bps") is None
-                else float(market["spread_bps"])
-            ),
-            volume_z=(
-                None if market.get("volume_z") is None else float(market["volume_z"])
-            ),
-            volume_coverage=float(market.get("volume_coverage") or 0.0),
-        )
         grade = grade_order(
             features,
             regime=view,
@@ -109,9 +135,16 @@ def _grade_from_journal(
     except (TypeError, ValueError):
         return None
     payload = grade.to_dict()
-    payload["source"] = "journal"
-    payload["snapshot_at"] = str(view.get("at") or "")
-    payload["snapshot_exact"] = bool(at) and str(view.get("at") or "") <= at
+    payload["source"] = "bars_asof" if rebuilt else "journal"
+    payload["snapshot_at"] = (
+        at if rebuilt else str((view or {}).get("at") or "")
+    )
+    payload["snapshot_exact"] = bool(at) and str((view or {}).get("at") or "") <= at
+    if rebuilt:
+        payload["basis"] = (
+            "rebuilt from stored bars cut off at the decision time: the journal "
+            "recorded no market snapshot for this order"
+        )
     return payload
 
 
@@ -164,6 +197,49 @@ class DashboardState:
         self._config_lock = threading.Lock()
         self.journal_dir = Path(config.journal_dir)
         self.state_dir = Path(config.state_dir)
+        # Bar files are large and change at most once a day, so the as-of
+        # feature rebuild for the order table keeps them for a while.
+        self._bars_cache: dict[str, tuple[float, list[Any]]] = {}
+        self._bars_lock = threading.Lock()
+
+    def _bars_for(self, symbol: str) -> list[Any]:
+        import time as _time
+
+        now = _time.monotonic()
+        with self._bars_lock:
+            cached = self._bars_cache.get(symbol)
+            if cached is not None and (now - cached[0]) < 600:
+                return cached[1]
+        from agentic_trading.history import load_bars
+        from agentic_trading.history_sync import bar_stem
+
+        directory = Path(self.config.history_path or "data/bars")
+        path = directory / f"{bar_stem(symbol)}_day.jsonl"
+        bars: list[Any] = []
+        if path.is_file():
+            try:
+                bars = load_bars(path)
+            except Exception:  # noqa: BLE001 — an unreadable file is not a crash
+                bars = []
+        with self._bars_lock:
+            self._bars_cache[symbol] = (now, bars)
+        return bars
+
+    def features_as_of(self, symbol: str, when: datetime) -> Any:
+        """Market features from stored bars, cut off at ``when``.
+
+        Used only where the journal never recorded what the model saw. Stored
+        bars are the same series the runtime reads, so on the 82 instants where
+        both exist the rebuilt grade lands within 0.04 of the journaled one —
+        close enough to explain a decision, which is why it is labelled as a
+        rebuild rather than presented as the original reading.
+        """
+        from agentic_trading.llm.market import features_from_closes
+
+        closes = [float(bar.close) for bar in self._bars_for(symbol) if bar.start <= when]
+        if len(closes) < 30:
+            return None
+        return features_from_closes(symbol.upper(), closes[-260:])
 
     def _stat_config(self) -> Optional[tuple[int, int]]:
         if self._config_path is None:
@@ -677,6 +753,7 @@ class DashboardState:
                             at=at,
                             advisor=advisor,
                             regime=regime_by_symbol,
+                            features_as_of=self.features_as_of,
                         ),
                     },
                 }

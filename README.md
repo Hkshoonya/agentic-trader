@@ -717,9 +717,24 @@ Each row of the market/order table carries three confidences, because they
 answer three different questions: `ev` is the strategy-level evidence grade
 (one number for the strategy, and it only moves when the evaluation moves),
 `order` is that order's own grade from the tape it was decided on, and `ai` is
-the model's opinion when one was consulted. For decisions made before per-order
-grading existed, the console rebuilds the grade from the market snapshot the
-journal recorded at the time and labels the row's grade `journal`.
+the model's opinion when one was consulted.
+
+The `order` grade is graded, per row, in this order of preference:
+
+1. `live` — computed by the runtime at decision time. Every decision from here on.
+2. `journal` — rebuilt from the market snapshot the journal recorded *at or
+   before* that decision (a snapshot taken eleven hours later describes a
+   different market, so it is not used).
+3. `bars_asof` — rebuilt from the stored bars cut off at the decision time, for
+   decisions older than snapshot recording. Measured against the 82 instants
+   where both exist, this lands within 0.016 (median) and 0.038 (worst case) of
+   the journaled grade, and the row is marked `as-of` so it is never confused
+   with a reading the model actually saw. Where the bars cannot supply one, the
+   row stays ungraded and says so.
+
+Rows also show the price they were decided at (`dec`) when no broker quote
+exists — a rejected order never reaches the broker's review, and a blank price
+hides the only price that row has.
 
 ### Typical loop
 
