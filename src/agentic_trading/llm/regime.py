@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from agentic_trading.llm.client import LlmClient
@@ -109,15 +110,77 @@ class RegimeGate:
         ttl_seconds: float = 900.0,
         block_confidence: float = DEFAULT_BLOCK_CONFIDENCE,
         clock: Any = None,
+        state_path: Any = None,
     ) -> None:
         self.client = client
         self.model = model
         self.ttl_seconds = ttl_seconds
         self.block_confidence = block_confidence
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self.state_path = Path(state_path) if state_path else None
         self._views: dict[str, RegimeView] = {}
         self.errors = 0
         self.last_error = ""
+        self.load()
+
+    # -- persistence ------------------------------------------------------
+
+    def load(self) -> int:
+        """Restore classifications written by a previous run.
+
+        Without this a restart makes the gate deaf until the worker catches up,
+        and the bot quietly forgets what it had learned about the market.
+        """
+        if self.state_path is None or not self.state_path.is_file():
+            return 0
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return 0
+        views = payload.get("views") if isinstance(payload, dict) else None
+        if not isinstance(views, dict):
+            return 0
+        restored = 0
+        for symbol, raw in views.items():
+            if not isinstance(raw, dict):
+                continue
+            regime = str(raw.get("regime", ""))
+            if regime not in REGIMES:
+                continue
+            try:
+                confidence = float(raw.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                continue
+            self._views[str(symbol).upper()] = RegimeView(
+                symbol=str(symbol).upper(),
+                regime=regime,
+                confidence=min(1.0, max(0.0, confidence)),
+                reason=str(raw.get("reason", ""))[:200],
+                at=str(raw.get("at") or datetime.now(timezone.utc).isoformat()),
+            )
+            restored += 1
+        return restored
+
+    def save(self) -> None:
+        if self.state_path is None:
+            return
+        from agentic_trading import jsonio
+
+        try:
+            jsonio.write_text(
+                self.state_path,
+                jsonio.dumps(
+                    {
+                        "model": self.model,
+                        "updated_at": self._clock().isoformat(),
+                        "views": self.views(),
+                    },
+                    indent=2,
+                )
+                + "\n",
+            )
+        except OSError:
+            return
 
     # -- reads (never touch the network) ---------------------------------
 
@@ -170,6 +233,7 @@ class RegimeGate:
             return None
         self.last_error = ""
         self._views[view.symbol] = view
+        self.save()
         return view
 
     def refresh_due(

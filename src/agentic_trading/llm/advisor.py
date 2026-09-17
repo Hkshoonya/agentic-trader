@@ -66,6 +66,7 @@ def build_regime_gate(
     client: Optional[LlmClient] = None,
     *,
     model: str = "",
+    state_path: Any = None,
 ) -> Optional["RegimeGate"]:
     """Regime gate on the same opt-in as the advisor; ``None`` when disabled."""
     from agentic_trading.llm.regime import RegimeGate
@@ -76,7 +77,11 @@ def build_regime_gate(
     resolved = client if client is not None else build_llm_client()
     if isinstance(resolved, FakeLlmClient):
         return None
-    return RegimeGate(resolved, model=model or getattr(resolved, "model", ""))
+    return RegimeGate(
+        resolved,
+        model=model or getattr(resolved, "model", ""),
+        state_path=state_path,
+    )
 
 
 class LlmAdvisor:

@@ -25,6 +25,7 @@ from agentic_trading.broker import Broker, BrokerPayloadError
 from agentic_trading.config import Config
 from agentic_trading.journal import DecisionJournal
 from agentic_trading.marketdata import QuoteFeed, build_quote_feed
+from agentic_trading.notify import build_notifier
 from agentic_trading.orders import (
     EquityOrderRequest,
     OrderValidationError,
@@ -233,6 +234,31 @@ def build_order_request(
     )
 
 
+class NotifyingJournal:
+    """A journal that also fires operator alerts, and can never break on one.
+
+    Delegates everything else to the real journal, so callers (and RiskGuard)
+    keep using it exactly as before.
+    """
+
+    def __init__(self, inner: Any, notifier: Any) -> None:
+        self._inner = inner
+        self._notifier = notifier
+
+    def append(self, record: dict[str, Any]) -> None:
+        self._inner.append(record)
+        try:
+            alert = self._notifier.dispatch(record)
+        except Exception:  # noqa: BLE001 — an alert must never cost a decision
+            return
+        if alert is not None:
+            # Recorded through the inner journal so this cannot recurse.
+            self._inner.append({"event": "notify", **alert.to_dict()})
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class _Loop:
     """Shared quote → intent → guard → journal/broker pipeline."""
 
@@ -252,6 +278,12 @@ class _Loop:
         self.force_shadow = force_shadow
         self.mode = "shadow" if force_shadow else effective_mode(config)
         self.journal = DecisionJournal(Path(config.journal_dir))
+        notifier = build_notifier()
+        self.notifier = notifier
+        if notifier is not None:
+            # Alerts ride along with the journal: every decision already lands
+            # here, and an alert must never be able to block one.
+            self.journal = NotifyingJournal(self.journal, notifier)
         self.guard = build_guard(config, self.mode)
         self.shadow_book = ShadowBook.from_journal(self.journal)
         self.guard.attach_shadow_book(self.shadow_book)
@@ -276,7 +308,9 @@ class _Loop:
             self.advisor = build_advisor()
             # Same opt-in as the advisor: the console of LLM features is one
             # switch, and every part of it is bounded to reducing risk.
-            self.regime_gate = build_regime_gate()
+            self.regime_gate = build_regime_gate(
+                state_path=Path(config.state_dir) / "regimes.json"
+            )
         except Exception:  # noqa: BLE001 — advisory layer must never block startup
             self.advisor = None
             self.regime_gate = None
@@ -348,12 +382,103 @@ class _Loop:
             return
         self.journal.append({"event": "live_gate", **payload})
 
+    def write_agent_state(self) -> None:
+        """Publish what every worker in this process is doing.
+
+        The bot is not one loop: a mechanical strategy, an LLM veto, an LLM
+        regime gate, a RiskGuard, an evolution worker, a regime worker and a
+        notifier all make decisions together. The console can only show that if
+        the daemon writes it down, so this is the roster it reads.
+        """
+        from agentic_trading import jsonio
+
+        eval_thread = getattr(self, "eval_thread", None)
+        regime_thread = getattr(self, "regime_thread", None)
+        advisor_ok = self.advisor is not None
+        channels: list[str] = []
+        notifier = getattr(self, "notifier", None)
+        if notifier is not None:
+            channels = [channel.name for channel in notifier.channels]
+        agents = [
+            {
+                "name": "strategy",
+                "role": f"mechanical signals ({self.config.strategy})",
+                "kind": "local",
+                "status": "running" if not self.should_stop() else "stopped",
+            },
+            {
+                "name": "advisor",
+                "role": "LLM entry veto, may only refuse",
+                "kind": "llm",
+                "status": "running" if advisor_ok else "disabled",
+                "model": getattr(self.advisor, "model", ""),
+                "calls": len(getattr(self.advisor, "decisions", None) or []),
+                "errors": getattr(self.advisor, "errors", 0),
+                "last_error": getattr(self.advisor, "last_error", ""),
+            },
+            {
+                "name": "regime",
+                "role": "LLM regime gate, may only block entries",
+                "kind": "llm",
+                "status": "running" if self.regime_gate is not None else "disabled",
+                "model": getattr(self.regime_gate, "model", ""),
+                "views": len(self.regime_gate.views()) if self.regime_gate else 0,
+                "errors": getattr(self.regime_gate, "errors", 0),
+                "worker": bool(regime_thread and regime_thread.is_alive()),
+            },
+            {
+                "name": "risk guard",
+                "role": "hard caps, kill switch, whitelist",
+                "kind": "local",
+                "status": "tripped" if self.guard.kill_switch else "running",
+                "reason": self.guard.kill_reason,
+                "max_order_pct": str(self.guard.max_order_pct),
+                "daily_notional_pct": str(self.guard.daily_notional_pct),
+            },
+            {
+                "name": "evolution",
+                "role": "self-evaluation and promotion gate",
+                "kind": "worker",
+                "status": (
+                    "running"
+                    if eval_thread and eval_thread.is_alive()
+                    else "idle"
+                ),
+                "stage": self.stage,
+                "session_policy": self.session_policy,
+            },
+            {
+                "name": "notifier",
+                "role": "operator alerts",
+                "kind": "worker",
+                "status": "running" if notifier is not None else "disabled",
+                "channels": channels,
+                "sent": getattr(notifier, "sent", 0),
+                "failures": getattr(notifier, "failures", 0),
+            },
+        ]
+        payload = {
+            "pid": os.getpid(),
+            "mode": self.mode,
+            "stage": self.stage,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "agents": agents,
+        }
+        try:
+            jsonio.write_text(
+                Path(self.config.state_dir) / "agents.json",
+                jsonio.dumps(payload, indent=2) + "\n",
+            )
+        except OSError:
+            return
+
     # -- lifecycle --------------------------------------------------------
 
     def start(self) -> None:
         self.resolve_account()
         self.refresh_equity()
         self.write_live_gate_state()
+        self.write_agent_state()
 
     def resolve_account(self) -> str:
         if self.account_number:
@@ -965,6 +1090,7 @@ def run_daemon(
         journal = loop.journal
         last_stats_at = time.monotonic()
         last_regime_at = 0.0
+        kill_state = loop.guard.kill_switch
         cycles = 0
         cycle_seconds = 0.0
         fresh_total = 0
@@ -1096,6 +1222,19 @@ def run_daemon(
             # Cadence heartbeat: every broker round trip is ~1.3s over the MCP
             # gateway, so the operator needs the measured cycle time to tell a
             # quiet strategy apart from a slow loop.
+            # A kill-switch trip is a state change nothing else journaled, so
+            # nobody could be told about it. Announce both edges.
+            if loop.guard.kill_switch and not kill_state:
+                journal.append(
+                    {
+                        "event": "kill_switch",
+                        "reason": loop.guard.kill_reason,
+                        "mode": loop.mode,
+                        "stage": loop.stage,
+                    }
+                )
+            kill_state = loop.guard.kill_switch
+
             cycles += 1
             cycle_seconds += time.monotonic() - cycle_started
             fresh_total += len(fresh)
@@ -1105,6 +1244,7 @@ def run_daemon(
                 and (time.monotonic() - last_stats_at) >= config.cycle_stats_seconds
             )
             if stats_due:
+                loop.write_agent_state()
                 journal.append(
                     {
                         "event": "cycle_stats",

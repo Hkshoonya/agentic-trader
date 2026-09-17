@@ -402,6 +402,58 @@ for — a model generating hypotheses would silently multiply the comparisons an
 manufacture false positives), and letting it extend a hold past a mechanical
 exit.
 
+### What survives a restart
+
+The daemon is expected to be killed and restarted (`Restart=always`, reboots,
+deploys). Everything it has learned lives on disk, and a restart is checked
+against that promise rather than assumed:
+
+| state | file | survives |
+|---|---|---|
+| stage, streak, last assessment | `state_dir/promotion.json` | yes |
+| risk budget, confidence, session policy | `state_dir/effective_limits.json` | yes |
+| kill switch, day P&L, daily notional | `state_dir/risk_guard.json` | yes |
+| shadow book (rebuilt from today's journal) | `journal_dir/<date>.jsonl` | yes |
+| orders used today (counted from the journal) | `journal_dir/<date>.jsonl` | yes |
+| LLM regime classifications | `state_dir/regimes.json` | yes — otherwise the gate goes deaf until the worker catches up |
+| arming state, autonomy state | `state_dir/live_gate.json` | yes |
+| per-worker roster for the console | `state_dir/agents.json` | rewritten on start |
+
+State files are written atomically (`jsonio.write_text`), because a torn read of
+`effective_limits.json` used to parse as "no limits stored" and silently restore
+the full ceiling. A corrupt or unreadable file is treated as "no opinion", never
+as a reason to crash.
+
+Verified by restarting the live daemon mid-session: stage, streak, mode, budget,
+confidence, daily notional, equity, kill switch, accepted-order count and the
+journal were all intact, and two regime classifications came back from disk.
+
+### Alerts, and the roster on the console
+
+Unattended means the events that change the risk posture have to reach you
+instead of waiting to be noticed on a dashboard tab. `notify.py` alerts on:
+
+| event | urgency | cooldown |
+|---|---|---|
+| `promotion` (stage changed) | normal | none |
+| `promotion_requires_consent` | normal | none |
+| `live_gate_blocked` (ready, but not armed) | normal | 1 hour per symbol |
+| `kill_switch` tripped | critical | none |
+| `demotion` | critical | none |
+| `placed` (a real order went out) | normal | none |
+
+Channels: **desktop** (`notify-send`, on by default when present) and
+**Telegram** (`AGENTIC_TELEGRAM_BOT_TOKEN` + `AGENTIC_TELEGRAM_CHAT_ID`). Disable
+with `AGENTIC_NOTIFY=0`. A failing channel is counted, never fatal: the alert is
+swallowed and the loop keeps trading. Kill-switch trips were not even journaled
+before this, so nothing could have alerted on them — that gap is closed and the
+trip now appears in the journal and the stream.
+
+The console has an **Agents on duty** panel fed by `state_dir/agents.json`, so it
+shows the actual workers rather than a drawing of them: `strategy`, `advisor`
+(calls/errors), `regime` (views, worker live), `risk guard` (the caps in force),
+`evolution` (stage), `notifier` (channels, sent). Recent alerts appear beneath it.
+
 ### Known constraints and unverified areas
 
 - **Fractional shares only trade in regular hours as market orders.** At $50,

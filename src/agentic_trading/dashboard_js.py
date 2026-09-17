@@ -168,6 +168,7 @@ async function refresh() {
   // The model's read on each symbol's regime, and whether it is holding
   // entries back. A "+trend" never creates a trade; only chop/panic stop one.
   const regimes = summary.regimes || {};
+  renderAgents(summary);
   const symbols = Object.keys(regimes);
   if (symbols.length) {
     const rows = symbols.sort().map(sym => {
@@ -185,6 +186,47 @@ async function refresh() {
   offset = feed.offset;
   drawChart(curve);
   renderOrders(orders);
+}
+
+// Who is actually making decisions: the bot is a small team of workers, and
+// the daemon publishes their state so this is their roster, not a guess.
+function renderAgents(summary) {
+  const agents = summary.agents || [];
+  const box = document.getElementById('agents');
+  if (!agents.length) {
+    box.innerHTML = '<div class="sub">daemon has not published its roster yet</div>';
+  } else {
+    box.innerHTML = agents.map(a => {
+      const cls = a.status === 'running' ? 'buy'
+        : (a.status === 'tripped' ? 'sell' : 'sub');
+      let detail = '';
+      if (a.name === 'advisor') {
+        detail = (a.calls || 0) + ' calls · ' + (a.errors || 0) + ' errors';
+      } else if (a.name === 'regime') {
+        detail = (a.views || 0) + ' views'
+          + (a.worker ? ' · worker live' : '');
+      } else if (a.name === 'risk guard') {
+        detail = num(Number(a.max_order_pct || 0) * 100) + '%/order · '
+          + num(Number(a.daily_notional_pct || 0) * 100) + '%/day';
+      } else if (a.name === 'evolution') {
+        detail = 'stage ' + (a.stage || '?');
+      } else if (a.name === 'notifier') {
+        detail = (a.channels && a.channels.length ? a.channels.join('+') : 'none')
+          + ' · ' + (a.sent || 0) + ' sent';
+      } else {
+        detail = a.role || '';
+      }
+      return '<div class="row"><span>' + a.name + '</span><b class="' + cls + '">'
+        + a.status + '</b></div><div class="sub" style="margin:-2px 0 6px">'
+        + detail + '</div>';
+    }).join('');
+  }
+  const alerts = summary.alerts || [];
+  document.getElementById('alerts').innerHTML = alerts.length
+    ? '<h2 style="margin-top:10px">Recent alerts sent</h2>' + alerts.slice().reverse()
+        .map(a => '<div class="row"><span>' + (a.title || a.key) + '</span><b class="sub">'
+          + ((a.channels || []).join('+') || 'no channel') + '</b></div>').join('')
+    : '';
 }
 
 function renderOrders(data) {

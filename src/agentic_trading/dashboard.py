@@ -109,6 +109,7 @@ class DashboardState:
         risk = _read_json(self.state_dir / "risk_guard.json") or {}
         gate = _read_json(self.state_dir / "live_gate.json") or {}
         limits = _read_json(self.state_dir / "effective_limits.json") or {}
+        agents = _read_json(self.state_dir / "agents.json") or {}
         promotion = load_state(self.state_dir)
         evolution = _read_json(self.state_dir / "evolution.json")
         now = datetime.now(timezone.utc)
@@ -164,6 +165,20 @@ class DashboardState:
             "gate_updated_at": gate.get("updated_at", ""),
             "event_counts": counts,
             "regimes": regimes,
+            "agents": agents.get("agents", []),
+            "agents_updated_at": agents.get("updated_at", ""),
+            "alerts": [
+                {
+                    "at": record.get("at", ""),
+                    "title": record.get("title", ""),
+                    "body": record.get("body", ""),
+                    "key": record.get("key", ""),
+                    "channels": record.get("channels", []),
+                    "urgency": record.get("urgency", ""),
+                }
+                for record in records[-400:]
+                if record.get("event") == "notify"
+            ][-8:],
             "risk": {
                 "max_order_pct": limits.get("max_order_pct", str(self.config.max_order_pct)),
                 "daily_notional_pct": limits.get(
@@ -345,6 +360,11 @@ def _compact(record: dict[str, Any]) -> dict[str, Any]:
         "allow_autonomy",
         "stage",
         "confidence",
+        "title",
+        "body",
+        "channels",
+        "urgency",
+        "key",
     )
     compact = {key: record[key] for key in keep if key in record}
     intent = record.get("intent")

@@ -23,7 +23,7 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 main{display:grid;gap:14px;padding:16px;grid-template-columns:repeat(12,1fr)}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
 .card h2{margin:0 0 10px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
-.span3{grid-column:span 3}.span4{grid-column:span 4}.span5{grid-column:span 5}.span7{grid-column:span 7}.span8{grid-column:span 8}
+.span3{grid-column:span 3}.span4{grid-column:span 4}.span5{grid-column:span 5}.span7{grid-column:span 7}.span8{grid-column:span 8}.span12{grid-column:span 12}
 .metric{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
 .sub{color:var(--muted);font-size:12px}
 .row{display:flex;justify-content:space-between;gap:10px;padding:3px 0;flex-wrap:wrap}
@@ -52,7 +52,7 @@ tr:hover td{background:#151d28}
 .pill.place_failed{background:#3a1418;color:var(--sell)}
 .flash{animation:flash .7s ease}
 @keyframes flash{from{background:#17263a}to{background:transparent}}
-@media(max-width:900px){.span3,.span4,.span5,.span7,.span8{grid-column:span 12}}
+@media(max-width:900px){.span3,.span4,.span5,.span7,.span8,.span12{grid-column:span 12}}
 </style></head>
 <body>
 <header><h1>Agentic Trader</h1>
@@ -78,6 +78,7 @@ tr:hover td{background:#151d28}
   <div class="sub" id="orders-count"></div>
 </div>
 <div class="card span7"><h2>Live execution stream</h2><div id="stream"></div></div>
+<div class="card span5"><h2>Agents on duty</h2><div id="agents" class="sub">starting…</div><div id="alerts"></div></div>
 <div class="card span5"><h2>Evolution evidence</h2><div id="evolution" class="sub">no evolution run yet</div><div id="regimes"></div></div>
 </main>
 <script>
