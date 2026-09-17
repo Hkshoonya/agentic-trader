@@ -148,7 +148,11 @@ def _grade_from_journal(
     return payload
 
 
-def _evidence_view(report: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+def _evidence_view(
+    report: Optional[dict[str, Any]],
+    *,
+    auto_refresh_days: Optional[float] = None,
+) -> Optional[dict[str, Any]]:
     """Trim the walk-forward report to what the console shows.
 
     Kept deliberately short: the console answers "is the size I am trading still
@@ -175,6 +179,8 @@ def _evidence_view(report: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]
 
     return {
         "generated_at": report.get("generated_at", ""),
+        "auto_refresh_days": auto_refresh_days,
+        "refreshed_by_daemon": bool(report.get("age_at_build_days")),
         "drawdown_ceiling_pct": report.get("drawdown_ceiling_pct"),
         "symbols": (report.get("series") or {}).get("symbols", []),
         "bars": (report.get("series") or {}).get("bars"),
@@ -596,7 +602,10 @@ class DashboardState:
             # would hold if it decided this second.
             "cadence": self.cadence(),
             "candidate_summary": self._candidate_summary(),
-            "evidence": _evidence_view(_read_json(self.state_dir / "strategy_evidence.json")),
+            "evidence": _evidence_view(
+                _read_json(self.state_dir / "strategy_evidence.json"),
+                auto_refresh_days=self.config.evidence_refresh_days,
+            ),
             "generated_at": now.isoformat(),
         }
 

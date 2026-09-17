@@ -62,6 +62,10 @@ class Config:
     autonomy: str = "manual"  # manual | assisted | auto
     history_path: Path | None = None
     evolution_interval_minutes: int = 60
+    # Rebuild the walk-forward evidence report when it is older than this. The
+    # promotion gate refuses a stale report, so something has to refresh it, and
+    # "the operator will remember" is not a control. 0 disables.
+    evidence_refresh_days: float = 7.0
     evolution_population: int = 24
     evolution_generations: int = 6
     promotion_cycles_required: int = 3
@@ -125,6 +129,8 @@ class Config:
             raise ValueError("autonomy must be manual|assisted|auto")
         if self.evolution_interval_minutes < 0:
             raise ValueError("evolution_interval_minutes must be >= 0")
+        if self.evidence_refresh_days < 0:
+            raise ValueError("evidence_refresh_days must be >= 0")
         if self.evolution_population < 2:
             raise ValueError("evolution_population must be >= 2")
         if self.evolution_generations < 1:
@@ -184,6 +190,7 @@ def load_config(path: str | Path) -> Config:
         autonomy=str(raw.get("autonomy", "manual")),
         history_path=Path(raw["history_path"]) if raw.get("history_path") else None,
         evolution_interval_minutes=int(raw.get("evolution_interval_minutes", 60)),
+        evidence_refresh_days=float(raw.get("evidence_refresh_days", 7.0)),
         evolution_population=int(raw.get("evolution_population", 24)),
         evolution_generations=int(raw.get("evolution_generations", 6)),
         promotion_cycles_required=int(raw.get("promotion_cycles_required", 3)),

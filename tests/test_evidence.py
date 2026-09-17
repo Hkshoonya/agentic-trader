@@ -6,7 +6,9 @@ import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 from agentic_trading.config import load_config
 from agentic_trading.dashboard import _evidence_view
@@ -199,3 +201,151 @@ class EvidenceViewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StalenessTests(unittest.TestCase):
+    """The gate refuses a stale report; something has to notice that."""
+
+    def _at(self, days_ago: float) -> dict:
+        from datetime import datetime, timedelta, timezone
+
+        return {
+            "generated_at": (
+                datetime.now(timezone.utc) - timedelta(days=days_ago)
+            ).isoformat()
+        }
+
+    def test_age_is_measured_from_the_timestamp(self) -> None:
+        from agentic_trading.evidence import report_age_days
+
+        self.assertAlmostEqual(report_age_days(self._at(3)), 3.0, places=2)
+
+    def test_missing_unreadable_or_old_reports_are_stale(self) -> None:
+        from agentic_trading.evidence import is_stale
+
+        self.assertTrue(is_stale(None, max_age_days=7))
+        self.assertTrue(is_stale({"generated_at": "not-a-date"}, max_age_days=7))
+        self.assertTrue(is_stale(self._at(30), max_age_days=7))
+        self.assertFalse(is_stale(self._at(1), max_age_days=7))
+
+    def test_a_fresh_report_is_left_alone(self) -> None:
+        from unittest import mock
+
+        from agentic_trading import evidence as module
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"])
+            write_report(config, {"generated_at": self._at(1)["generated_at"]})
+            with mock.patch.object(module, "build_report") as builder:
+                out = module.refresh_if_stale(config, max_age_days=7)
+        self.assertIsNone(out)
+        builder.assert_not_called()
+
+    def test_a_stale_report_is_rebuilt_and_written(self) -> None:
+        from unittest import mock
+
+        from agentic_trading import evidence as module
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"])
+            write_report(config, {"generated_at": self._at(30)["generated_at"]})
+            with mock.patch.object(
+                module, "build_report", return_value={"generated_at": "fresh"}
+            ) as builder:
+                out = module.refresh_if_stale(config, max_age_days=7)
+                stored = read_report(config)
+        builder.assert_called_once()
+        assert out is not None
+        self.assertEqual(stored["generated_at"], "fresh")
+        # The rebuild records why it ran, so a silent weekly rewrite is auditable.
+        self.assertGreaterEqual(stored["age_at_build_days"], 29)
+        self.assertEqual(stored["refresh_max_age_days"], 7)
+
+    def test_a_missing_report_is_rebuilt(self) -> None:
+        from unittest import mock
+
+        from agentic_trading import evidence as module
+
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name), symbols=["SPY"])
+            with mock.patch.object(
+                module, "build_report", return_value={"generated_at": "fresh"}
+            ) as builder:
+                module.refresh_if_stale(config, max_age_days=7)
+        builder.assert_called_once()
+
+
+class DaemonRefreshTests(unittest.TestCase):
+    """The daemon has to refresh it without being asked."""
+
+    def _config(self, tmp: Path, *, days: float):
+        config = _config(tmp, symbols=["SPY"])
+        path = tmp / "agentic.toml"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + f"evidence_refresh_days = {days}\n",
+            encoding="utf-8",
+        )
+        return load_config(path)
+
+    def test_disabled_refresh_does_nothing(self) -> None:
+        from unittest import mock
+
+        from agentic_trading import runtime as module
+
+        with tempfile.TemporaryDirectory() as name:
+            config = self._config(Path(name), days=0)
+            loop = SimpleNamespace(guard=SimpleNamespace(current_equity=Decimal("50")))
+            journal = mock.Mock()
+            with mock.patch(
+                "agentic_trading.evidence.refresh_if_stale"
+            ) as refresh:
+                module._refresh_evidence(config, loop, journal)
+        refresh.assert_not_called()
+        journal.append.assert_not_called()
+
+    def test_a_refresh_is_journaled_with_its_numbers(self) -> None:
+        from unittest import mock
+
+        from agentic_trading import runtime as module
+
+        with tempfile.TemporaryDirectory() as name:
+            config = self._config(Path(name), days=7)
+            loop = SimpleNamespace(guard=SimpleNamespace(current_equity=Decimal("50")))
+            journal = mock.Mock()
+            report = {
+                "configs": {"production": {"per_order_pct": 0.01, "trades": 495}},
+                "gate_size": {"per_order_pct": 0.01},
+                "series": {"symbols": ["SPY"], "bars": 100},
+                "age_at_build_days": 12.0,
+            }
+            with mock.patch(
+                "agentic_trading.evidence.refresh_if_stale", return_value=report
+            ):
+                module._refresh_evidence(config, loop, journal)
+        events = [call.args[0] for call in journal.append.call_args_list]
+        self.assertEqual(events[0]["event"], "evidence_refreshed")
+        self.assertEqual(events[0]["trades"], 495)
+        self.assertEqual(events[0]["age_at_build_days"], 12.0)
+
+    def test_a_failure_is_journaled_and_not_retried_immediately(self) -> None:
+        from unittest import mock
+
+        from agentic_trading import runtime as module
+
+        with tempfile.TemporaryDirectory() as name:
+            config = self._config(Path(name), days=7)
+            loop = SimpleNamespace(guard=SimpleNamespace(current_equity=Decimal("50")))
+            journal = mock.Mock()
+            with mock.patch(
+                "agentic_trading.evidence.refresh_if_stale",
+                side_effect=RuntimeError("no bars"),
+            ) as refresh:
+                module._refresh_evidence(config, loop, journal)
+                module._refresh_evidence(config, loop, journal)
+        self.assertEqual(refresh.call_count, 1, "a failure must not spin every cycle")
+        events = [call.args[0] for call in journal.append.call_args_list]
+        self.assertEqual(events[0]["event"], "evidence_refresh_failed")
+        self.assertIn("no bars", events[0]["error"])

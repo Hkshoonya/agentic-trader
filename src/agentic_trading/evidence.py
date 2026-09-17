@@ -113,3 +113,66 @@ def read_report(config: Config) -> Optional[dict[str, Any]]:
     except (OSError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def report_age_days(
+    report: Optional[dict[str, Any]], *, now: Optional[datetime] = None
+) -> Optional[float]:
+    """How old the report is, or ``None`` when its timestamp is unusable."""
+    stamp = str((report or {}).get("generated_at") or "")
+    try:
+        seen = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    return ((now or datetime.now(timezone.utc)) - seen).total_seconds() / 86_400
+
+
+def is_stale(
+    report: Optional[dict[str, Any]],
+    *,
+    max_age_days: float,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Stale covers missing and unreadable, so a bad report self-heals.
+
+    The promotion gate refuses to act on a stale report, which is the right
+    behaviour and, without this, also a deadline: the agent would strand itself
+    the first time nobody regenerated the numbers.
+    """
+    if not report:
+        return True
+    age = report_age_days(report, now=now)
+    return age is None or age > max_age_days
+
+
+def refresh_if_stale(
+    config: Config,
+    *,
+    max_age_days: float,
+    max_positions: Optional[int] = None,
+    folds: int = 6,
+    grid: tuple[float, ...] = GATE_SIZE_GRID,
+    symbols: Optional[Iterable[str]] = None,
+) -> Optional[dict[str, Any]]:
+    """Rebuild the evidence report when it is missing or too old.
+
+    Returns the new report when one was built, ``None`` when the existing one is
+    still current. Any failure propagates to the caller: the daemon journals it
+    rather than trading on a report it could not produce.
+    """
+    existing = read_report(config)
+    if not is_stale(existing, max_age_days=max_age_days):
+        return None
+    report = build_report(
+        config,
+        max_positions=max_positions,
+        folds=folds,
+        grid=grid,
+        symbols=symbols,
+    )
+    report["age_at_build_days"] = report_age_days(existing)
+    report["refresh_max_age_days"] = max_age_days
+    write_report(config, report)
+    return report

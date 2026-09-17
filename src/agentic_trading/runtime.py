@@ -353,6 +353,54 @@ class _Loop:
             or self.config.session_policy
         )
         self.apply_correlation_policy()
+        self.reconcile_stage_mode()
+
+    def reconcile_stage_mode(self) -> Optional[dict[str, Any]]:
+        """Make the run mode agree with the stage the evidence earned.
+
+        A stage can be reached on a path that never applied it (a promotion
+        recorded from the walk-forward regrade while the search path — which
+        owns the mode flip — did not run), which leaves the agent promoted on
+        paper and shadow in practice. Reconciling at startup and after every
+        stage change is cheaper than trusting two code paths to stay identical.
+        """
+        from agentic_trading import selfimprove
+        from agentic_trading.promotion import load_state
+
+        state = load_state(self.config.state_dir)
+        if state.stage == "shadow":
+            # The stage can raise the mode; only a demotion or the operator may
+            # lower it. Forcing shadow here would override an operator who
+            # configured mode = "live" on purpose.
+            return None
+        target = "live"
+        current = effective_mode(self.config)
+        if target == current:
+            return None
+        if not (
+            self.config.autonomy == "auto" and selfimprove.autonomy_enabled()
+        ):
+            # Raising risk needs the operator's consent switch.
+            event = {
+                "event": "stage_mode_blocked",
+                "stage": state.stage,
+                "mode": current,
+                "hint": "set autonomy = \"auto\" and AGENTIC_ALLOW_AUTONOMY=1",
+            }
+            self.journal.append(event)
+            return event
+        event = {
+            "event": "stage_mode_reconciled",
+            "stage": state.stage,
+            "from": current,
+            "mode": target,
+            "autonomy": self.config.autonomy,
+        }
+        for applied in selfimprove.apply_stage(self.config, state):
+            event.setdefault("applied", []).append(applied)
+        self.set_mode(target)
+        self.journal.append(event)
+        return event
 
     def apply_correlation_policy(self) -> None:
         """Give the guard the concentration limit and the measured correlations."""
@@ -1535,6 +1583,90 @@ def save_evaluation_state(config: Any, payload: dict[str, Any]) -> None:
         return
 
 
+def _apply_promotion(
+    config: Config, loop: _Loop, journal: DecisionJournal, state: Any
+) -> None:
+    """Flip the run mode and record it, for any path that advanced a stage.
+
+    Two paths can promote — the scheduled search and the walk-forward regrade —
+    and they must not each own their own copy of this. The regrade path used to
+    record the promotion and stop there, which left the agent promoted in state
+    and shadow in practice.
+    """
+    from agentic_trading import selfimprove
+
+    if config.autonomy != "auto" or not selfimprove.autonomy_enabled():
+        journal.append(
+            {
+                "event": "promotion_requires_consent",
+                "stage": state.stage,
+                "hint": "set autonomy = \"auto\" and AGENTIC_ALLOW_AUTONOMY=1",
+            }
+        )
+        return
+    for event in selfimprove.apply_stage(config, state):
+        journal.append(event)
+    loop.set_mode("live" if state.stage != "shadow" else "shadow")
+    journal.append(
+        {
+            "event": "autonomy_applied",
+            "stage": state.stage,
+            "mode": loop.mode,
+            "caps": {"max_order_pct": str(loop.guard.max_order_pct)},
+        }
+    )
+
+
+def _refresh_evidence(config: Config, loop: _Loop, journal: DecisionJournal) -> None:
+    """Rebuild the walk-forward report when it is missing or too old.
+
+    The promotion gate refuses a stale report, which is right — and a deadline
+    unless something regenerates it. This is that something: the report is priced
+    off the freshly synced bars in the worker thread, so the bot can keep earning
+    its own promotion for years without an operator remembering a command.
+
+    It is deliberately rate-limited on attempt, not on success: a report that
+    cannot be produced must not be retried every cycle, and it must never touch
+    the order path.
+    """
+    if config.evidence_refresh_days <= 0:
+        return
+    interval = config.evolution_interval_minutes * 60
+    now = time.monotonic()
+    last = getattr(loop, "last_evidence_refresh_at", 0.0)
+    if last and (now - last) < max(interval, 1800):
+        return
+    loop.last_evidence_refresh_at = now  # set first: a failure must not spin
+    from agentic_trading.evidence import refresh_if_stale
+
+    try:
+        report = refresh_if_stale(
+            config,
+            max_age_days=config.evidence_refresh_days,
+            max_positions=config.max_open_positions,
+        )
+    except Exception as exc:  # noqa: BLE001 — never kill the trading loop
+        journal.append({"event": "evidence_refresh_failed", "error": str(exc)[:200]})
+        return
+    if report is None:
+        return
+    production = (report.get("configs") or {}).get("production") or {}
+    journal.append(
+        {
+            "event": "evidence_refreshed",
+            "age_at_build_days": report.get("age_at_build_days"),
+            "per_order_pct": production.get("per_order_pct"),
+            "trades": production.get("trades"),
+            "expectancy_bps": production.get("expectancy_bps"),
+            "max_drawdown_pct": production.get("max_drawdown_pct"),
+            "bootstrap_p_value": production.get("bootstrap_p_value"),
+            "gate_size_pct": (report.get("gate_size") or {}).get("per_order_pct"),
+            "symbols": len((report.get("series") or {}).get("symbols") or []),
+            "bars": (report.get("series") or {}).get("bars"),
+        }
+    )
+
+
 def _regrade_from_evidence(
     config: Config, loop: _Loop, journal: DecisionJournal
 ) -> None:
@@ -1598,7 +1730,22 @@ def _regrade_from_evidence(
     )
     for event in events:
         journal.append(event)
+
+    # Apply the freshly computed budget to the running guard, exactly as the
+    # scheduled path does: two paths that can promote must converge afterwards.
     loop.apply_stage_caps()
+    journal.append(
+        {
+            "event": "caps_applied",
+            "max_order_pct": str(loop.guard.max_order_pct),
+            "daily_notional_pct": str(loop.guard.daily_notional_pct),
+            "session_policy": loop.session_policy,
+            "confidence": round(float(assessment.confidence), 4),
+            "stage": loop.stage,
+        }
+    )
+    if any(event.get("event") == "promotion" for event in events):
+        _apply_promotion(config, loop, journal, state)
 
 
 def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -> None:
@@ -1727,6 +1874,11 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                     {"event": "correlations_failed", "error": str(exc)[:200]}
                 )
 
+    # The bars are as fresh as they are going to get this cycle, so this is the
+    # honest moment to re-price the rule — and the gate grades the report, not
+    # the search, so a report nobody refreshed is a promotion that never comes.
+    _refresh_evidence(config, loop, journal)
+
     # Skip the (minutes-long) search when nothing the evaluation reads has
     # changed: the journal then explains why confidence is not moving.
     # What execution actually cost, against what the model assumes. Cheap (one
@@ -1834,24 +1986,4 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
     promoted = any(event.get("event") == "promotion" for event in events)
     if not promoted:
         return
-    if config.autonomy != "auto" or not selfimprove.autonomy_enabled():
-        journal.append(
-            {
-                "event": "promotion_requires_consent",
-                "stage": promotion_state.stage,
-                "hint": "set autonomy = \"auto\" and AGENTIC_ALLOW_AUTONOMY=1",
-            }
-        )
-        return
-
-    for event in selfimprove.apply_stage(config, promotion_state):
-        journal.append(event)
-    loop.set_mode("live" if promotion_state.stage != "shadow" else "shadow")
-    journal.append(
-        {
-            "event": "autonomy_applied",
-            "stage": promotion_state.stage,
-            "mode": loop.mode,
-            "caps": {"max_order_pct": str(loop.guard.max_order_pct)},
-        }
-    )
+    _apply_promotion(config, loop, journal, promotion_state)

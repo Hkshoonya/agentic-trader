@@ -770,6 +770,21 @@ Drawdown is measured on the marked-to-market account, so a position that is
 back-check agent: if the live per-order size is larger than `gate_size`, the
 `evidence` check fails.
 
+The report does not depend on anyone remembering to run it. The daemon rebuilds
+it in its evaluation worker whenever it is older than `evidence_refresh_days`
+(default 7 days, `0` disables), off freshly synced bars, and journals
+`evidence_refreshed` with the headline numbers. That matters because the
+promotion gate refuses a stale report — without the automatic rebuild, "the bot
+earns its own promotion" would quietly become "the bot stalls in a month".
+
+Promotion itself is applied on every path that can reach it: the stage (which
+the evidence decides) raises the run mode, the mode file records it for the next
+restart, and the console journals `stage_applied` / `autonomy_applied`. The mode
+only ever moves *up* on its own — a demotion or the operator lowers it — because
+silently dropping a deliberately-configured `mode = "live"` would be a different
+kind of bug. Submission still needs `AGENTIC_ALLOW_LIVE=1`, so a promoted agent
+that is not armed journals `live_gate_blocked` instead of placing.
+
 On 11 years of the current 16-symbol universe (to 2026-09-17) the rule returns
 the same `+856 bps` expectancy per trade at every flat size, and drawdown scales
 with the size: 3.0% per order → 30.5% max drawdown, 1.5% → 19.2%, 1.0% → 14.0%.

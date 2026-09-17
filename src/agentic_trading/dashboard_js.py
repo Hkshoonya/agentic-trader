@@ -281,6 +281,10 @@ function renderEvidence(summary) {
       + (e.folds ?? '—') + ' walk-forward folds · drawdown ceiling '
       + num(e.drawdown_ceiling_pct) + '%'
       + (age === null ? '' : ' · report ' + age + 'd old')
+      + (e.auto_refresh_days
+        ? ' · the daemon rebuilds it when older than ' + e.auto_refresh_days + 'd'
+          + (e.refreshed_by_daemon ? ' (last rebuild was automatic)' : '')
+        : '')
       + (e.gate_reason ? ' · ' + e.gate_reason : '')
     + '</div>'
     + (e.notes || []).map(note => '<div class="sub">note: ' + note + '</div>').join('');

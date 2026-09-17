@@ -474,3 +474,93 @@ class DaemonLiveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StageApplicationTests(unittest.TestCase):
+    """A stage reached on one path must be applied on every path.
+
+    The walk-forward regrade path used to record a promotion and stop, leaving
+    the agent promoted in state (stage probability) and shadow in practice: no
+    mode flip, no budget, no journal trail.
+    """
+
+    def _loop(self, tmp: Path, *, mode: str = "shadow"):
+        from agentic_trading.runtime import _Loop
+
+        # autonomy = "auto" is the operator switch for self-promotion; the
+        # environment switch (AGENTIC_ALLOW_AUTONOMY) is patched per test.
+        config_path = _write_config(tmp, mode=mode, extra=['autonomy = "auto"'])
+        config = load_config(config_path)
+        client = FakeMcpClient(load_tools())
+        broker = Broker(client, load_tools())
+        (tmp / "state").mkdir(parents=True, exist_ok=True)
+        return _Loop(config, broker, FixtureStrategy()), config
+
+    def test_applying_a_promotion_flips_the_mode_and_journals_it(self) -> None:
+        from agentic_trading import runtime as module
+        from agentic_trading.promotion import PromotionState
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, config = self._loop(tmp)
+            journal = mock.Mock()
+            state = PromotionState(stage="probation")
+            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_AUTONOMY": "1"}):
+                module._apply_promotion(config, loop, journal, state)
+        events = [call.args[0]["event"] for call in journal.append.call_args_list]
+        self.assertIn("stage_applied", events)
+        self.assertIn("autonomy_applied", events)
+        self.assertEqual(loop.mode, "live")
+
+    def test_without_consent_the_promotion_is_recorded_not_applied(self) -> None:
+        from agentic_trading import runtime as module
+        from agentic_trading.promotion import PromotionState
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, config = self._loop(tmp)
+            journal = mock.Mock()
+            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_AUTONOMY": "0"}):
+                module._apply_promotion(
+                    config, loop, journal, PromotionState(stage="probation")
+                )
+        events = [call.args[0]["event"] for call in journal.append.call_args_list]
+        self.assertEqual(events, ["promotion_requires_consent"])
+        self.assertEqual(loop.mode, "shadow")
+
+    def test_reconcile_raises_the_mode_to_the_stage(self) -> None:
+        from agentic_trading.promotion import PromotionState, save_state
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, config = self._loop(tmp)
+            save_state(config.state_dir, PromotionState(stage="probation"))
+            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_AUTONOMY": "1"}):
+                event = loop.reconcile_stage_mode()
+            written = Path(config.state_dir, "mode").read_text().strip()
+        assert event is not None
+        self.assertEqual(event["event"], "stage_mode_reconciled")
+        self.assertEqual(loop.mode, "live")
+        # The file matters as much as the in-memory flip: a restart reads it.
+        self.assertEqual(written, "live")
+
+    def test_reconcile_never_lowers_an_operator_live_mode(self) -> None:
+        """mode = "live" in the config is an operator decision, not drift."""
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, config = self._loop(tmp, mode="live")
+            self.assertIsNone(loop.reconcile_stage_mode())
+            self.assertEqual(loop.mode, "live")
+
+    def test_reconcile_is_blocked_without_consent(self) -> None:
+        from agentic_trading.promotion import PromotionState, save_state
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, config = self._loop(tmp)
+            save_state(config.state_dir, PromotionState(stage="probation"))
+            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_AUTONOMY": "0"}):
+                event = loop.reconcile_stage_mode()
+        assert event is not None
+        self.assertEqual(event["event"], "stage_mode_blocked")
+        self.assertEqual(loop.mode, "shadow")
