@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,6 +36,13 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
     except (json.JSONDecodeError, OSError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _positive(value: Any) -> bool:
+    try:
+        return Decimal(str(value)) > 0
+    except (ArithmeticError, TypeError, ValueError):
+        return False
 
 
 def _grade_from_journal(
@@ -202,6 +209,153 @@ class DashboardState:
             return []
         return records[-limit:]
 
+    def cadence(self) -> dict[str, Any]:
+        """When this strategy actually decides, in plain language.
+
+        The console refreshes every two seconds, which makes a daily-rebalance
+        strategy look frozen: the stream moves, the order table does not, and
+        there is nothing on screen that explains why. This is that explanation,
+        computed from the strategy's own state file rather than guessed.
+        """
+        now = datetime.now(timezone.utc)
+        state_file = self.state_dir / f"strategy_{self.config.strategy}.json"
+        state = _read_json(state_file) or {}
+        last_date = str(state.get("last_decision_date") or "")
+        quantities = state.get("quantities") if isinstance(state, dict) else {}
+        held = [
+            symbol
+            for symbol, qty in (quantities or {}).items()
+            if _positive(qty)
+        ]
+        # The strategy rebalances on the first quote of each UTC day.
+        next_at = datetime.combine(
+            now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc
+        )
+        if last_date < now.date().isoformat():
+            next_at = now  # the next quote of this session triggers it
+        last_at = ""
+        for record in reversed(self.read_records(limit=4000)):
+            intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+            if record.get("event") in ("accepted", "rejected", "placed", "place_failed"):
+                last_at = str(intent.get("created_at") or record.get("at") or "")
+                break
+        return {
+            "strategy": self.config.strategy,
+            "rebalance": "daily_utc",
+            "schedule": "once per UTC day (first quote after 00:00 UTC)",
+            "last_decision_date": last_date,
+            "last_decision_at": last_at,
+            "rebalanced_today": last_date == now.date().isoformat(),
+            "next_decision_at": next_at.isoformat(),
+            "next_decision_local": next_at.astimezone().strftime("%Y-%m-%d %H:%M %Z"),
+            "held": held,
+            "explanation": (
+                f"{self.config.strategy} rebalances once per UTC day, on the "
+                "first quote after 00:00 UTC; between rebalances the order "
+                "table is static by design while the cycle stream keeps running."
+            ),
+        }
+
+    def candidates(self) -> dict[str, Any]:
+        """What the rule wants right now, and what is stopping each name.
+
+        Read-only and cached: it loads the same bar files the strategy reads, so
+        the answer is the strategy's own arithmetic rather than a second
+        opinion, but it costs a file read per symbol and the console polls.
+        """
+        now = datetime.now(timezone.utc)
+        cache = getattr(self, "_candidates_cache", None)
+        if cache is not None and (now - cache[0]).total_seconds() < 60:
+            return cache[1]
+        from agentic_trading.evidence import load_series
+        from agentic_trading.walkforward import rank_targets
+
+        try:
+            series = load_series(self.config)
+            rows = rank_targets(
+                series,
+                now,
+                max_positions=self.config.max_open_positions,
+            )
+        except Exception as exc:  # noqa: BLE001 — the console must still render
+            payload: dict[str, Any] = {"rows": [], "error": str(exc)[:200]}
+            self._candidates_cache = (now, payload)
+            return payload
+
+        regime = self._latest_regimes()
+        cadence = self.cadence()
+        held = {name.upper() for name in cadence["held"]}
+        for row in rows:
+            symbol = str(row["symbol"]).upper()
+            broker_form = symbol if "-" in symbol else symbol
+            row["held"] = symbol.replace("-", "") in held or broker_form in held
+            view = regime.get(broker_form) or regime.get(symbol)
+            row["regime"] = None if view is None else view.get("regime")
+            row["regime_confidence"] = (
+                None if view is None else view.get("confidence")
+            )
+            blockers: list[str] = []
+            # Mirror the gate exactly: a chop/panic read only blocks when the
+            # model is at least DEFAULT_BLOCK_CONFIDENCE sure. Quoting the view's
+            # raw flag here would claim SPY is blocked at c=0.55 when the gate
+            # would let it through, which is worse than saying nothing.
+            from agentic_trading.llm.regime import DEFAULT_BLOCK_CONFIDENCE
+
+            if (
+                row["selected"]
+                and view is not None
+                and view.get("blocks_entries")
+                and float(view.get("confidence") or 0.0) >= DEFAULT_BLOCK_CONFIDENCE
+            ):
+                blockers.append(
+                    f"regime {view.get('regime')} c={float(view.get('confidence') or 0):.2f}"
+                )
+            if row["selected"] and row["held"]:
+                blockers.append("already held")
+            row["blocked_by"] = blockers
+        payload = {
+            "rows": rows,
+            "generated_at": now.isoformat(),
+            "selected": [row["symbol"] for row in rows if row["selected"]],
+            "blocked": [
+                row["symbol"] for row in rows if row["selected"] and row["blocked_by"]
+            ],
+            "note": (
+                "The rule re-reads the tape every cycle but only trades at the "
+                "daily rebalance; this is what it would hold if it decided now."
+            ),
+            "cadence": cadence,
+        }
+        self._candidates_cache = (now, payload)
+        return payload
+
+    def _candidate_summary(self) -> dict[str, Any]:
+        """The cached candidate headline, for the two-second summary poll.
+
+        ``candidates()`` costs a bar-file read per symbol, so the summary only
+        reports what the last computation found; the panel itself refreshes on
+        its own timer.
+        """
+        cache = getattr(self, "_candidates_cache", None)
+        if cache is None:
+            return {}
+        payload = cache[1]
+        return {
+            "selected": payload.get("selected") or [],
+            "blocked": payload.get("blocked") or [],
+            "generated_at": payload.get("generated_at", ""),
+        }
+
+    def _latest_regimes(self) -> dict[str, dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for record in self.read_records(limit=4000):
+            if record.get("event") != "regime":
+                continue
+            symbol = str(record.get("symbol") or "").upper()
+            if symbol:
+                latest[symbol] = record
+        return latest
+
     def summary(self) -> dict[str, Any]:
         self.refresh_config()
         records = self.read_records()
@@ -316,6 +470,10 @@ class DashboardState:
             "evolution": evolution,
             # The walk-forward evidence the order size is justified by. Written
             # by `agentic-trading walkforward`; absent until that has run once.
+            # Why the order table is allowed to be static, and what the rule
+            # would hold if it decided this second.
+            "cadence": self.cadence(),
+            "candidate_summary": self._candidate_summary(),
             "evidence": _evidence_view(_read_json(self.state_dir / "strategy_evidence.json")),
             "generated_at": now.isoformat(),
         }
@@ -552,6 +710,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/orders":
             self._json(self.state.orders_table())
+            return
+        if parsed.path == "/api/candidates":
+            self._json(self.state.candidates())
             return
         if parsed.path == "/api/journal":
             params = parse_qs(parsed.query)

@@ -79,6 +79,59 @@ function drawChart(curve) {
     + maxCum.toFixed(2) + ' · ' + points.length + ' decisions', 12, h - 6);
 }
 
+// Why the order table can sit still while the cycle stream moves: this
+// strategy decides once per UTC day, and the console should say so rather than
+// leave the operator staring at four unchanged rows.
+function renderCadence(cadence) {
+  const box = document.getElementById('orders-cadence');
+  if (!box || !cadence) return;
+  const last = cadence.last_decision_at
+    ? new Date(cadence.last_decision_at).toLocaleTimeString() : '—';
+  box.textContent = 'decides ' + (cadence.schedule || (cadence.rebalance || '—'))
+    + ' · last decision ' + last
+    + ' · next ' + (cadence.next_decision_local || cadence.next_decision_at || '—')
+    + (cadence.held && cadence.held.length ? ' · holding ' + cadence.held.join(', ') : '')
+    + ' — ' + (cadence.explanation || '');
+}
+
+// The rule's live opinion, refreshed on its own slower timer: it reads the same
+// bar files the strategy reads, so it is not free.
+async function refreshCandidates() {
+  try {
+    const data = await fetch('/api/candidates').then(r => r.json());
+    renderCandidates(data);
+  } catch (err) { /* one panel failing must not blank the console */ }
+}
+
+function renderCandidates(data) {
+  const body = document.querySelector('#candidates tbody');
+  if (!body) return;
+  const rows = (data && data.rows) || [];
+  const note = document.getElementById('candidates-note');
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="6" class="sub">'
+      + ((data && data.error) || 'no bar history for the whitelist') + '</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const blocked = (r.blocked_by || []).join('; ');
+    const vote = Number(r.vote || 0);
+    const cls = r.selected && !blocked ? 'buy' : (blocked ? 'sell' : 'sub');
+    return '<tr><td>' + r.symbol + (r.held ? ' <span class="sub">held</span>' : '') + '</td>'
+      + '<td>' + vote.toFixed(2) + '</td>'
+      + '<td>' + num(r.vol_pct, 1) + '%</td>'
+      + '<td class="' + cls + '">' + (r.selected ? (blocked ? 'yes · held back' : 'yes') : 'no') + '</td>'
+      + '<td class="sell">' + (blocked || '—') + '</td>'
+      + '<td class="sub">' + (r.reason || '') + (r.regime ? ' · regime ' + r.regime : '') + '</td></tr>';
+  }).join('');
+  if (note) {
+    note.textContent = (data.note || '')
+      + (data.generated_at ? ' · computed ' + new Date(data.generated_at).toLocaleTimeString() : '')
+      + ' · in book now: ' + ((data.selected || []).join(', ') || 'nothing');
+  }
+}
+
+
 async function refresh() {
   let summary, curve, feed, orders;
   try {
@@ -191,6 +244,7 @@ async function refresh() {
   offset = feed.offset;
   drawChart(curve);
   renderOrders(orders);
+  renderCadence(summary.cadence);
 }
 
 // Who is actually making decisions: the bot is a small team of workers, and
@@ -357,6 +411,8 @@ function renderOrders(data) {
 }
 
 refresh();
+refreshCandidates();
 setInterval(refresh, 2000);
+setInterval(refreshCandidates, 30000);
 window.addEventListener('resize', () => fetch('/api/equity').then(r => r.json()).then(drawChart));
 """

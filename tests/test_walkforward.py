@@ -12,6 +12,7 @@ invariants those bugs violated.
 from __future__ import annotations
 
 import math
+import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -23,6 +24,7 @@ from agentic_trading.walkforward import (
     MAX_LEVERAGE,
     TARGET_VOL,
     bootstrap_p,
+    rank_targets,
     simulate,
     targets_as_of,
     walk_forward,
@@ -409,3 +411,41 @@ class TestBootstrap:
     def test_is_deterministic(self) -> None:
         values = [120.0, -80.0, 40.0, -20.0, 10.0] * 8
         assert bootstrap_p(values) == bootstrap_p(values)
+
+
+class RankTests(unittest.TestCase):
+    """rank_targets explains a decision; targets_as_of makes it. They must agree."""
+
+    def test_ranked_rows_cover_every_symbol_with_a_reason(self) -> None:
+        series = {
+            "UP": _series("UP", _ramp(300)),
+            "DOWN": _series("DOWN", [300.0 - index for index in range(300)]),
+            "SHORT": _series("SHORT", _ramp(50)),
+        }
+        rows = rank_targets(series, DAY + timedelta(days=299))
+        assert {row["symbol"] for row in rows} == {"UP", "DOWN", "SHORT"}
+        assert all(row.get("reason") for row in rows)
+        assert [row["symbol"] for row in rows][0] == "UP"
+
+    def test_selection_respects_the_slot_count(self) -> None:
+        series = {f"S{i}": _series(f"S{i}", _ramp(300, daily=0.003 + i * 1e-4)) for i in range(6)}
+        rows = rank_targets(series, DAY + timedelta(days=299), max_positions=2)
+        self.assertEqual(sum(1 for row in rows if row["selected"]), 2)
+        dropped = [row for row in rows if "slots" in str(row.get("reason"))]
+        self.assertEqual(len(dropped), 4)
+
+    def test_it_agrees_with_targets_as_of(self) -> None:
+        series = {f"S{i}": _series(f"S{i}", _ramp(300, daily=0.003 + i * 1e-4)) for i in range(5)}
+        when = DAY + timedelta(days=299)
+        rows = rank_targets(series, when, max_positions=3)
+        chosen = targets_as_of(series, when, max_positions=3)
+        self.assertEqual(set(chosen), {row["symbol"] for row in rows if row["selected"]})
+        for row in rows:
+            if row["selected"]:
+                self.assertEqual(chosen[row["symbol"]], pytest.approx(row["weight"]))
+
+    def test_nothing_with_a_reason_is_reported_as_selected(self) -> None:
+        series = {"DOWN": _series("DOWN", [300.0 - index for index in range(300)])}
+        rows = rank_targets(series, DAY + timedelta(days=299))
+        self.assertFalse(rows[0]["selected"])
+        self.assertIn("trend vote", rows[0]["reason"])

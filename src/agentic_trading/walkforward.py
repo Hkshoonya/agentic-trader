@@ -99,6 +99,75 @@ def _vol(closes: list[float]) -> Optional[float]:
     return math.sqrt(var * 252)
 
 
+def rank_targets(
+    series: dict[str, list[Bar]],
+    when: datetime,
+    *,
+    horizons: tuple[int, ...] = (50, 100, 200, 252),
+    min_vote: float = 0.5,
+    max_positions: int = 5,
+) -> list[dict[str, Any]]:
+    """Every symbol's vote and size, chosen or not, for the console.
+
+    :func:`targets_as_of` answers "what would the book be"; this answers "why is
+    each name in or out", which is the question an operator actually asks when
+    nothing has traded. Both read the same numbers, so the explanation cannot
+    drift from the decision.
+    """
+    rows: list[dict[str, Any]] = []
+    for symbol, bars in series.items():
+        closes = [float(bar.close) for bar in bars if bar.start < when]
+        row: dict[str, Any] = {
+            "symbol": symbol,
+            "bars": len(closes),
+            "vote": 0.0,
+            "vol_pct": None,
+            "weight": 0.0,
+            "selected": False,
+        }
+        if len(closes) < max(horizons) + 2:
+            row["reason"] = f"only {len(closes)} bars (needs {max(horizons) + 2})"
+            rows.append(row)
+            continue
+        votes = [
+            closes[-1] > closes[-1 - horizon]
+            for horizon in horizons
+            if len(closes) > horizon
+        ]
+        vote = sum(votes) / len(votes) if votes else 0.0
+        sigma = _vol(closes)
+        row["vote"] = round(vote, 3)
+        row["vol_pct"] = None if sigma is None else round(sigma * 100, 1)
+        row["weight"] = min(MAX_LEVERAGE, TARGET_VOL / sigma) if sigma else 0.0
+        if vote < min_vote:
+            row["reason"] = (
+                f"trend vote {vote:.2f} < {min_vote:.2f} "
+                f"({sum(votes)}/{len(votes)} horizons up)"
+            )
+        elif not sigma:
+            row["reason"] = "no usable volatility estimate"
+        else:
+            row["reason"] = (
+                f"vote {vote:.2f} ({sum(votes)}/{len(votes)} horizons up)"
+            )
+            row["selected"] = True
+        rows.append(row)
+    selected = sorted(
+        (row for row in rows if row["selected"]),
+        key=lambda row: row["vote"] * row["weight"],
+        reverse=True,
+    )
+    for position, row in enumerate(selected):
+        if position >= max_positions:
+            row["selected"] = False
+            row["reason"] = (
+                f"ranked {position + 1} of {len(selected)}, "
+                f"only {max_positions} slots"
+            )
+    rows.sort(key=lambda row: (not row["selected"], -float(row["vote"])))
+    return rows
+
+
 def targets_as_of(
     series: dict[str, list[Bar]],
     when: datetime,
@@ -120,28 +189,20 @@ def targets_as_of(
     one, which forces a fully invested book; that is useful for display and
     wrong for risk (a vol-targeted book must be allowed to hold cash), so the
     trading paths must not use it.
+
+    This is :func:`rank_targets` filtered to the selected names, so the console
+    that explains a decision and the code that makes it read the same numbers.
     """
-    scored: list[tuple[float, str, float]] = []
-    for symbol, bars in series.items():
-        closes = [float(bar.close) for bar in bars if bar.start < when]
-        if len(closes) < max(horizons) + 2:
-            continue
-        votes = [
-            closes[-1] > closes[-1 - horizon]
-            for horizon in horizons
-            if len(closes) > horizon
-        ]
-        vote = sum(votes) / len(votes) if votes else 0.0
-        if vote < min_vote:
-            continue
-        sigma = _vol(closes)
-        size = min(MAX_LEVERAGE, TARGET_VOL / sigma) if sigma else 0.0
-        if size <= 0:
-            continue
-        scored.append((vote * size, symbol, size))
-    scored.sort(reverse=True)
-    chosen = scored[:max_positions]
-    weights = {symbol: size for _, symbol, size in chosen}
+    rows = rank_targets(
+        series,
+        when,
+        horizons=horizons,
+        min_vote=min_vote,
+        max_positions=max_positions,
+    )
+    weights = {
+        row["symbol"]: float(row["weight"]) for row in rows if row["selected"]
+    }
     if normalise and weights:
         total = sum(weights.values()) or 1.0
         weights = {symbol: size / total for symbol, size in weights.items()}

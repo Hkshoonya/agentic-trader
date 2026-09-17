@@ -76,6 +76,14 @@ tr:hover td{background:#151d28}
     <tbody><tr><td colspan="12" class="sub">no decisions yet</td></tr></tbody>
   </table></div>
   <div class="sub" id="orders-count"></div>
+  <div class="sub" id="orders-cadence"></div>
+</div>
+<div class="card span12"><h2>Candidates · what the rule wants right now</h2>
+  <div class="tablewrap"><table id="candidates">
+    <thead><tr><th>symbol</th><th>trend vote</th><th>vol (annualised)</th><th>in book</th><th>blocked by</th><th>reason</th></tr></thead>
+    <tbody><tr><td colspan="6" class="sub">computing…</td></tr></tbody>
+  </table></div>
+  <div class="sub" id="candidates-note"></div>
 </div>
 <div class="card span7"><h2>Live execution stream</h2><div id="stream"></div></div>
 <div class="card span5"><h2>Agents on duty</h2><div id="agents" class="sub">starting…</div><div id="alerts"></div><div id="health"></div></div>

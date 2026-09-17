@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -437,3 +437,165 @@ class DashboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _with_history(tmp: Path) -> Path:
+    """The shared test config, plus a bar directory the console can read."""
+    path = tmp / "agentic.toml"
+    with_history = tmp / "agentic-bars.toml"
+    with_history.write_text(
+        path.read_text(encoding="utf-8") + f'history_path = "{tmp / "bars"}"\n',
+        encoding="utf-8",
+    )
+    return with_history
+
+
+class CadenceTests(unittest.TestCase):
+    """Why the order table is static while the stream keeps moving."""
+
+    def _config(self, tmp: Path):
+        return DashboardTests()._config(tmp)
+
+    def test_reports_the_daily_rebalance_and_the_next_one(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+            (Path(config.state_dir) / f"strategy_{config.strategy}.json").write_text(
+                _json.dumps(
+                    {
+                        "last_decision_date": date.today().isoformat(),
+                        "quantities": {"BTCUSD": "0.000016"},
+                    }
+                )
+            )
+            cadence = DashboardState(config).cadence()
+        self.assertEqual(cadence["rebalance"], "daily_utc")
+        self.assertTrue(cadence["rebalanced_today"])
+        self.assertEqual(cadence["held"], ["BTCUSD"])
+        # Already decided today: the next decision is the next UTC midnight.
+        self.assertTrue(cadence["next_decision_at"].endswith("T00:00:00+00:00"))
+        self.assertIn("static by design", cadence["explanation"])
+
+    def test_a_day_with_no_decision_is_due_now(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+            (Path(config.state_dir) / f"strategy_{config.strategy}.json").write_text(
+                _json.dumps({"last_decision_date": "2020-01-01", "quantities": {}})
+            )
+            cadence = DashboardState(config).cadence()
+        self.assertFalse(cadence["rebalanced_today"])
+        self.assertEqual(cadence["held"], [])
+
+    def test_the_last_decision_time_comes_from_the_journal(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            journal = Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            journal.write_text(
+                _json.dumps(
+                    {
+                        "decision_id": "d-1",
+                        "event": "rejected",
+                        "reason": "regime_block",
+                        "symbol": "BTC-USD",
+                        "intent": {"created_at": "2026-09-17T09:44:32Z"},
+                    }
+                )
+                + "\n"
+            )
+            cadence = DashboardState(config).cadence()
+        self.assertEqual(cadence["last_decision_at"], "2026-09-17T09:44:32Z")
+
+
+class CandidateTests(unittest.TestCase):
+    """The live "what would it trade now" panel."""
+
+    def _config_with_bars(self, tmp: Path):
+        config = DashboardTests()._config(tmp)
+        Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+        (tmp / "bars").mkdir(parents=True, exist_ok=True)
+        config = load_config(_with_history(tmp))
+        bars = Path(config.history_path)
+        rows = []
+        for index in range(300):
+            price = 100 + index
+            rows.append(
+                json.dumps(
+                    {
+                        "symbol": "SPY",
+                        "start": (
+                            datetime(2020, 1, 1, tzinfo=timezone.utc)
+                            + timedelta(days=index)
+                        ).isoformat(),
+                        "open": str(price),
+                        "high": str(price),
+                        "low": str(price),
+                        "close": str(price),
+                        "volume": "10",
+                    }
+                )
+            )
+        (bars / "SPY_day.jsonl").write_text("\n".join(rows) + "\n")
+        return config
+
+    def test_candidates_show_selection_and_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config_with_bars(tmp)
+            payload = DashboardState(config).candidates()
+        self.assertTrue(payload["rows"])
+        spy = next(row for row in payload["rows"] if row["symbol"] == "SPY")
+        self.assertTrue(spy["selected"], spy.get("reason"))
+        self.assertIn("vote", spy["reason"])
+        self.assertIsNotNone(spy["vol_pct"])
+
+    def test_candidates_are_cached_between_polls(self) -> None:
+        """The panel reads 16 bar files; the 2-second summary must not."""
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config_with_bars(tmp)
+            state = DashboardState(config)
+            first = state.candidates()
+            second = state.candidates()
+        self.assertEqual(first["generated_at"], second["generated_at"])
+        self.assertEqual(state._candidate_summary()["generated_at"], first["generated_at"])
+
+    def test_a_held_symbol_is_flagged(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config_with_bars(tmp)
+            Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+            (Path(config.state_dir) / f"strategy_{config.strategy}.json").write_text(
+                _json.dumps({"last_decision_date": "2020-01-01", "quantities": {"SPY": "1"}})
+            )
+            payload = DashboardState(config).candidates()
+        spy = next(row for row in payload["rows"] if row["symbol"] == "SPY")
+        self.assertTrue(spy["held"])
+
+    def test_http_endpoint_is_served(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config_with_bars(tmp)
+            server = serve(config, host="127.0.0.1", port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with urllib.request.urlopen(f"{base}/api/candidates", timeout=5) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+        self.assertIn("rows", payload)
