@@ -17,3 +17,4 @@ build/
 .pytest_cache/
 output/
 results/
+data/intraday/
