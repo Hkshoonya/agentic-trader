@@ -345,6 +345,18 @@ class _Loop:
             (stored.session_policy if stored else "")
             or self.config.session_policy
         )
+        self.apply_correlation_policy()
+
+    def apply_correlation_policy(self) -> None:
+        """Give the guard the concentration limit and the measured correlations."""
+        from agentic_trading.correlation import load_state
+
+        configured = self.config.max_correlated_positions
+        self.guard.max_correlated_positions = configured
+        self.guard.correlation_threshold = self.config.correlation_threshold
+        self.guard._correlation_state = (  # noqa: SLF001 — guard-owned policy
+            load_state(self.config.state_dir) if configured is not None else None
+        )
 
     def set_mode(self, mode: str) -> None:
         """Switch shadow/live at runtime (autonomy promotion or demotion)."""
@@ -1406,8 +1418,71 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
             except Exception as exc:  # noqa: BLE001 — never kill the loop
                 journal.append({"event": "history_sync_failed", "error": str(exc)[:200]})
 
+            # Correlations and execution costs are recomputed on the same
+            # cadence as the data: both are derived from it.
+            # Correlations are derived from the freshly synced data, so they
+            # belong on the data cadence.
+            try:
+                from agentic_trading.correlation import compute_state, save_state
+
+                state = compute_state(
+                    config.history_path,
+                    config.symbol_whitelist,
+                    lookback=config.correlation_lookback_days,
+                    threshold=config.correlation_threshold,
+                )
+                save_state(config.state_dir, state)
+                loop.apply_correlation_policy()
+                pairs = list(state.pairs.items())
+                strongest = sorted(pairs, key=lambda item: -abs(item[1]))[:3]
+                journal.append(
+                    {
+                        "event": "correlations",
+                        "pairs": len(pairs),
+                        "threshold": state.threshold,
+                        "strongest": [
+                            {"pair": name, "corr": value} for name, value in strongest
+                        ],
+                        "max_correlated_positions": (
+                            config.max_correlated_positions
+                        ),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 — never kill the loop
+                journal.append(
+                    {"event": "correlations_failed", "error": str(exc)[:200]}
+                )
+
     # Skip the (minutes-long) search when nothing the evaluation reads has
     # changed: the journal then explains why confidence is not moving.
+    # What execution actually cost, against what the model assumes. Cheap (one
+    # read) and worth re-checking every pass: the moment a fill lands, the
+    # evidence switches from assumed costs to measured ones.
+    try:
+        from agentic_trading.execution import decision_prices, measure, save_report
+
+        trades = loop.broker.get_trade_history(span="month")
+        report = measure(
+            trades,
+            decision_prices(journal.iter_today()),
+            assumed_per_side_bps=2.0,
+        )
+        save_report(config.state_dir, report)
+        journal.append(
+            {
+                "event": "execution_costs",
+                "fills": report.fills,
+                "measured_per_side_bps": report.measured_per_side_bps,
+                "assumed_per_side_bps": report.assumed_per_side_bps,
+                "usable": report.usable,
+                "note": report.note,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 — never kill the loop
+        journal.append(
+            {"event": "execution_costs_failed", "error": str(exc)[:200]}
+        )
+
     if config.history_path is not None:
         from agentic_trading.history_sync import fingerprint
         from agentic_trading.selfimprove import history_plan

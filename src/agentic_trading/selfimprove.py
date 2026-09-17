@@ -92,12 +92,18 @@ def run_evolution(
         symbol_bars = load_symbol_bars(directory, symbols, interval=interval)
         if not symbol_bars:
             raise ValueError(f"no usable bar files in {directory}")
+        # Grade with the costs the bot actually pays when we have measured them;
+        # otherwise the documented assumption stands.
+        from agentic_trading.execution import cost_model_for
+
+        costs = cost_model_for(config.state_dir)
         return evolve_multi(
             symbol_bars,
             population=population or config.evolution_population,
             generations=generations or config.evolution_generations,
             seed=seed,
             min_oos_trades=config.min_oos_trades,
+            costs=costs,
             starting_cash=starting_cash,
         )
 

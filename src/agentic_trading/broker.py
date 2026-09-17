@@ -192,6 +192,24 @@ class Broker:
             self._call("get_crypto_orders", {"rhs_account_number": account})
         )
 
+    def get_trade_history(self, *, span: str = "month") -> list[dict[str, Any]]:
+        """Executed trades with their realized gain — the broker's own record."""
+        account = self.resolve_rhs_account_number()
+        payload = self._call(
+            "get_trade_history", {"account_number": account, "span": span}
+        )
+        # This tool nests under data.trades rather than any of the shared list
+        # keys, so it gets its own (still fail-closed) extraction.
+        data = payload.get("data") if isinstance(payload, dict) else None
+        rows = data.get("trades") if isinstance(data, dict) else None
+        if rows is None and isinstance(data, dict) and "trades" in data:
+            return []
+        if not isinstance(rows, list):
+            raise BrokerPayloadError(
+                f"expected data.trades in trade history, got keys {_shape(payload)}"
+            )
+        return [row for row in rows if isinstance(row, dict)]
+
     def get_tradability(self, symbols: list[str]) -> dict[str, Any]:
         account = self.resolve_account_number()
         return self._call(

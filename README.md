@@ -531,6 +531,52 @@ The broker's equity-only tools (`get_equity_news`, `get_earnings_calendar`,
 `get_pnl_trade_history`) only become worth wiring now that the equity book is
 more than SPY.
 
+### Deploying more than one position: clusters, not names
+
+`max_open_positions` is now **4** (was 1, which left ~3% of the account doing
+anything). Position count alone would be a bad limit though: the whitelist holds
+six crypto majors that move together and ten liquid equities that do too on a
+risk-off day. Four correlated symbols is one bet taken four times.
+
+So the limit is on **correlated clusters**:
+
+| setting | value | meaning |
+|---|---|---|
+| `max_open_positions` | 4 | ceiling on names, ~12% of equity at the per-order cap |
+| `max_correlated_positions` | 2 | at most two positions correlated above the threshold |
+| `correlation_threshold` | 0.7 | what counts as the same bet |
+| `correlation_lookback_days` | 120 | window for the return correlation |
+
+Correlations are computed from the same bars the evidence uses, refreshed with
+the data, and stored in `state_dir/correlations.json`. Live numbers: **QQQ|SPY
+0.917**, **BTCUSD|ETHUSD 0.882**, **ETHUSD|SOLUSD 0.842** — 120 pairs in total.
+An **unmeasured** pair is treated as perfectly correlated, so the guard never
+hands out extra room on the strength of a correlation nobody computed.
+
+The daily notional cap (12.88% of equity) still bounds how fast the book can
+fill, so raising the position count changed *which* constraint binds rather than
+removing one.
+
+### Are the assumed costs a lie?
+
+The evidence is graded with a cost model of 1 bp half-spread + 1 bp slippage per
+side (2 bps per side, 4 bps round trip). That number decides whether a strategy
+looks profitable, and it had never been checked against a real fill.
+
+Now it is checked automatically: the daemon pulls the broker's own trade history
+(`get_pnl_trade_history`), joins each fill to the price its decision was taken at
+(within 30 minutes, from the journal), and reports the all-in per-side cost in
+bps against the assumption. Results land in `state_dir/execution_costs.json` and
+the journal (`execution_costs`), and once **5+ fills** exist the measured cost
+replaces the assumption inside the evolution's `CostModel` — so the gate grades
+the strategy on the costs it actually pays.
+
+Current state, honestly: **0 fills, so nothing is measured yet** — the report
+says exactly that. The pipeline is built and tested (including sign conventions
+for buys and sells, unattributable fills, and a clamp so a single broken print
+cannot make execution look free or absurd), and it switches over by itself the
+first time the bot trades.
+
 ### Known constraints and unverified areas
 
 - **Fractional shares only trade in regular hours as market orders.** At $50,

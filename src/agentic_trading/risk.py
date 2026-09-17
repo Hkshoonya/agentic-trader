@@ -165,6 +165,11 @@ class RiskGuard:
         self._shadow_realized_today = Decimal("0")
         self._shadow_book: Optional[ShadowBook] = None
         self._day_key = self._today_key()
+        # Correlation-aware position limits. None means "not configured", which
+        # preserves the plain max_open_positions behaviour.
+        self.max_correlated_positions: Optional[int] = None
+        self.correlation_threshold: float = 0.7
+        self._correlation_state: Any = None
 
     @property
     def shadow_realized_today(self) -> Decimal:
@@ -210,6 +215,26 @@ class RiskGuard:
                 return self._deny(notional, "positions_read_failed")
             if snapshot.open_positions >= self.max_open_positions:
                 return self._deny(notional, "max_open_positions")
+            # Concentration: a correlated cluster is one bet, so count it as one.
+            if self.max_correlated_positions is not None and snapshot.held:
+                from agentic_trading.correlation import correlated_with
+
+                correlated, unknown = correlated_with(
+                    symbol,
+                    snapshot.held.keys(),
+                    self._correlation_state,
+                    threshold=self.correlation_threshold,
+                )
+                if len(correlated) >= self.max_correlated_positions:
+                    return self._deny(
+                        notional, f"correlated_exposure: {sorted(correlated)}"
+                    )
+                if unknown:
+                    # No measurement, no extra room: an unmeasured pair is
+                    # treated as if it were perfectly correlated.
+                    return self._deny(
+                        notional, f"correlation_unknown: {sorted(unknown)}"
+                    )
         elif side is Side.SELL:
             held_qty = Decimal(str(snapshot.held.get(symbol, Decimal("0"))))
             if held_qty <= 0:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 import tomllib
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,11 @@ class Config:
     history_refresh_hours: float = 24.0
     # How often the back-check agent verifies data, state and analysis paths.
     selfcheck_minutes: float = 30.0
+    # Concentration limit: how many *correlated* positions the book may hold.
+    # None leaves max_open_positions as the only limit.
+    max_correlated_positions: Optional[int] = None
+    correlation_threshold: float = 0.7
+    correlation_lookback_days: int = 120
     # Phase 4 — self-evaluation, promotion, autonomy
     autonomy: str = "manual"  # manual | assisted | auto
     history_path: Path | None = None
@@ -94,6 +100,15 @@ class Config:
             raise ValueError("max_orders_per_day must be >= 1")
         if self.max_consecutive_errors < 1:
             raise ValueError("max_consecutive_errors must be >= 1")
+        if self.max_open_positions < 1:
+            raise ValueError("max_open_positions must be >= 1")
+        if (
+            self.max_correlated_positions is not None
+            and self.max_correlated_positions < 1
+        ):
+            raise ValueError("max_correlated_positions must be >= 1 when set")
+        if not 0.0 < self.correlation_threshold <= 1.0:
+            raise ValueError("correlation_threshold must be in (0, 1]")
         if self.max_quote_age_seconds <= 0:
             raise ValueError("max_quote_age_seconds must be positive")
         if self.open_order_refresh_seconds < 0:
@@ -132,6 +147,13 @@ def load_config(path: str | Path) -> Config:
         daily_notional_pct=Decimal(str(raw["daily_notional_pct"])),
         daily_loss_pct=Decimal(str(raw["daily_loss_pct"])),
         max_open_positions=int(raw["max_open_positions"]),
+        max_correlated_positions=(
+            int(raw["max_correlated_positions"])
+            if raw.get("max_correlated_positions") is not None
+            else None
+        ),
+        correlation_threshold=float(raw.get("correlation_threshold", 0.7)),
+        correlation_lookback_days=int(raw.get("correlation_lookback_days", 120)),
         equity_refresh_ticks=int(raw["equity_refresh_ticks"]),
         equity_refresh_seconds=int(raw["equity_refresh_seconds"]),
         timezone=str(raw.get("timezone", "local")),
