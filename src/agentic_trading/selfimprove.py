@@ -125,21 +125,40 @@ def evaluate_and_record(
     events = apply_assessment(state, assessment, policy, equity=equity)
     save_state(config.state_dir, state)
 
-    events.extend(update_limits(config, eligible=assessment.eligible))
+    events.extend(update_limits(config, assessment=assessment))
     return assessment, state, events
 
 
-def update_limits(config: Config, *, eligible: bool) -> list[dict[str, Any]]:
-    """Adaptive risk, bounded by the operator's ceilings.
+def update_limits(
+    config: Config,
+    *,
+    assessment: Any = None,
+    eligible: Optional[bool] = None,
+    reset: bool = False,
+) -> list[dict[str, Any]]:
+    """Scale the risk budget to the confidence the evidence has earned.
 
-    A failing assessment halves the agent's own limits; a passing one restores
-    them to the configured ceiling. Neither direction can exceed what the
-    operator authorised — see :mod:`agentic_trading.limits`.
+    ``assessment`` is the graded result from :func:`evaluate_and_record`; the
+    legacy ``eligible`` flag still works for callers that only have the verdict.
+    Neither direction can exceed what the operator authorised — see
+    :mod:`agentic_trading.limits`.
     """
-    from agentic_trading.limits import load_limits, propose, save_limits
+    from agentic_trading.limits import (
+        load_limits,
+        propose,
+        propose_from_assessment,
+        save_limits,
+    )
 
     previous = load_limits(config.state_dir)
-    updated = propose(config, eligible=eligible, current=previous)
+    if assessment is not None:
+        updated = propose_from_assessment(
+            config, assessment, current=previous, reset=reset
+        )
+    else:
+        updated = propose(
+            config, eligible=bool(eligible), current=previous
+        )
     if previous is not None and previous.to_dict() == updated.to_dict():
         return []
     save_limits(config.state_dir, updated)
@@ -149,8 +168,12 @@ def update_limits(config: Config, *, eligible: bool) -> list[dict[str, Any]]:
             "reason": updated.reason,
             "max_order_pct": updated.max_order_pct,
             "daily_notional_pct": updated.daily_notional_pct,
+            "confidence": updated.confidence,
+            "session_policy": updated.session_policy or None,
             "ceiling_max_order_pct": str(config.max_order_pct),
             "ceiling_daily_notional_pct": str(config.daily_notional_pct),
+            "target_max_order_pct": updated.details.get("target_max_order_pct"),
+            "components": updated.details.get("components"),
         }
     ]
 

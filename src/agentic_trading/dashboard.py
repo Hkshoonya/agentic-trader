@@ -108,6 +108,7 @@ class DashboardState:
         records = self.read_records()
         risk = _read_json(self.state_dir / "risk_guard.json") or {}
         gate = _read_json(self.state_dir / "live_gate.json") or {}
+        limits = _read_json(self.state_dir / "effective_limits.json") or {}
         promotion = load_state(self.state_dir)
         evolution = _read_json(self.state_dir / "evolution.json")
         now = datetime.now(timezone.utc)
@@ -118,6 +119,12 @@ class DashboardState:
             event = str(record.get("event", "unknown"))
             counts[event] = counts.get(event, 0) + 1
 
+        # The agent may widen trading hours within the operator's bound, so the
+        # console reports the policy actually in force, not the configured one.
+        effective_policy = str(limits.get("session_policy") or "") or (
+            self.config.session_policy
+        )
+        details = limits.get("details") if isinstance(limits.get("details"), dict) else {}
         return {
             "mode": effective_mode(self.config),
             "kill_switch": bool(risk.get("kill_switch", False)),
@@ -126,8 +133,9 @@ class DashboardState:
             "baseline_equity": risk.get("baseline_equity", "0"),
             "current_equity": risk.get("current_equity", "0"),
             "session": session,
-            "session_allowed": session_allows(self.config.session_policy, session),
-            "session_policy": self.config.session_policy,
+            "session_allowed": session_allows(effective_policy, session),
+            "session_policy": effective_policy,
+            "configured_session_policy": self.config.session_policy,
             "next_open": next_session_open(now).isoformat(),
             "strategy": self.config.strategy,
             "symbols": sorted(self.config.symbol_whitelist),
@@ -139,6 +147,19 @@ class DashboardState:
             "autonomy_enabled": bool(gate.get("allow_autonomy", False)),
             "gate_updated_at": gate.get("updated_at", ""),
             "event_counts": counts,
+            "risk": {
+                "max_order_pct": limits.get("max_order_pct", str(self.config.max_order_pct)),
+                "daily_notional_pct": limits.get(
+                    "daily_notional_pct", str(self.config.daily_notional_pct)
+                ),
+                "confidence": limits.get("confidence", "0"),
+                "reason": limits.get("reason", ""),
+                "updated_at": limits.get("updated_at", ""),
+                "target_max_order_pct": details.get("target_max_order_pct"),
+                "ceiling_max_order_pct": str(self.config.max_order_pct),
+                "ceiling_daily_notional_pct": str(self.config.daily_notional_pct),
+                "components": details.get("components") or {},
+            },
             "promotion": {
                 "stage": promotion.stage,
                 "streak": promotion.streak,
@@ -193,7 +214,17 @@ class DashboardState:
         """Every order the agent decided on today, newest first."""
         self.refresh_config()
         rows: list[dict[str, Any]] = []
-        for record in self.read_records():
+        records = self.read_records()
+        # The advisor's opinion is journaled as its own record keyed by
+        # decision_id, so join it back in: it is the per-order confidence, as
+        # opposed to the system-wide evidence grade.
+        advisor_by_decision: dict[str, dict[str, Any]] = {}
+        for record in records:
+            decision_id = record.get("decision_id")
+            if decision_id and record.get("event") == "advisor":
+                advisor_by_decision[str(decision_id)] = record
+
+        for record in records:
             event = record.get("event")
             if event not in ("accepted", "placed", "rejected", "place_failed"):
                 continue
@@ -216,6 +247,12 @@ class DashboardState:
                 if isinstance(review.get("data"), dict)
                 else None
             )
+            confidence = (
+                record.get("confidence")
+                if isinstance(record.get("confidence"), dict)
+                else {}
+            )
+            advisor = advisor_by_decision.get(str(record.get("decision_id") or ""), {})
             rows.append(
                 {
                     "at": intent.get("created_at") or record.get("at") or "",
@@ -238,6 +275,16 @@ class DashboardState:
                     "last_price": (quote or {}).get("last_trade_price"),
                     "alerts": alerts if isinstance(alerts, dict) else {},
                     "ref_id": request.get("ref_id"),
+                    "confidence": {
+                        "evidence": confidence.get("evidence"),
+                        "advisor": confidence.get("advisor", advisor.get("confidence")),
+                        "advisor_action": confidence.get(
+                            "advisor_action", advisor.get("action")
+                        ),
+                        "advisor_model": confidence.get(
+                            "advisor_model", advisor.get("model")
+                        ),
+                    },
                 }
             )
         rows.reverse()
@@ -280,6 +327,7 @@ def _compact(record: dict[str, Any]) -> dict[str, Any]:
         "allow_live",
         "allow_autonomy",
         "stage",
+        "confidence",
     )
     compact = {key: record[key] for key in keep if key in record}
     intent = record.get("intent")

@@ -265,6 +265,8 @@ class _Loop:
         self._open_orders_read_at = 0.0
         self._stopping = False
         self.stage = "shadow"
+        self.session_policy = config.session_policy
+        self.evidence_confidence: float = 0.0
         self.last_evolution_at = 0.0
         self.advisor = None
         try:
@@ -287,10 +289,22 @@ class _Loop:
         else:
             self.guard.max_order_pct = self.config.max_order_pct
         # The agent's stored limits may only ever tighten what the operator set.
-        from agentic_trading.limits import apply_to_guard
+        from agentic_trading.limits import apply_to_guard, load_limits
 
         self.guard.daily_notional_pct = self.config.daily_notional_pct
         apply_to_guard(self.guard, self.config)
+        stored = load_limits(self.config.state_dir)
+        # Confidence in force right now, so every decision can record the
+        # evidence level it was taken under.
+        self.evidence_confidence = float(
+            (stored.confidence if stored else "") or 0.0
+        )
+        # The agent may widen trading hours only up to the operator's bound, and
+        # only when its own confidence ladder says the evidence earned it.
+        self.session_policy = str(
+            (stored.session_policy if stored else "")
+            or self.config.session_policy
+        )
 
     def set_mode(self, mode: str) -> None:
         """Switch shadow/live at runtime (autonomy promotion or demotion)."""
@@ -323,8 +337,7 @@ class _Loop:
         }
         path = Path(self.config.state_dir) / "live_gate.json"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(jsonio.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            jsonio.write_text(path, jsonio.dumps(payload, indent=2) + "\n")
         except OSError:
             return
         self.journal.append({"event": "live_gate", **payload})
@@ -520,6 +533,7 @@ class _Loop:
 
         # Advisory veto: the model may refuse an entry (reduce risk) and its
         # hold opinion is recorded, but it never overrides a mechanical exit.
+        advisor_payload: Optional[dict[str, Any]] = None
         if self.advisor is not None:
             decision = self.advisor.review_entry(
                 symbol=intent.symbol,
@@ -535,6 +549,11 @@ class _Loop:
                 },
             )
             if decision is not None:
+                advisor_payload = {
+                    "confidence": decision.confidence,
+                    "action": decision.action,
+                    "model": getattr(self.advisor, "model", ""),
+                }
                 self.journal.append(
                     {
                         "decision_id": intent.decision_id,
@@ -550,6 +569,7 @@ class _Loop:
                         intent,
                         f"llm_veto: {decision.reason}" if decision.reason else "llm_veto",
                         intent.resolved_notional(),
+                        advisor=advisor_payload,
                     )
                     return
             elif getattr(self.advisor, "last_error", ""):
@@ -570,17 +590,26 @@ class _Loop:
             try:
                 snapshot = self.live_positions()
             except Exception as exc:  # noqa: BLE001 — never trade without positions
-                self._journal_rejected(intent, f"positions_read_error: {exc}", Decimal("0"))
+                self._journal_rejected(
+                    intent,
+                    f"positions_read_error: {exc}",
+                    Decimal("0"),
+                    advisor=advisor_payload,
+                )
                 self.note_error("positions_read_error", exc)
                 return
 
         try:
             decision = self.guard.evaluate(intent, snapshot)
         except ValueError as exc:
-            self._journal_rejected(intent, f"guard_error: {exc}", Decimal("0"))
+            self._journal_rejected(
+                intent, f"guard_error: {exc}", Decimal("0"), advisor=advisor_payload
+            )
             return
         if not decision.allowed:
-            self._journal_rejected(intent, decision.reason, decision.notional)
+            self._journal_rejected(
+                intent, decision.reason, decision.notional, advisor=advisor_payload
+            )
             return
 
         try:
@@ -596,7 +625,12 @@ class _Loop:
                 session=session,
             )
         except OrderValidationError as exc:
-            self._journal_rejected(intent, f"order_invalid: {exc}", decision.notional)
+            self._journal_rejected(
+                intent,
+                f"order_invalid: {exc}",
+                decision.notional,
+                advisor=advisor_payload,
+            )
             return
 
         # Review is a read-only simulation. It runs in both modes so the
@@ -627,6 +661,7 @@ class _Loop:
                 "order_request": request.to_mcp_args(),
                 "review": review,
                 "intent": _intent_payload(intent),
+                "confidence": self._confidence_payload(advisor_payload),
                 "symbol": intent.symbol,
                 "side": side.value,
                 "quantity": (
@@ -738,20 +773,42 @@ class _Loop:
         self.guard.persist(self.config.state_dir)
 
     def _journal_rejected(
-        self, intent: OrderIntent, reason: str, notional: Decimal
+        self,
+        intent: OrderIntent,
+        reason: str,
+        notional: Decimal,
+        *,
+        advisor: Optional[dict[str, Any]] = None,
     ) -> None:
-        self.journal.append(
-            {
-                "decision_id": intent.decision_id,
-                "event": "rejected",
-                "reason": reason,
-                "would_place": False,
-                "may_place": False,
-                "notional": str(notional),
-                "mode": self.mode,
-                "intent": _intent_payload(intent),
-            }
-        )
+        record: dict[str, Any] = {
+            "decision_id": intent.decision_id,
+            "event": "rejected",
+            "reason": reason,
+            "would_place": False,
+            "may_place": False,
+            "notional": str(notional),
+            "mode": self.mode,
+            "intent": _intent_payload(intent),
+            "confidence": self._confidence_payload(advisor),
+        }
+        self.journal.append(record)
+
+    def _confidence_payload(
+        self, advisor: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
+        """The confidences behind one decision, for the order table.
+
+        ``evidence`` is the system-level grade the risk budget was sized from;
+        ``advisor`` is the model's own confidence in this specific order, when
+        the advisor was consulted. Reporting both keeps "the edge looks real"
+        and "this order looks sane" from being mistaken for each other.
+        """
+        payload: dict[str, Any] = {"evidence": round(self.evidence_confidence, 4)}
+        if advisor:
+            payload["advisor"] = round(float(advisor.get("confidence", 0.0)), 3)
+            payload["advisor_action"] = advisor.get("action")
+            payload["advisor_model"] = advisor.get("model")
+        return payload
 
     def _count_orders_today(self) -> int:
         count = 0
@@ -859,14 +916,16 @@ def run_daemon(
             session = (
                 session_clock() if session_clock is not None else session_for(clock())
             )
-            if not session_allows(config.session_policy, session):
+            # The effective policy comes from the loop: the agent may widen it
+            # within the operator's bound as its confidence grows.
+            if not session_allows(loop.session_policy, session):
                 now = time.monotonic()
                 if (now - last_heartbeat) >= _HEARTBEAT_SECONDS:
                     journal.append(
                         {
                             "event": "session_closed",
                             "session": session,
-                            "policy": config.session_policy,
+                            "policy": loop.session_policy,
                             "next_regular_open": next_session_open(clock()).isoformat(),
                             "mode": loop.mode,
                         }
@@ -1018,6 +1077,10 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                 config, load_state(config.state_dir)
             ):
                 journal.append(applied)
+            # A live risk event resets the confidence-derived budget: after a
+            # demotion the agent has to earn its size back from the floor.
+            for reset_event in selfimprove.update_limits(config, reset=True):
+                journal.append(reset_event)
             loop.set_mode("shadow")
             journal.append({"event": "autonomy_applied", "stage": "shadow", "mode": "shadow"})
             return
@@ -1059,6 +1122,20 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
     )
     for event in events:
         journal.append(event)
+
+    # Apply the freshly computed budget to the running guard: caps have to move
+    # while the daemon is up, not on the next restart.
+    loop.apply_stage_caps()
+    journal.append(
+        {
+            "event": "caps_applied",
+            "max_order_pct": str(loop.guard.max_order_pct),
+            "daily_notional_pct": str(loop.guard.daily_notional_pct),
+            "session_policy": loop.session_policy,
+            "confidence": round(float(getattr(assessment, "confidence", 0.0)), 4),
+            "stage": loop.stage,
+        }
+    )
 
     # 3. Apply a promotion only with explicit operator consent.
     promoted = any(event.get("event") == "promotion" for event in events)

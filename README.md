@@ -312,6 +312,52 @@ Levers, in order of effect: `open_order_refresh_seconds` (each poll skipped is
 two round trips), `poll_seconds`, and how often the LLM advisor sits in the
 decision path.
 
+### The risk budget moves with confidence
+
+The configured percentages are a **ceiling**, not a setting the agent spends by
+default. Every assessment grades the evidence on a 0..1 confidence scale and the
+agent's own budget moves between 25% of that ceiling and 100% of it:
+
+| | value |
+|---|---|
+| `config.max_order_pct` / `daily_notional_pct` | the ceiling — never exceeded |
+| floor | 25% of the ceiling (still trades, just smaller) |
+| growth step | +25% per assessment, never past what confidence justifies |
+| cut step | −50% per assessment |
+| growth needs | confidence not deteriorating since the last assessment |
+| kill switch / demotion | straight to the floor; confidence must be rebuilt |
+
+Confidence is graded from the same evidence the promotion gate uses, and every
+component is journaled so a size change can always be traced to the number that
+moved it:
+
+`significance` (bootstrap p vs 0.05) · `sample` (OOS trades vs 30) ·
+`expectancy` (bps vs 25) · `folds` (positive fraction) · `drawdown` (headroom
+under the cap) · `stability` (profit factor vs 1.5), weighted 35/20/20/10/10/5.
+
+This runs live: the first graded assessment scored **0.525** and moved the real
+budget from 2.5% → **3.125% per order** and 10% → **12.5% per day**, with
+3.22%/order queued as the next step toward the 5%/20% ceiling.
+
+`max_session_policy` is the same idea applied to trading hours: the agent may
+widen one step per assessment toward that bound (and never narrow below
+`session_policy`), but only above 0.75 confidence. With `session_policy = "any"`
+the bound is already the widest, so that lever is inert today.
+
+### Confidence in the order table
+
+Every row in **Market & order table** shows the two confidences that produced it:
+
+- **ai x.xx** — the model's own confidence in that specific order, coloured by
+  whether it allowed or vetoed. Sources from the `advisor` journal record.
+- **ev x.xx** — the system-wide evidence grade in force when the decision was
+  taken, i.e. the number the risk budget was sized from.
+
+They answer different questions ("does this order look sane" vs "does the edge
+look real") and are deliberately not averaged. A row rejected mechanically —
+`max_open_positions`, `over_daily_notional`, `kill_switch` — still shows both, so
+the table explains *why* it was refused, not just that it was.
+
 ### Known constraints and unverified areas
 
 - **Fractional shares only trade in regular hours as market orders.** At $50,

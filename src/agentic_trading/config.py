@@ -29,6 +29,9 @@ class Config:
     quote_source: str = "file"  # file | mcp
     poll_seconds: float = 5.0
     session_policy: str = "regular"  # regular | extended | all | any
+    # Widest session policy the agent may move to on its own. Empty means "no
+    # wider than session_policy", so widening trading hours is opt-in.
+    max_session_policy: str = ""
     account_number: str | None = None
     order_type: str = "market"  # market (regular hours) | limit (marketable)
     max_orders_per_day: int = 10
@@ -62,6 +65,18 @@ class Config:
             raise ValueError("quote_source must be file|mcp")
         if self.session_policy not in ("regular", "extended", "all", "any"):
             raise ValueError("session_policy must be regular|extended|all|any")
+        if self.max_session_policy:
+            from agentic_trading.limits import SESSION_POLICIES
+
+            if self.max_session_policy not in SESSION_POLICIES:
+                raise ValueError("max_session_policy must be regular|extended|all|any")
+            if SESSION_POLICIES.index(self.max_session_policy) < SESSION_POLICIES.index(
+                self.session_policy
+            ):
+                raise ValueError(
+                    "max_session_policy must be at least as wide as session_policy "
+                    "(the agent may widen hours, never narrow below what you set)"
+                )
         if self.order_type not in ("market", "limit"):
             raise ValueError("order_type must be market|limit")
         if self.poll_seconds <= 0:
@@ -116,6 +131,7 @@ def load_config(path: str | Path) -> Config:
         quote_source=str(raw.get("quote_source", "file")),
         poll_seconds=float(raw.get("poll_seconds", 5.0)),
         session_policy=str(raw.get("session_policy", "regular")),
+        max_session_policy=str(raw.get("max_session_policy", "")),
         account_number=(
             str(raw["account_number"]) if raw.get("account_number") else None
         ),

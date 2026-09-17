@@ -210,6 +210,45 @@ class CryptoOrderRoutingTests(unittest.TestCase):
 
 
 class CryptoDaemonGateTests(unittest.TestCase):
+    def test_decisions_record_the_confidence_they_were_taken_under(self) -> None:
+        """The order table has to explain why a row was bought or rejected."""
+        from agentic_trading.llm.advisor import AdvisorDecision
+
+        broker, client = self._broker()
+        with tempfile.TemporaryDirectory() as name:
+            config = load_config(_write_config(Path(name)))
+            loop = _Loop(config, broker, _CryptoBuy())
+            loop.evidence_confidence = 0.5252
+
+            class _Advisor:
+                model = "fake-model"
+
+                def review_entry(self, **_kwargs):
+                    return AdvisorDecision(
+                        action="allow", confidence=0.62, hold=False, reason="ok"
+                    )
+
+            loop.advisor = _Advisor()
+            loop.start()  # the daemon resolves the account and equity first
+            intent = _CryptoBuy().on_quote(_crypto_quote())[0]
+            loop.process_intent(intent)
+
+            records = [
+                json.loads(line)
+                for line in (
+                    Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+                ).read_text().splitlines()
+                if line.strip()
+            ]
+
+        accepted = [r for r in records if r.get("event") == "accepted"]
+        self.assertEqual(len(accepted), 1)
+        confidence = accepted[0]["confidence"]
+        self.assertEqual(confidence["evidence"], 0.5252)
+        self.assertEqual(confidence["advisor"], 0.62)
+        self.assertEqual(confidence["advisor_action"], "allow")
+        self.assertEqual(confidence["advisor_model"], "fake-model")
+
     def test_live_positions_merge_the_crypto_book(self) -> None:
         tools = load_tools()
         client = FakeMcpClient(

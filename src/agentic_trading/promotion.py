@@ -27,6 +27,26 @@ from typing import Any, Optional
 
 STAGES = ("shadow", "probation", "live")
 
+# Confidence is the continuous cousin of the pass/fail gate: it grades evidence
+# that is not yet strong enough to promote, so risk can move in steps instead of
+# jumping from "nothing" to "everything" the day the gate finally passes.
+#
+# The significance term deliberately uses the *uncorrected* 0.05 bar. Promotion
+# still requires the Bonferroni-corrected threshold; confidence only asks "does
+# this look real at all", because a score that is 0 for every run that has not
+# yet passed would make the ladder a no-op.
+_SIGNIFICANCE_REFERENCE = 0.05
+_EXPECTANCY_TARGET_BPS = 25.0
+_PROFIT_FACTOR_TARGET = 1.5
+_CONFIDENCE_WEIGHTS = {
+    "significance": 0.35,
+    "sample": 0.20,
+    "expectancy": 0.20,
+    "folds": 0.10,
+    "drawdown": 0.10,
+    "stability": 0.05,
+}
+
 
 @dataclass(frozen=True)
 class PromotionPolicy:
@@ -51,6 +71,8 @@ class Assessment:
     score: float
     reasons: list[str] = field(default_factory=list)
     evidence: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    confidence_parts: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,7 +80,48 @@ class Assessment:
             "score": round(self.score, 4),
             "reasons": list(self.reasons),
             "evidence": dict(self.evidence),
+            "confidence": round(self.confidence, 4),
+            "confidence_parts": dict(self.confidence_parts),
         }
+
+
+def _unit(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def grade_confidence(
+    *,
+    oos_trades: int,
+    expectancy_bps: float,
+    positive_fraction: float,
+    max_drawdown_pct: float,
+    bootstrap_p_value: float,
+    profit_factor: float,
+    policy: PromotionPolicy,
+) -> tuple[float, dict[str, float]]:
+    """Grade how much the evidence looks like a real edge, on a 0..1 scale.
+
+    Every component is bounded and reported separately so a change in risk can
+    always be traced to the number that moved it.
+    """
+    parts = {
+        "significance": _unit(
+            (_SIGNIFICANCE_REFERENCE - bootstrap_p_value) / _SIGNIFICANCE_REFERENCE
+        ),
+        "sample": _unit(oos_trades / max(1, policy.min_oos_trades)),
+        "expectancy": _unit(expectancy_bps / _EXPECTANCY_TARGET_BPS),
+        "folds": _unit(positive_fraction),
+        "drawdown": _unit(
+            1.0 - (max_drawdown_pct / max(1e-9, policy.max_oos_drawdown_pct))
+        ),
+        "stability": _unit(profit_factor / _PROFIT_FACTOR_TARGET),
+    }
+    confidence = sum(
+        _CONFIDENCE_WEIGHTS[name] * value for name, value in parts.items()
+    )
+    return round(confidence, 6), {
+        name: round(value, 4) for name, value in parts.items()
+    }
 
 
 def assess(
@@ -151,8 +214,22 @@ def assess(
         "genomes_evaluated": getattr(evolution, "evaluated", 0),
         "seed": getattr(evolution, "seed", 0),
     }
+    confidence, confidence_parts = grade_confidence(
+        oos_trades=oos.trades,
+        expectancy_bps=oos.expectancy_bps,
+        positive_fraction=positive_fraction,
+        max_drawdown_pct=oos.max_drawdown_pct,
+        bootstrap_p_value=oos.bootstrap_p_value,
+        profit_factor=oos.profit_factor,
+        policy=policy,
+    )
     return Assessment(
-        eligible=not reasons, score=score, reasons=reasons, evidence=evidence
+        eligible=not reasons,
+        score=score,
+        reasons=reasons,
+        evidence=evidence,
+        confidence=confidence,
+        confidence_parts=confidence_parts,
     )
 
 
@@ -310,5 +387,7 @@ def load_state(state_dir: Path | str) -> PromotionState:
 
 def save_state(state_dir: Path | str, state: PromotionState) -> None:
     path = state_path(state_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state.to_dict(), indent=2) + "\n", encoding="utf-8")
+    from agentic_trading import jsonio
+
+    # Atomic: the daemon reads the stage while the evaluation worker writes it.
+    jsonio.write_text(path, jsonio.dumps(state.to_dict(), indent=2) + "\n")

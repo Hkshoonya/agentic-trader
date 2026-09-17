@@ -72,8 +72,8 @@ tr:hover td{background:#151d28}
 <div class="card span4"><h2>Promotion gate</h2><div id="gate"></div></div>
 <div class="card span12"><h2>Market &amp; order table</h2>
   <div class="tablewrap"><table id="orders">
-    <thead><tr><th>time</th><th>status</th><th>symbol</th><th>side</th><th>type</th><th>session</th><th>size</th><th>notional</th><th>last</th><th>alerts</th><th>reason</th></tr></thead>
-    <tbody><tr><td colspan="11" class="sub">no decisions yet</td></tr></tbody>
+    <thead><tr><th>time</th><th>status</th><th>confidence</th><th>symbol</th><th>side</th><th>type</th><th>session</th><th>size</th><th>notional</th><th>last</th><th>alerts</th><th>reason</th></tr></thead>
+    <tbody><tr><td colspan="12" class="sub">no decisions yet</td></tr></tbody>
   </table></div>
   <div class="sub" id="orders-count"></div>
 </div>

@@ -117,7 +117,9 @@ async function refresh() {
   const notional = Number(summary.daily_notional || 0);
   document.getElementById('notional').textContent = num(notional);
   document.getElementById('notional-sub').textContent =
-    'cap ' + num(Number(summary.current_equity || 0) * 0.20) + ' (20%) · session policy ' + summary.session_policy;
+    'cap ' + num(Number(summary.current_equity || 0)
+      * Number((summary.risk || {}).daily_notional_pct || 0.20))
+    + ' · session policy ' + summary.session_policy;
   const counts = summary.event_counts || {};
   document.getElementById('trades').textContent =
     (counts.accepted || 0) + ' / ' + (counts.placed || 0) + ' / ' + (counts.rejected || 0);
@@ -128,9 +130,25 @@ async function refresh() {
   const a = summary.promotion.last_assessment || {};
   const ev = a.evidence || {};
   const reasons = a.reasons || [];
+  // The risk budget is what actually moves between assessments: the caps climb
+  // toward the operator's ceiling as evidence confidence improves.
+  const risk = summary.risk || {};
+  const budget = '<div class="row"><span>budget / order</span><b>'
+      + num(Number(risk.max_order_pct || 0) * 100) + '% of '
+      + num(Number(risk.ceiling_max_order_pct || 0) * 100) + '% authorized</b></div>'
+    + '<div class="row"><span>budget / day</span><b>'
+      + num(Number(risk.daily_notional_pct || 0) * 100) + '% of '
+      + num(Number(risk.ceiling_daily_notional_pct || 0) * 100) + '% authorized</b></div>'
+    + '<div class="row"><span>confidence</span><b>' + num(risk.confidence, 3)
+      + (risk.reason ? ' · ' + risk.reason : '') + '</b></div>'
+    + (risk.target_max_order_pct
+      ? '<div class="sub">next target '
+        + num(Number(risk.target_max_order_pct) * 100) + '% per order</div>'
+      : '');
   document.getElementById('gate').innerHTML = (a.eligible === undefined)
-    ? '<div class="sub">no assessment yet — run: agentic-trading evolve</div>'
-    : '<div class="row"><span>eligible</span><b>' + (a.eligible ? 'YES' : 'not yet') + '</b></div>'
+    ? budget + '<div class="sub">no assessment yet — run: agentic-trading evolve</div>'
+    : budget
+      + '<div class="row"><span>eligible</span><b>' + (a.eligible ? 'YES' : 'not yet') + '</b></div>'
       + '<div class="row"><span>score</span><b>' + num(a.score, 3) + '</b></div>'
       + '<div class="row"><span>OOS trades</span><b>' + (ev.oos_trades ?? '—') + '</b></div>'
       + '<div class="row"><span>OOS expectancy</span><b>' + num(ev.oos_expectancy_bps) + ' bps</b></div>'
@@ -162,7 +180,7 @@ function renderOrders(data) {
     (counts.accepted || 0) + ' accepted · ' + (counts.placed || 0) + ' placed · '
     + (counts.rejected || 0) + ' rejected · ' + (counts.failed || 0) + ' failed';
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="11" class="sub">no decisions yet</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" class="sub">no decisions yet</td></tr>';
     return;
   }
   body.innerHTML = rows.map(r => {
@@ -180,8 +198,22 @@ function renderOrders(data) {
       ? Object.keys(r.alerts).join(', ') : 'none';
     const side = r.side ? '<span class="' + (r.side === 'buy' ? 'buy' : 'sell') + '">' + r.side + '</span>' : '—';
     const at = r.at ? new Date(r.at).toLocaleTimeString() : '—';
+    // Two different questions, two numbers: how real the edge looks (evidence)
+    // and how sure the model was about this specific order (advisor).
+    const c = r.confidence || {};
+    const ai = (c.advisor === null || c.advisor === undefined) ? null : Number(c.advisor);
+    const ev = (c.evidence === null || c.evidence === undefined) ? null : Number(c.evidence);
+    const confidence = (ai === null && ev === null) ? '<span class="sub">—</span>'
+      : '<span class="conf">'
+        + (ai === null ? ''
+          : '<span class="' + (c.advisor_action === 'veto' ? 'sell' : 'buy') + '">ai '
+            + ai.toFixed(2) + '</span>')
+        + (ai !== null && ev !== null ? '<br>' : '')
+        + (ev === null ? '' : '<span class="sub">ev ' + ev.toFixed(2) + '</span>')
+        + '</span>';
     return '<tr><td>' + at + '</td>'
       + '<td><span class="pill ' + r.event + '">' + r.event + '</span></td>'
+      + '<td>' + confidence + '</td>'
       + '<td>' + (r.symbol || '—') + '</td>'
       + '<td>' + side + '</td>'
       + '<td>' + (r.type || '—') + '</td>'

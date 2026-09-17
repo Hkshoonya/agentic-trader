@@ -254,6 +254,56 @@ class DashboardTests(unittest.TestCase):
             self.assertIsNone(metrics["profit_factor"])
             self.assertEqual(payload["evolution"]["in_sample"]["profit_factor"], 2.5)
 
+    def test_order_rows_carry_both_confidences(self) -> None:
+        """Each order shows how sure the model was and how real the edge looked.
+
+        The advisor's opinion is journaled under its own decision_id, so the
+        table has to join it back rather than lose it.
+        """
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            journal = Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            journal.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "decision_id": "d-1",
+                                "event": "advisor",
+                                "model": "deepseek-flash",
+                                "action": "allow",
+                                "confidence": 0.62,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "decision_id": "d-1",
+                                "event": "rejected",
+                                "reason": "max_open_positions",
+                                "symbol": "BTC-USD",
+                                "side": "buy",
+                                "notional": "1.25",
+                                "confidence": {"evidence": 0.5252},
+                                "intent": {"created_at": "2026-09-16T14:00:00Z"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            rows = DashboardState(config).orders_table()["rows"]
+
+        self.assertEqual(len(rows), 1)
+        confidences = rows[0]["confidence"]
+        self.assertEqual(confidences["advisor"], 0.62)
+        self.assertEqual(confidences["advisor_action"], "allow")
+        self.assertEqual(confidences["evidence"], 0.5252)
+        self.assertEqual(rows[0]["reason"], "max_open_positions")
+
     def test_http_surface_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
