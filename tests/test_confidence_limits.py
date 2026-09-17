@@ -131,6 +131,32 @@ class ConfidenceLadderTests(unittest.TestCase):
             self.assertEqual(first.max_order_pct, second.max_order_pct)
             self.assertEqual(second.reason, "confidence_flat")
 
+    def test_recomputation_noise_does_not_freeze_the_ladder(self) -> None:
+        """A re-run that lands 1e-5 lower is the same evidence, in both directions."""
+        with tempfile.TemporaryDirectory() as name:
+            cfg = config(Path(name))
+            first = propose_from_assessment(cfg, assessment(0.6), current=None)
+            wobbled = propose_from_assessment(
+                cfg, assessment(0.59999), current=first
+            )
+            self.assertEqual(wobbled.reason, "confidence_flat")
+            self.assertEqual(
+                Decimal(wobbled.max_order_pct), Decimal(first.max_order_pct)
+            )
+
+    def test_real_deterioration_cuts_back_toward_the_new_target(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            cfg = config(Path(name))
+            high = propose_from_assessment(cfg, assessment(0.9), current=None)
+            lower = propose_from_assessment(cfg, assessment(0.8), current=high)
+            self.assertEqual(lower.reason, "confidence_down")
+            self.assertLess(
+                Decimal(lower.max_order_pct), Decimal(high.max_order_pct)
+            )
+            self.assertGreaterEqual(
+                Decimal(lower.max_order_pct), Decimal(high.max_order_pct) * Decimal("0.5")
+            )
+
     def test_falling_confidence_cuts_at_most_half(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             cfg = config(Path(name))

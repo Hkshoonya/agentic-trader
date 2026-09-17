@@ -40,8 +40,9 @@ GROW_FACTOR = Decimal("1.25")
 # Lowest fraction of the operator ceiling the ladder can reach: confidence 0
 # still trades, just at a quarter of the authorised size.
 MIN_SCALE = Decimal("0.25")
-# Confidence must improve by at least this much before a cap may grow.
-GROWTH_EPSILON = 0.01
+# Confidences are stored rounded to 4 places; differences smaller than that are
+# recomputation noise, not a change in the evidence.
+CONFIDENCE_TOLERANCE = Decimal("0.0001")
 
 # Ordered widest-last, so "one step wider" is unambiguous.
 SESSION_POLICIES = ("regular", "extended", "all", "any")
@@ -184,6 +185,9 @@ def propose_from_assessment(
     ceiling_daily = Decimal(str(config.daily_notional_pct))
     confidence = 0.0 if reset else float(getattr(assessment, "confidence", 0.0) or 0.0)
     confidence = max(0.0, min(1.0, confidence))
+    # Grade at the precision we store, so recomputation noise cannot move the
+    # budget in either direction.
+    confidence = round(confidence, 4)
 
     scale = MIN_SCALE + (Decimal(1) - MIN_SCALE) * Decimal(str(round(confidence, 6)))
     target_order = _clamp(ceiling_order * scale, ceiling_order, MIN_ORDER_PCT)
@@ -215,7 +219,13 @@ def propose_from_assessment(
         # Grow slowly, and only while the evidence is not deteriorating: at most
         # one GROW_FACTOR step per assessment, and never past the target the
         # current confidence justifies.
-        if confidence + 1e-9 < previous_confidence:
+        # A re-run that lands within the stored precision is the same evidence,
+        # not evidence getting worse: without this the budget can freeze on
+        # floating-point noise.
+        if (
+            Decimal(str(round(confidence, 4)))
+            < Decimal(str(previous_confidence)) - CONFIDENCE_TOLERANCE
+        ):
             next_order, next_daily = base_order, base_daily
             reason = "confidence_fell_hold"
         else:
