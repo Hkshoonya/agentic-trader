@@ -1441,6 +1441,37 @@ def run_daemon(
         loop.finish()
 
 
+def evaluation_state_path(config: Any) -> Path:
+    return Path(config.state_dir) / "evaluation_state.json"
+
+
+def load_evaluation_state(config: Any) -> dict[str, Any]:
+    """What the last evaluation saw, so a restart can skip an unchanged search.
+
+    Without this every restart re-runs a minutes-long CPU-bound search over
+    identical data — which both wastes the work and starves the trading loop
+    sharing the process.
+    """
+    path = evaluation_state_path(config)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_evaluation_state(config: Any, payload: dict[str, Any]) -> None:
+    from agentic_trading import jsonio
+
+    try:
+        jsonio.write_text(
+            evaluation_state_path(config),
+            jsonio.dumps(payload, indent=2) + "\n",
+        )
+    except OSError:
+        return
+
+
 def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -> None:
     """Demote, evolve, assess, and (when permitted) promote — never silently."""
     if config.autonomy == "manual":
@@ -1512,7 +1543,9 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                 journal.append(
                     {
                         "event": "history_sync",
-                        "symbols": len(results),
+                        # NB: a count, not an array — the console renders
+                        # `symbols` as a list and a number broke the stream.
+                        "symbol_count": len(results),
                         "added": sum(result.added for result in results),
                         "details": [
                             {
@@ -1603,7 +1636,10 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
         if directory.is_dir():
             _, _, planned = history_plan(directory, config)
             current = fingerprint(directory, planned)
-            if current and current == getattr(loop, "history_fingerprint", None):
+            previous = getattr(loop, "history_fingerprint", None)
+            if previous is None:
+                previous = load_evaluation_state(config).get("history_fingerprint")
+            if current and current == previous:
                 journal.append(
                     {
                         "event": "evaluation_skipped",
@@ -1613,6 +1649,7 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                 )
                 return
             loop.history_fingerprint = current
+            save_evaluation_state(config, {"history_fingerprint": current})
 
     if config.history_path is None:
         journal.append(

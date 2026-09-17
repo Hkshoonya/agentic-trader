@@ -20,7 +20,8 @@ function renderEvent(r) {
     : r.event === 'rejected' ? 'rejected'
     : r.side === 'buy' ? 'buy' : r.side === 'sell' ? 'sell'
     : (r.mode === 'shadow' ? 'shadow' : '');
-  const detail = r.reason || r.symbol || (r.symbols || []).join(',') || '';
+  const detail = r.reason || r.symbol
+    || (Array.isArray(r.symbols) ? r.symbols.join(',') : (r.symbols ?? '')) || '';
   const amount = r.notional ? ' $' + num(r.notional) : (r.count ? ' x' + r.count : '');
   const when = r.at ? new Date(r.at).toLocaleTimeString() : new Date().toLocaleTimeString();
   const div = document.createElement('div');

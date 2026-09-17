@@ -368,7 +368,11 @@ def sync_symbol(
         return None
     existing = read_records(file)
     merged, added = merge_records(existing, incoming)
-    write_records(file, merged)
+    # Only touch the file when the contents actually change: rewriting it
+    # moves the mtime, which changes the fingerprint, which makes the daemon
+    # re-run a minutes-long search over identical data.
+    if added or len(merged) != len(existing):
+        write_records(file, merged)
     report = check_records(symbol, merged)
     return SyncResult(
         symbol=symbol,
