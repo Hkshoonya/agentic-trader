@@ -88,8 +88,12 @@ class QualityReport:
 # that symbol: a mostly-zero volume column is a data artefact, and a z-score
 # computed on it is noise dressed as signal.
 VOLUME_COVERAGE_FLOOR = 0.8
-# A single-bar move this large is a data error far more often than a real move.
+# A single-bar move this large is a data error far more often than a real move —
+# unless it came with volume. Litecoin's 2017-03-30 (+83%) and 2017-12-12 (+61%)
+# are real rallies on 10x normal volume, and flagging them forever is how a
+# monitor trains its reader to ignore it.
 SPIKE_PCT = 60.0
+SPIKE_VOLUME_RATIO = 1.25
 
 
 def check_records(symbol: str, records: list[dict[str, Any]]) -> QualityReport:
@@ -122,12 +126,19 @@ def check_records(symbol: str, records: list[dict[str, Any]]) -> QualityReport:
 
     if any(close <= 0 for close in closes):
         issues.append("non-positive prices")
-    spikes = [
-        index
-        for index in range(1, len(closes))
-        if closes[index - 1] > 0
-        and abs(closes[index] / closes[index - 1] - 1.0) * 100.0 > SPIKE_PCT
-    ]
+    spikes = []
+    for index in range(1, len(closes)):
+        if closes[index - 1] <= 0:
+            continue
+        moved = abs(closes[index] / closes[index - 1] - 1.0) * 100.0
+        if moved <= SPIKE_PCT:
+            continue
+        window = [value for value in volumes[max(0, index - 20) : index] if value > 0]
+        typical = sorted(window)[len(window) // 2] if window else 0.0
+        volume_here = volumes[index] if index < len(volumes) else 0.0
+        if typical > 0 and volume_here >= typical * SPIKE_VOLUME_RATIO:
+            continue  # a big move that traded is a big move, not a bad print
+        spikes.append(index)
     if spikes:
         issues.append(f"{len(spikes)} single-bar moves over {SPIKE_PCT:.0f}%")
 
@@ -232,13 +243,29 @@ def coinbase_row_to_record(symbol: str, row: Any) -> Optional[dict[str, Any]]:
     }
 
 
-def fetch_crypto_records(symbol: str, *, timeout: float = 20.0) -> list[dict[str, Any]]:
+def fetch_crypto_records(
+    symbol: str,
+    *,
+    timeout: float = 20.0,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> list[dict[str, Any]]:
+    """Daily candles for ``symbol``, optionally a specific window.
+
+    Coinbase returns at most 300 candles per call, so a window is how older
+    history is paged back in.
+    """
     import httpx
 
     product = symbol if "-" in symbol else f"{symbol[:-3]}-USD"
+    params: dict[str, Any] = {"granularity": 86_400}
+    if start is not None:
+        params["start"] = start.astimezone(timezone.utc).isoformat()
+    if end is not None:
+        params["end"] = end.astimezone(timezone.utc).isoformat()
     response = httpx.get(
         COINBASE_CANDLES_URL.format(product=product.upper()),
-        params={"granularity": 86_400},
+        params=params,
         headers={"User-Agent": "agentic-trading/0.1"},
         timeout=timeout,
     )
@@ -248,6 +275,72 @@ def fetch_crypto_records(symbol: str, *, timeout: float = 20.0) -> list[dict[str
         raise ValueError(f"unexpected candles payload for {product}")
     records = [coinbase_row_to_record(symbol, row) for row in payload]
     return [record for record in records if record is not None]
+
+
+def backfill_crypto_volume(
+    path: Path | str,
+    *,
+    symbol: str,
+    fetch: Optional[Callable[..., list[dict[str, Any]]]] = None,
+    max_pages: int = 12,
+) -> int:
+    """Fill in volume for older bars that were imported without it.
+
+    Four crypto files carry a year or more of bars with no volume column at all
+    (the source they came from did not include it). The live features only read
+    the recent window, but the backtests read everything, and a volume column
+    that is empty for a year is a trap waiting for the first genome that uses it.
+
+    Returns how many bars gained volume. Pages backward until it runs out of
+    history or hits ``max_pages``.
+    """
+    file = Path(path)
+    records = read_records(file)
+    if not records:
+        return 0
+    missing = [
+        record
+        for record in records
+        if record.get("volume") in (None, "", "0", "0.0")
+    ]
+    if not missing:
+        return 0
+
+    fetch = fetch or fetch_crypto_records
+    missing_dates = sorted(datetime.fromisoformat(str(record["start"])) for record in missing)
+    # Walk backwards from the *newest* hole: the API serves 300 candles ending
+    # at the window end, so paging from the old end of the file would fetch
+    # windows that no longer contain the bars that are missing.
+    cursor = missing_dates[-1] + timedelta(days=1)
+    oldest_needed = missing_dates[0]
+    known = {str(record["start"]): record for record in records}
+    filled = 0
+    for _ in range(max_pages):
+        if cursor <= oldest_needed:
+            break
+        window_end = cursor
+        window_start = window_end - timedelta(days=299)
+        try:
+            fetched = fetch(symbol, start=window_start, end=window_end)
+        except Exception:  # noqa: BLE001 — a backfill is best effort
+            break
+        if not fetched:
+            break
+        for record in fetched:
+            key = str(record.get("start"))
+            volume = record.get("volume")
+            existing = known.get(key)
+            if existing is None:
+                continue
+            if existing.get("volume") in (None, "", "0", "0.0") and volume:
+                existing["volume"] = volume
+                filled += 1
+        cursor = window_start
+
+    if filled:
+        merged, _ = merge_records(records, records)
+        write_records(file, merged)
+    return filled
 
 
 def fetch_equity_records(broker: Any, symbol: str) -> list[dict[str, Any]]:
@@ -334,8 +427,28 @@ def sync_history(
             errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:200])
             continue
         if result is not None:
+            # A file whose older bars were imported without volume gets a
+            # bounded repair here, so the gap closes by itself instead of
+            # warning forever.
+            report = check_records(symbol, read_records(path))
+            if is_crypto_symbol(symbol) and not report.volume_usable:
+                gained = backfill_crypto_volume(
+                    path, symbol=symbol, fetch=fetch_crypto, max_pages=4
+                )
+                if gained:
+                    report = check_records(symbol, read_records(path))
+                    result = SyncResult(
+                        symbol=result.symbol,
+                        path=result.path,
+                        added=result.added,
+                        total=report.bars,
+                        last_start=report.last_start,
+                        source=result.source,
+                        issues=report.issues,
+                        volume_usable=report.volume_usable,
+                    )
             results.append(result)
-            quality.append(check_records(symbol, read_records(path)))
+            quality.append(report)
     if quality:
         try:
             jsonio.write_text(

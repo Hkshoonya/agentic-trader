@@ -10,6 +10,7 @@ from pathlib import Path
 from agentic_trading.config import load_config
 from agentic_trading.history_sync import (
     bar_stem,
+    backfill_crypto_volume,
     check_records,
     coinbase_row_to_record,
     fingerprint,
@@ -69,6 +70,64 @@ class MergeTests(unittest.TestCase):
 
 
 class SyncSymbolTests(unittest.TestCase):
+    def test_volume_backfill_walks_back_from_the_newest_hole(self) -> None:
+        """Paging from the oldest bar would fetch windows that miss the gap."""
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "LTCUSD_day.jsonl"
+            rows = []
+            for day in range(1, 11):
+                record = bar(f"2026-01-{day:02d}T00:00:00+00:00", str(100 + day))
+                if day > 4:  # the newer half already has volume
+                    record["volume"] = "50"
+                else:
+                    record.pop("volume")
+                rows.append(record)
+            path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+            windows: list[tuple] = []
+
+            def fetch(symbol, *, start=None, end=None, **_kwargs):
+                windows.append((start, end))
+                return [
+                    {**bar(f"2026-01-{day:02d}T00:00:00+00:00", str(100 + day)), "volume": "77"}
+                    for day in range(1, 11)
+                ]
+
+            filled = backfill_crypto_volume(path, symbol="LTC-USD", fetch=fetch, max_pages=3)
+            records = read_records(path)
+
+        self.assertEqual(filled, 4)
+        self.assertTrue(all(record.get("volume") for record in records))
+        self.assertTrue(windows, "no window was fetched")
+        # The first window must end at the newest missing bar, not the oldest.
+        self.assertIsNotNone(windows[0][1])
+        self.assertGreater(windows[0][1], windows[0][0])
+
+    def test_a_real_rally_on_volume_is_not_flagged_as_a_spike(self) -> None:
+        """LTC's 2017-03-30 (+83%) traded 10x normal volume: a real move."""
+        records = []
+        for day in range(1, 21):
+            record = bar(f"2026-02-{day:02d}T00:00:00+00:00", str(100))
+            record["volume"] = "1000"
+            records.append(record)
+        records.append(bar("2026-02-21T00:00:00+00:00", "183"))
+        records[-1]["volume"] = "12000"
+        report = check_records("LTC-USD", records)
+        self.assertEqual(
+            [issue for issue in report.issues if "over 60%" in issue], []
+        )
+
+    def test_a_jump_on_flat_volume_is_flagged(self) -> None:
+        records = []
+        for day in range(1, 21):
+            record = bar(f"2026-03-{day:02d}T00:00:00+00:00", str(100))
+            record["volume"] = "1000"
+            records.append(record)
+        records.append(bar("2026-03-21T00:00:00+00:00", "183"))
+        records[-1]["volume"] = "1000"  # same volume: looks like a bad print
+        report = check_records("LTC-USD", records)
+        self.assertTrue(any("over 60%" in issue for issue in report.issues))
+
     def test_sync_extends_an_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             path = Path(name) / "BTCUSD_day.jsonl"

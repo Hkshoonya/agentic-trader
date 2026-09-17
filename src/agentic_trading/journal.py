@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -17,6 +17,14 @@ class DecisionJournal:
     def append(self, record: dict[str, Any]) -> None:
         self._journal_dir.mkdir(parents=True, exist_ok=True)
         path = self._today_path()
+        # Every record carries the time it happened. Without this, an advisor
+        # call or a regime refresh is undated: you cannot measure how often the
+        # model was consulted, and the console has to fall back to "now".
+        if "at" not in record:
+            record = {
+                **record,
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
         # Journals carry account identifiers and order details: owner-only.
         handle = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
         with os.fdopen(handle, "a", encoding="utf-8") as f:
