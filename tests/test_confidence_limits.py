@@ -229,3 +229,65 @@ class SessionPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BudgetAboveTargetTests(unittest.TestCase):
+    """A budget pinned at the ceiling is not evidence of falling confidence."""
+
+    def test_settling_below_the_ceiling_is_not_reported_as_a_cut(self) -> None:
+        from agentic_trading.config import load_config as _load
+
+        # A config whose ceiling is above what confidence justifies.
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            (tmp / "state").mkdir()
+            cfg_path = tmp / "agentic.toml"
+            cfg_path.write_text(
+                "\n".join(
+                    [
+                        'mode = "shadow"',
+                        'symbol_whitelist = ["SPY"]',
+                        'max_order_pct = "0.05"',
+                        'daily_notional_pct = "0.20"',
+                        'daily_loss_pct = "0.03"',
+                        "max_open_positions = 1",
+                        "equity_refresh_ticks = 30",
+                        "equity_refresh_seconds = 60",
+                        'timezone = "local"',
+                        f'quotes_path = "{tmp / "q.jsonl"}"',
+                        f'journal_dir = "{tmp / "j"}"',
+                        f'state_dir = "{tmp / "state"}"',
+                        f'tools_snapshot_path = "{tmp / "t.json"}"',
+                        f'token_path = "{tmp / "k.json"}"',
+                        'mcp_url = "https://x"',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = _load(cfg_path)
+            from agentic_trading.limits import propose_from_assessment
+
+            from agentic_trading.limits import Limits
+
+            # A budget pinned at the operator's ceiling by a low-confidence
+            # assessment (which is what reconcile() leaves behind).
+            pinned = Limits(
+                max_order_pct="0.05",
+                daily_notional_pct="0.20",
+                reason="ceiling_reconciled",
+                updated_at="2026-01-01T00:00:00+00:00",
+                confidence="0.4547",
+            )
+            # Confidence improves, but its target is still below the ceiling:
+            # the budget settles down without the evidence getting worse.
+            settled = propose_from_assessment(
+                config, assessment(0.9), current=pinned
+            )
+            self.assertEqual(settled.reason, "budget_above_target")
+            self.assertGreater(
+                float(settled.confidence), float(pinned.confidence)
+            )
+            self.assertLess(
+                Decimal(settled.max_order_pct), Decimal(pinned.max_order_pct)
+            )

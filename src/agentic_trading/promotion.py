@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 STAGES = ("shadow", "probation", "live")
 
@@ -122,6 +122,162 @@ def grade_confidence(
     return round(confidence, 6), {
         name: round(value, 4) for name, value in parts.items()
     }
+
+
+EVIDENCE_MAX_AGE_DAYS = 30.0
+
+
+def assess_walkforward(
+    report: Mapping[str, Any],
+    policy: PromotionPolicy,
+    *,
+    live_per_order_pct: Optional[float] = None,
+    now: Optional[datetime] = None,
+) -> Assessment:
+    """Decide whether the *pre-registered* rule has earned promotion.
+
+    The search path has to divide its significance bar by every genome it tried,
+    which is correct statistics and an experiment too broad for its sample. The
+    walk-forward test in :mod:`agentic_trading.walkforward` is the opposite
+    experiment: one fixed rule, declared before the numbers were seen, for which
+    a plain ``p <= 0.05`` is the honest bar.
+
+    This is the primary evidence the gate uses when a report exists. It is
+    deliberately strict about size: passing on the *rule* while trading a book
+    the drawdown ceiling does not support is how a good hypothesis becomes a
+    margin call, so the traded size has to fit inside the measured ``gate_size``.
+    """
+    config = (report.get("configs") or {}).get("production") or {}
+    gate = report.get("gate_size") or {}
+    reasons: list[str] = []
+
+    generated = str(report.get("generated_at") or "")
+    age_days: Optional[float] = None
+    if generated:
+        try:
+            stamp = datetime.fromisoformat(generated)
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            age_days = ((now or datetime.now(timezone.utc)) - stamp).total_seconds() / 86_400
+        except ValueError:
+            age_days = None
+    if age_days is None:
+        reasons.append("walk-forward report has no usable timestamp")
+    elif age_days > EVIDENCE_MAX_AGE_DAYS:
+        reasons.append(
+            f"walk-forward report is {age_days:.0f} days old "
+            f"(limit {EVIDENCE_MAX_AGE_DAYS:.0f})"
+        )
+
+    trades = int(config.get("trades") or 0)
+    expectancy = float(config.get("expectancy_bps") or 0.0)
+    drawdown = float(config.get("max_drawdown_pct") or 0.0)
+    p_value = float(config.get("bootstrap_p_value") or 1.0)
+    profit_factor = float(config.get("profit_factor") or 0.0)
+    folds = list(config.get("folds") or [])
+    folds_positive = sum(1 for fold in folds if float(fold.get("expectancy_bps") or 0) > 0)
+    folds_total = len(folds)
+    positive_fraction = (folds_positive / folds_total) if folds_total else 0.0
+    per_order_pct = float(config.get("per_order_pct") or 0.0)
+
+    if trades < policy.min_oos_trades:
+        reasons.append(
+            f"walk-forward sample too small ({trades} trades < {policy.min_oos_trades})"
+        )
+    if expectancy < policy.min_oos_expectancy_bps:
+        reasons.append(
+            f"walk-forward expectancy {expectancy:.2f}bps "
+            f"< required {policy.min_oos_expectancy_bps:.2f}bps after costs"
+        )
+    if folds_total and positive_fraction < policy.min_folds_positive_fraction:
+        reasons.append(
+            f"only {folds_positive}/{folds_total} walk-forward folds profitable "
+            f"(need {policy.min_folds_positive_fraction:.0%})"
+        )
+    if not folds_total:
+        reasons.append("no walk-forward folds were evaluated")
+    if drawdown > policy.max_oos_drawdown_pct:
+        reasons.append(
+            f"walk-forward drawdown {drawdown:.1f}% "
+            f"> allowed {policy.max_oos_drawdown_pct:.1f}%"
+        )
+    # One rule, declared in advance: no Bonferroni penalty applies, and none is
+    # taken. The bar is the plain policy bar.
+    if p_value > policy.max_bootstrap_p_value:
+        reasons.append(
+            f"walk-forward edge indistinguishable from noise "
+            f"(bootstrap p={p_value:.4f} > {policy.max_bootstrap_p_value})"
+        )
+    if trades > 0 and expectancy > 0 and profit_factor < 1.0:
+        reasons.append(
+            f"profit factor {profit_factor:.2f} < 1.0 despite positive expectancy"
+        )
+
+    gate_size = gate.get("per_order_pct")
+    if gate_size is None:
+        reasons.append(
+            f"no size holds the {policy.max_oos_drawdown_pct:.0f}% drawdown "
+            "ceiling on this history"
+        )
+    elif live_per_order_pct is not None and live_per_order_pct > float(gate_size) * 1.001:
+        reasons.append(
+            f"trading {live_per_order_pct * 100:.2f}% per order but the evidence "
+            f"only supports {float(gate_size) * 100:.2f}% inside the drawdown ceiling"
+        )
+
+    score = expectancy * min(1.0, trades / max(1, policy.min_oos_trades)) - 0.05 * drawdown
+    confidence, confidence_parts = grade_confidence(
+        oos_trades=trades,
+        expectancy_bps=expectancy,
+        positive_fraction=positive_fraction,
+        max_drawdown_pct=drawdown,
+        bootstrap_p_value=p_value,
+        profit_factor=profit_factor,
+        policy=policy,
+    )
+    evidence = {
+        "source": "walkforward",
+        "oos_trades": trades,
+        "oos_expectancy_bps": round(expectancy, 3),
+        "oos_win_rate": config.get("win_rate"),
+        "oos_profit_factor": (
+            None if profit_factor == float("inf") else round(profit_factor, 4)
+        ),
+        "oos_max_drawdown_pct": round(drawdown, 3),
+        "oos_bootstrap_p_value": round(p_value, 4),
+        "tested_hypotheses": 1,
+        "effective_alpha": policy.max_bootstrap_p_value,
+        "folds_positive": folds_positive,
+        "folds_total": folds_total,
+        "per_order_pct": per_order_pct,
+        "gate_size_pct": None if gate_size is None else float(gate_size),
+        "report_age_days": None if age_days is None else round(age_days, 2),
+        "report_generated_at": generated,
+        # Identity of the evidence itself, so re-running the report on the same
+        # bars cannot advance the promotion streak.
+        "report_key": "|".join(
+            [
+                str((report.get("series") or {}).get("bars")),
+                str(len((report.get("series") or {}).get("symbols") or [])),
+                str(trades),
+                f"{expectancy:.2f}",
+                f"{drawdown:.3f}",
+                f"{p_value:.5f}",
+                str(per_order_pct),
+                str(gate_size),
+            ]
+        ),
+        "symbols": len((report.get("series") or {}).get("symbols") or []),
+        "bars": (report.get("series") or {}).get("bars"),
+    }
+    return Assessment(
+        eligible=not reasons,
+        score=score,
+        reasons=reasons,
+        evidence=evidence,
+        confidence=confidence,
+        confidence_parts=confidence_parts,
+    )
 
 
 def assess(

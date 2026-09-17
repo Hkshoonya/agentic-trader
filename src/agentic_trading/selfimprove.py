@@ -158,13 +158,55 @@ def evaluate_and_record(
     if config.history_path is not None and Path(config.history_path).is_dir():
         _, _, evaluated_symbols = history_plan(Path(config.history_path), config)
     write_evolution(result, config.state_dir, symbols=evaluated_symbols)
-    assessment = assess(result, policy)
+    search_assessment = assess(result, policy)
+    assessment = _primary_assessment(config, policy, search_assessment)
     state = load_state(config.state_dir)
     events = apply_assessment(state, assessment, policy, equity=equity)
     save_state(config.state_dir, state)
 
     events.extend(update_limits(config, assessment=assessment))
+    events.append(
+        {
+            "event": "evidence_source",
+            "source": assessment.evidence.get("source", "search"),
+            "eligible": assessment.eligible,
+            "search_eligible": search_assessment.eligible,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     return assessment, state, events
+
+
+def _primary_assessment(
+    config: Config, policy: Any, search_assessment: Any
+) -> Any:
+    """Choose which experiment the promotion gate answers to.
+
+    The search tries N genomes and pays for it with a significance bar divided
+    by N; the walk-forward test fixes one rule before looking at the numbers and
+    needs only a plain bar. Both are recorded, but the pre-registered one is
+    what decides — otherwise the gate would answer to the widest experiment in
+    the room, which is how a system ends up never trading at all.
+
+    Falls back to the search assessment when no walk-forward report exists yet.
+    """
+    from agentic_trading.evidence import read_report
+    from agentic_trading.limits import load_limits
+    from agentic_trading.promotion import assess_walkforward
+
+    try:
+        report = read_report(config)
+    except Exception:  # noqa: BLE001 — a broken report must not stop the cycle
+        report = None
+    if not report:
+        return search_assessment
+    stored = load_limits(config.state_dir)
+    live = (
+        float(stored.max_order_pct)
+        if stored is not None
+        else float(config.max_order_pct)
+    )
+    return assess_walkforward(report, policy, live_per_order_pct=live)
 
 
 def update_limits(

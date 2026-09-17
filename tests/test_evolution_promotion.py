@@ -23,6 +23,7 @@ from agentic_trading.promotion import (
     Assessment,
     PromotionPolicy,
     PromotionState,
+    assess_walkforward,
     apply_assessment,
     assess,
     check_demotion,
@@ -374,3 +375,240 @@ class PromotionGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WalkForwardGateTests(unittest.TestCase):
+    """The pre-registered test is the one the gate answers to.
+
+    Search divides its significance bar by every genome tried; the fixed rule
+    was declared before the numbers were seen, so it pays no such penalty — but
+    it must still clear the same drawdown, fold and sample requirements, and the
+    book actually traded has to fit inside the measured drawdown ceiling.
+    """
+
+    def _report(self, **overrides) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        production = {
+            "per_order_pct": 0.01,
+            "trades": 495,
+            "expectancy_bps": 855.5,
+            "max_drawdown_pct": 13.96,
+            "bootstrap_p_value": 0.0005,
+            "profit_factor": 3.69,
+            "win_rate": 0.5,
+            "eligible": True,
+            "folds": [
+                {"index": 0, "expectancy_bps": 38769},
+                {"index": 1, "expectancy_bps": 4203},
+                {"index": 2, "expectancy_bps": 6590},
+                {"index": 3, "expectancy_bps": -186},
+                {"index": 4, "expectancy_bps": 154},
+                {"index": 5, "expectancy_bps": 46},
+            ],
+        }
+        production.update(overrides.pop("production", {}))
+        report = {
+            "generated_at": now,
+            "drawdown_ceiling_pct": 15.0,
+            "series": {"symbols": ["SPY", "BTC-USD"], "bars": 1000},
+            "configs": {"production": production, "inverse_vol": {}},
+            "gate_size": {
+                "per_order_pct": 0.01,
+                "max_drawdown_pct": 13.96,
+                "eligible": True,
+            },
+        }
+        report.update(overrides)
+        return report
+
+    def test_a_passing_report_is_eligible_without_a_search_penalty(self) -> None:
+        assessment = assess_walkforward(
+            self._report(), PromotionPolicy(), live_per_order_pct=0.01
+        )
+        self.assertTrue(assessment.eligible, assessment.reasons)
+        self.assertEqual(assessment.evidence["source"], "walkforward")
+        self.assertEqual(assessment.evidence["tested_hypotheses"], 1)
+        self.assertEqual(
+            assessment.evidence["effective_alpha"],
+            PromotionPolicy().max_bootstrap_p_value,
+        )
+        self.assertGreater(assessment.confidence, 0.5)
+
+    def test_trading_more_than_the_evidence_supports_blocks_promotion(self) -> None:
+        assessment = assess_walkforward(
+            self._report(), PromotionPolicy(), live_per_order_pct=0.05
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(
+            any("only supports" in reason for reason in assessment.reasons),
+            assessment.reasons,
+        )
+
+    def test_a_stale_report_cannot_promote(self) -> None:
+        old = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        assessment = assess_walkforward(
+            self._report(generated_at=old), PromotionPolicy(), live_per_order_pct=0.01
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("days old" in r for r in assessment.reasons))
+
+    def test_drawdown_over_the_ceiling_blocks_promotion(self) -> None:
+        assessment = assess_walkforward(
+            self._report(production={"max_drawdown_pct": 30.5}),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("drawdown" in r for r in assessment.reasons))
+
+    def test_a_losing_fold_majority_blocks_promotion(self) -> None:
+        assessment = assess_walkforward(
+            self._report(
+                production={
+                    "folds": [
+                        {"index": 0, "expectancy_bps": -10},
+                        {"index": 1, "expectancy_bps": -20},
+                        {"index": 2, "expectancy_bps": 30},
+                    ]
+                }
+            ),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("folds profitable" in r for r in assessment.reasons))
+
+    def test_no_size_fits_the_ceiling_blocks_promotion(self) -> None:
+        assessment = assess_walkforward(
+            self._report(gate_size={"per_order_pct": None, "eligible": False}),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("no size holds" in r for r in assessment.reasons))
+
+    def test_an_unreadable_timestamp_is_not_treated_as_fresh(self) -> None:
+        assessment = assess_walkforward(
+            self._report(generated_at="not-a-date"),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("timestamp" in r for r in assessment.reasons))
+
+
+class PrimaryEvidenceTests(unittest.TestCase):
+    """Which experiment the daemon's promotion cycle answers to."""
+
+    def _config(self, tmp: Path):
+        from agentic_trading.config import load_config
+
+        (tmp / "state").mkdir(parents=True, exist_ok=True)
+        (tmp / "journal").mkdir(parents=True, exist_ok=True)
+        (tmp / "bars").mkdir(parents=True, exist_ok=True)
+        cfg = tmp / "agentic.toml"
+        cfg.write_text(
+            "\n".join(
+                [
+                    'mode = "shadow"',
+                    'symbol_whitelist = ["SPY"]',
+                    'max_order_pct = "0.05"',
+                    'daily_notional_pct = "0.20"',
+                    'daily_loss_pct = "0.03"',
+                    "max_open_positions = 1",
+                    "equity_refresh_ticks = 30",
+                    "equity_refresh_seconds = 60",
+                    'timezone = "local"',
+                    f'history_path = "{tmp / "bars"}"',
+                    f'quotes_path = "{tmp / "q.jsonl"}"',
+                    f'journal_dir = "{tmp / "journal"}"',
+                    f'state_dir = "{tmp / "state"}"',
+                    f'tools_snapshot_path = "{tmp / "tools.json"}"',
+                    f'token_path = "{tmp / "tok.json"}"',
+                    'mcp_url = "https://agent.robinhood.com/mcp/trading"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return load_config(cfg)
+
+    def test_falls_back_to_the_search_when_no_report_exists(self) -> None:
+        from agentic_trading.selfimprove import _primary_assessment
+
+        with tempfile.TemporaryDirectory() as name:
+            config = self._config(Path(name))
+            search = Assessment(eligible=False, score=1.0, reasons=["search"])
+            chosen = _primary_assessment(config, PromotionPolicy(), search)
+        self.assertIs(chosen, search)
+
+    def test_uses_the_walk_forward_report_when_there_is_one(self) -> None:
+        import json as _json
+
+        from agentic_trading.selfimprove import _primary_assessment
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            report = WalkForwardGateTests()._report()
+            (tmp / "state" / "strategy_evidence.json").write_text(
+                _json.dumps(report)
+            )
+            # The ladder has to be inside the measured ceiling, or the gate
+            # refuses on size regardless of how good the rule looks.
+            from agentic_trading.limits import Limits, save_limits
+
+            save_limits(
+                tmp / "state",
+                Limits(
+                    max_order_pct="0.01",
+                    daily_notional_pct="0.04",
+                    reason="test",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            search = Assessment(eligible=False, score=1.0, reasons=["search"])
+            chosen = _primary_assessment(config, PromotionPolicy(), search)
+        self.assertIsNot(chosen, search)
+        self.assertEqual(chosen.evidence["source"], "walkforward")
+        self.assertTrue(chosen.eligible, chosen.reasons)
+
+
+class EvidenceKeyTests(unittest.TestCase):
+    """Re-running the report must not look like new evidence."""
+
+    def test_key_changes_with_the_numbers_and_not_with_the_clock(self) -> None:
+        from agentic_trading.promotion import assess_walkforward
+
+        base = WalkForwardGateTests()._report()
+        first = assess_walkforward(base, PromotionPolicy(), live_per_order_pct=0.01)
+        # Same numbers, later timestamp: same evidence.
+        relabelled = dict(base)
+        relabelled["generated_at"] = datetime.now(timezone.utc).isoformat()
+        second = assess_walkforward(
+            relabelled, PromotionPolicy(), live_per_order_pct=0.01
+        )
+        self.assertEqual(
+            first.evidence["report_key"], second.evidence["report_key"]
+        )
+
+        # A different measurement is different evidence.
+        changed = WalkForwardGateTests()._report(production={"trades": 496})
+        third = assess_walkforward(
+            changed, PromotionPolicy(), live_per_order_pct=0.01
+        )
+        self.assertNotEqual(
+            first.evidence["report_key"], third.evidence["report_key"]
+        )
+
+    def test_a_lowered_ceiling_makes_the_size_claim_new_evidence(self) -> None:
+        from agentic_trading.promotion import assess_walkforward
+
+        generous = WalkForwardGateTests()._report()
+        tight = WalkForwardGateTests()._report(
+            gate_size={"per_order_pct": 0.005, "max_drawdown_pct": 9.0}
+        )
+        a = assess_walkforward(generous, PromotionPolicy(), live_per_order_pct=0.01)
+        b = assess_walkforward(tight, PromotionPolicy(), live_per_order_pct=0.01)
+        self.assertNotEqual(a.evidence["report_key"], b.evidence["report_key"])
+        self.assertFalse(b.eligible, "0.5% of headroom cannot carry a 1% book")

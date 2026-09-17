@@ -1535,6 +1535,72 @@ def save_evaluation_state(config: Any, payload: dict[str, Any]) -> None:
         return
 
 
+def _regrade_from_evidence(
+    config: Config, loop: _Loop, journal: DecisionJournal
+) -> None:
+    """Grade promotion from the walk-forward report without running the search.
+
+    The search is skipped while the bars are unchanged, but the evidence report
+    is not: a new walk-forward run, a lowered ceiling, or a freshly measured
+    cost model can all change the verdict with no new bars at all. Promotion
+    has to answer to the newest evidence it has, so this re-grades from the
+    report and only reports when the report itself changed.
+    """
+    from agentic_trading import selfimprove
+    from agentic_trading.evidence import read_report
+    from agentic_trading.limits import load_limits
+    from agentic_trading.promotion import (
+        apply_assessment,
+        assess_walkforward,
+        load_state,
+        policy_from_config,
+        save_state,
+    )
+
+    try:
+        report = read_report(config)
+    except Exception as exc:  # noqa: BLE001 — never kill the loop
+        journal.append({"event": "evidence_regrade_failed", "error": str(exc)[:200]})
+        return
+    if not report:
+        return
+    policy = policy_from_config(config)
+    state = load_state(config.state_dir)
+    previous = (state.last_assessment or {}).get("evidence") or {}
+    stored = load_limits(config.state_dir)
+    live = (
+        float(stored.max_order_pct)
+        if stored is not None
+        else float(config.max_order_pct)
+    )
+    assessment = assess_walkforward(report, policy, live_per_order_pct=live)
+    # Grade the *evidence*, not the file. Re-running walkforward on the same
+    # bars produces a new timestamp and the same numbers; letting that advance
+    # the promotion streak would promote on re-typing, not on new information.
+    if previous.get("report_key") == assessment.evidence.get("report_key"):
+        return
+    events = apply_assessment(
+        state, assessment, policy, equity=loop.guard.current_equity
+    )
+    save_state(config.state_dir, state)
+    events.extend(selfimprove.update_limits(config, assessment=assessment))
+    journal.append(
+        {
+            "event": "evaluation",
+            "source": "walkforward_regrade",
+            "eligible": assessment.eligible,
+            "score": round(assessment.score, 4),
+            "reasons": assessment.reasons,
+            "evidence": assessment.evidence,
+            "stage": state.stage,
+            "streak": state.streak,
+        }
+    )
+    for event in events:
+        journal.append(event)
+    loop.apply_stage_caps()
+
+
 def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -> None:
     """Demote, evolve, assess, and (when permitted) promote — never silently."""
     if config.autonomy == "manual":
@@ -1710,6 +1776,11 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                         "symbols": planned,
                     }
                 )
+                # Skipping the search is not the same as skipping the verdict.
+                # The walk-forward report is cheap to grade and can change
+                # without any new bars (a new run, a lowered ceiling, a fresh
+                # size), so re-grade promotion from it and let the streak move.
+                _regrade_from_evidence(config, loop, journal)
                 return
             loop.history_fingerprint = current
             save_evaluation_state(config, {"history_fingerprint": current})

@@ -222,7 +222,13 @@ def propose_from_assessment(
         # it below the target the current confidence justifies.
         next_order = max(target_order, base_order * DE_RISK_FACTOR)
         next_daily = max(target_daily, base_daily * DE_RISK_FACTOR)
-        reason = "confidence_down"
+        # The budget can be above its target without the evidence getting
+        # worse — it sat at a ceiling that confidence does not fully justify
+        # yet. Saying "confidence_down" there would be a lie on the console.
+        if Decimal(str(round(confidence, 4))) >= Decimal(str(previous_confidence)):
+            reason = "budget_above_target"
+        else:
+            reason = "confidence_down"
     elif target_order > base_order or target_daily > base_daily:
         # Grow slowly, and only while the evidence is not deteriorating: at most
         # one GROW_FACTOR step per assessment, and never past the target the
