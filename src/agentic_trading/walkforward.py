@@ -147,7 +147,8 @@ def simulate(
     step_days: int = 1,
     max_gross: float = 1.0,
     per_order_pct: float = 0.03,
-) -> list[dict[str, Any]]:
+    governor: float = 0.0,
+) -> tuple[list[dict[str, Any]], list[float]]:
     """Trade the fixed rule forward through one window; return round-trip trades."""
     costs = costs or CostModel()
     per_side = float(costs.per_side_bps) / 10_000
@@ -159,13 +160,17 @@ def simulate(
     dates = sorted({day for table in closes.values() for day in table})
     dates = [day for day in dates if start.date() <= day <= end.date()]
     if len(dates) < 3:
-        return []
+        return [], []
 
     equity = starting_cash
     held: dict[str, float] = {}
     entry: dict[str, tuple[float, float]] = {}  # symbol -> (price, notional)
     trades: list[dict[str, Any]] = []
+    # Portfolio equity after every realised event: drawdown must be measured on
+    # what the account did, not on what a single position did.
+    curve: list[float] = [equity]
 
+    peak = equity
     for offset in range(0, len(dates), step_days):
         day = dates[offset]
         when = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
@@ -187,6 +192,7 @@ def simulate(
             entry_price, notional = entry.pop(symbol)
             proceeds = units * price * (1 - per_side)
             equity += proceeds
+            curve.append(equity)
             trades.append(
                 {
                     "symbol": symbol,
@@ -197,6 +203,14 @@ def simulate(
                     "return_bps": (proceeds - notional) / notional * 10_000,
                 }
             )
+
+        peak = max(peak, equity)
+        in_drawdown = (peak - equity) / peak if peak > 0 else 0.0
+        # Drawdown governor: past the threshold the book stops opening new risk
+        # and waits for the account to recover. Existing positions keep their
+        # mechanical exits — this is a brake, not a second strategy.
+        if governor and in_drawdown >= governor:
+            continue
 
         # Enter the new targets, sized against current equity. Cash leaves the
         # account here — an entry that does not debit is how a simulator
@@ -233,6 +247,7 @@ def simulate(
         entry_price, notional = entry.pop(symbol)
         proceeds = units * price * (1 - per_side)
         equity += proceeds
+        curve.append(equity)
         trades.append(
             {
                 "symbol": symbol,
@@ -243,7 +258,18 @@ def simulate(
                 "return_bps": (proceeds - notional) / notional * 10_000,
             }
         )
-    return trades
+    return trades, curve
+
+
+def _curve_drawdown(curve: list[float]) -> float:
+    """Worst peak-to-trough fall of the *account*, in percent."""
+    peak = curve[0] if curve else 0.0
+    worst = 0.0
+    for value in curve:
+        peak = max(peak, value)
+        if peak > 0:
+            worst = max(worst, (peak - value) / peak * 100)
+    return worst
 
 
 def _max_drawdown(returns_bps: list[float]) -> float:
@@ -280,6 +306,7 @@ def walk_forward(
     starting_cash: float = 50.0,
     max_positions: int = 5,
     per_order_pct: float = 0.03,
+    governor: float = 0.0,
 ) -> WalkForwardResult:
     """Cut the pooled timeline into consecutive windows and trade each one."""
     dates = sorted({bar.start for bars in series.values() for bar in bars})
@@ -288,6 +315,7 @@ def walk_forward(
     span = len(dates) // folds
     result = WalkForwardResult()
     returns: list[float] = []
+    equity_curve: list[float] = [starting_cash]
     equity = starting_cash
     for index in range(folds):
         lo = index * span
@@ -295,7 +323,7 @@ def walk_forward(
         if hi - lo < 30:
             continue
         window = dates[lo:hi]
-        trades = simulate(
+        trades, fold_curve = simulate(
             series,
             start=window[0],
             end=window[-1],
@@ -303,7 +331,9 @@ def walk_forward(
             starting_cash=equity,
             max_positions=max_positions,
             per_order_pct=per_order_pct,
+            governor=governor,
         )
+        equity_curve.extend(fold_curve[1:])
         window_returns = [trade["return_bps"] for trade in trades]
         returns.extend(window_returns)
         pnl = sum(trade["pnl"] for trade in trades)
@@ -333,7 +363,7 @@ def walk_forward(
         result.profit_factor = (
             gross_win / gross_loss if gross_loss else float("inf")
         )
-        result.max_drawdown_pct = _max_drawdown(returns)
+        result.max_drawdown_pct = _curve_drawdown(equity_curve)
         result.bootstrap_p_value = bootstrap_p(returns)
     result.final_equity = equity
     result.alpha = 0.05
