@@ -56,6 +56,41 @@ small_account_max_order_pct = "0"
 # the strategy's inverse-volatility weight (1.0 = a 20%-vol asset), which on this
 # universe earns the same bps per trade with roughly a third of the drawdown.
 sizing = "flat"
+# --- Symbol scout: let the agent add and drop symbols from data --------------
+# Off by default: the whitelist you wrote is the set of instruments this account
+# is authorised to trade until you say otherwise. With it on, the scout reads
+# Robinhood's own discovery lists (trending stocks, daily movers, most popular,
+# tradable crypto, altcoins) plus `discovery_lists`/`discovery_candidates` below,
+# grades every name with the same rule the book trades, and adopts its own picks.
+# It can never remove a symbol you configured, and never drops one the book still
+# holds. Try it first with: agentic-trading discover --config ... --dry-run
+discovery_enabled = false
+# How often the daemon re-scans. Bars change daily at most.
+discovery_interval_hours = 6.0
+# Ceiling on scout-added symbols, on top of your whitelist. 0 disables the scout
+# even when discovery_enabled is true.
+discovery_max_symbols = 6
+# Curated/personal list names to read; empty means the built-in default set.
+# discovery_lists = ["Trending stocks", "Daily movers", "Tradable crypto"]
+# Extra symbols to grade that may not be on any list (stocks have no public
+# "trading now" feed from the broker's read tools, so name them here).
+# discovery_candidates = ["COIN", "MSTR", "IBIT"]
+# Filters. A candidate must have this much daily history, trade this many dollars
+# a day, cost no more than this spread to cross, and not move more than this in
+# step with something already held.
+discovery_min_bars = 260
+discovery_min_dollar_volume = "5000000"
+discovery_max_spread_bps = "25"
+discovery_max_correlation = "0.85"
+# Poll at most this many candidates per pass (keeps the scout's network work
+# bounded); oldest-unseen first.
+discovery_max_candidates = 40
+# Add on a strong trend vote, drop on a weak one, and never re-decide an adopted
+# symbol before this many hours have passed — the gap between the two is what
+# stops a symbol being added and dropped on the same wobble.
+discovery_enter_vote = "0.75"
+discovery_exit_vote = "0.25"
+discovery_min_hold_hours = 48.0
 equity_refresh_ticks = 30
 equity_refresh_seconds = 60
 timezone = "local"

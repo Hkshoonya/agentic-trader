@@ -17,10 +17,11 @@ import os
 import signal
 import threading
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Iterable, Optional, Protocol
 
 from agentic_trading.broker import Broker, BrokerPayloadError
 from agentic_trading.config import Config
@@ -52,6 +53,13 @@ class Strategy(Protocol):
 _MODE_FILE = "mode"
 _HEARTBEAT_SECONDS = 900.0
 
+# What ``process_intent`` returns when it decided *nothing* for a technical
+# reason: the account value was not known yet, the runtime's own position book
+# could not be read, the operator had not armed the session, or the broker's
+# review call failed. On a strategy that rebalances once a day, treating those
+# as "the day is spent" is how a whole day's signal disappears with no trade.
+RETRY = "retry"
+
 
 def effective_mode(config: Config) -> str:
     """Config mode, overridden by ``state_dir/mode`` when present."""
@@ -74,7 +82,10 @@ def write_mode(state_dir: Path | str, mode: str) -> None:
 def build_guard(config: Config, mode: str) -> RiskGuard:
     return RiskGuard(
         mode=mode,
-        whitelist=config.symbol_whitelist,
+        # The scout's adopted symbols are tradeable exactly like the operator's:
+        # one universe, or the guard would refuse the very symbols the strategy
+        # was allowed to pick.
+        whitelist=config.effective_whitelist,
         max_order_pct=config.max_order_pct,
         daily_notional_pct=config.daily_notional_pct,
         daily_loss_pct=config.daily_loss_pct,
@@ -271,10 +282,17 @@ class _Loop:
         stop_event: Optional[threading.Event] = None,
         *,
         force_shadow: bool = False,
+        strategy_factory: Optional[Callable[[Config], Any]] = None,
     ) -> None:
         self.config = config
         self.broker = broker
         self.strategy = strategy or FixtureStrategy()
+        # Used to rebuild the strategy when the scout changes the universe: a
+        # strategy that was constructed for one symbol list cannot price another,
+        # and re-seeding its book is not enough.
+        self.strategy_factory = strategy_factory
+        # Set by a worker, read by the daemon loop, which owns the quote feed.
+        self.universe_dirty = False
         self.stop_event = stop_event
         self.force_shadow = force_shadow
         self.mode = "shadow" if force_shadow else effective_mode(config)
@@ -297,10 +315,24 @@ class _Loop:
         self.orders_today = self._count_orders_today()
         self.consecutive_errors = 0
         self.open_order_symbols: set[str] = set()
+        # Which side is working on each symbol. An entry must not stack on top
+        # of a pending order of any kind, but an exit must be allowed to run
+        # while an entry is still filling — and must not be repeated while its
+        # own sell is still working.
+        self.open_order_sides: dict[str, set[str]] = {}
+        self._exit_pending_noted: set[str] = set()
         self._open_orders_read_at = 0.0
         self._stopping = False
         self.stage = "shadow"
         self.session_policy = config.session_policy
+        # A rebalance that decided nothing may be tried again, on a leash:
+        # without the wait, every quote for the next hour would re-run it.
+        self._rebalance_retry_at = 0.0
+        self._rebalance_retries = 0
+        self._rebalance_retry_day = ""
+        # What the runtime last told the strategy it holds, so a reconcile only
+        # speaks when the book actually changed.
+        self._strategy_book: dict[str, str] = {}
         self.evidence_confidence: float = 0.0
         self.last_evolution_at = 0.0
         # What each agent in the fleet last did; published by write_agent_state().
@@ -837,6 +869,140 @@ class _Loop:
                 }
             )
 
+    def adopt_universe(self, symbols: Iterable[str]) -> bool:
+        """Take on a universe the scout has changed — without a restart.
+
+        Everything downstream reads ``config.effective_whitelist``, so the guard,
+        the evidence gate, the self-check and the history refresh all follow the
+        new list on their next pass. The two things built *from* the old list are
+        the strategy (constructed for a symbol list) and the quote feed, so the
+        strategy is rebuilt and re-seeded here and the daemon loop rebuilds the
+        feed when it sees ``universe_dirty``.
+
+        A strategy that cannot be rebuilt for the new universe is worse than one
+        that is a pass behind, so a failure rolls the change back and says so.
+        """
+        adopted = frozenset(str(s).upper() for s in symbols) - self.config.symbol_whitelist
+        if adopted == self.config.discovered_symbols:
+            return False
+        previous = self.config.discovered_symbols
+        self.config = replace(self.config, discovered_symbols=adopted)
+        self.guard.whitelist = self.config.effective_whitelist
+        if callable(self.strategy_factory):
+            try:
+                self.strategy = self.strategy_factory(self.config)
+            except Exception as exc:  # noqa: BLE001 — keep the working universe
+                self.config = replace(self.config, discovered_symbols=previous)
+                self.guard.whitelist = self.config.effective_whitelist
+                self.journal.append(
+                    {
+                        "event": "universe_apply_failed",
+                        "error": str(exc)[:200],
+                        "kept": sorted(previous),
+                    }
+                )
+                return False
+            self.seed_strategy_positions()
+        self.universe_dirty = True
+        self.journal.append(
+            {
+                "event": "universe_changed",
+                "adopted": sorted(adopted),
+                "added": sorted(adopted - previous),
+                "removed": sorted(previous - adopted),
+                "tradeable": sorted(self.config.effective_whitelist),
+                "note": (
+                    "the scout changed which symbols the book may hold; the "
+                    "guard, the strategy and the quote feed now use the new list"
+                ),
+            }
+        )
+        return True
+
+    def reconcile_strategy_positions(self) -> bool:
+        """Keep the strategy's position book equal to the broker's, not to startup.
+
+        ``seed_strategy_positions`` ran once, at start-up. In shadow mode that is
+        enough, because the runtime applies every simulated fill and calls
+        ``note_fill``. In live mode it is not: a placed order never reached the
+        strategy, so the strategy kept believing it held nothing. Two things
+        followed from that, and both are the opposite of the design:
+
+        - ``entering = targets - held`` re-emitted a buy for a symbol the book
+          already owned, every single day, until the position-count limit
+          stopped it — stacking one order per symbol per day;
+        - ``exiting = held - targets`` could not fire for a live position at all,
+          so an exit only ever happened if the daemon was restarted (which is
+          exactly when the re-seed ran).
+
+        The runtime owns the truth, so it hands it over whenever the truth
+        changes. A failed read changes nothing: wiping the book on a broker
+        hiccup would lose the exits it exists to produce.
+        """
+        if self.mode != "live":
+            return False
+        seed = getattr(self.strategy, "seed_positions", None)
+        if not callable(seed):
+            return False
+        try:
+            snapshot = self.live_positions()
+        except Exception as exc:  # noqa: BLE001 — a read failure must not wipe it
+            self.journal.append(
+                {"event": "strategy_reconcile_failed", "error": str(exc)[:200]}
+            )
+            return False
+        if snapshot.positions_read_failed:
+            self.journal.append(
+                {
+                    "event": "strategy_reconcile_failed",
+                    "error": "the broker did not return a usable position book",
+                }
+            )
+            return False
+        held = {symbol: quantity for symbol, quantity in snapshot.held.items() if quantity > 0}
+        current = {symbol: str(quantity) for symbol, quantity in held.items()}
+        if current == self._strategy_book:
+            return False
+        try:
+            count = seed(current)
+        except Exception as exc:  # noqa: BLE001
+            self.journal.append(
+                {"event": "strategy_reconcile_failed", "error": str(exc)[:200]}
+            )
+            return False
+        added = sorted(set(current) - set(self._strategy_book))
+        gone = sorted(set(self._strategy_book) - set(current))
+        self._strategy_book = current
+        self.journal.append(
+            {
+                "event": "strategy_reconciled",
+                "positions": count,
+                "held": sorted(current),
+                "opened": added,
+                "closed": gone,
+                "note": (
+                    "the strategy's book now matches the account, so it can "
+                    "size the next entry and exit what it holds"
+                ),
+            }
+        )
+        return True
+
+    def held_symbols(self) -> set[str]:
+        """What the book holds now — the scout's input for its duplicate test.
+
+        Never raises: a scout that cannot read the book grades against an empty
+        one and finds fewer duplicates, which is the harmless direction.
+        """
+        try:
+            if self.mode == "shadow":
+                held = dict(self.shadow_book.as_snapshot().held)
+            else:
+                held = dict(self.live_positions().held)
+        except Exception:  # noqa: BLE001
+            return set()
+        return {symbol.upper() for symbol, quantity in held.items() if quantity > 0}
+
     def held_from_journal(self, *, days: int = 10) -> dict[str, Decimal]:
         """Net position per symbol from recent *accepted* decisions.
 
@@ -902,7 +1068,10 @@ class _Loop:
 
     @property
     def trades_crypto(self) -> bool:
-        return any(is_crypto_symbol(s) for s in self.config.symbol_whitelist)
+        # The effective universe, not just the operator's list: a pair the scout
+        # adopted is a pair whose position book has to be read, whose exits have
+        # to be routed through the crypto tools, and whose session never closes.
+        return any(is_crypto_symbol(s) for s in self.config.effective_whitelist)
 
     def live_positions(self) -> PortfolioSnapshot:
         """Real holdings across both books, as the guard must see them.
@@ -987,6 +1156,7 @@ class _Loop:
             return
 
         symbols: set[str] = set()
+        sides: dict[str, set[str]] = {}
         summary: list[dict[str, Any]] = []
         for order in orders:
             symbol = str(
@@ -994,6 +1164,9 @@ class _Loop:
             ).upper()
             if symbol:
                 symbols.add(symbol)
+                side = str(order.get("side") or "").strip().lower()
+                if side:
+                    sides.setdefault(symbol, set()).add(side)
             summary.append(
                 {
                     "order_id": order.get("id") or order.get("order_id"),
@@ -1004,6 +1177,11 @@ class _Loop:
                 }
             )
         self.open_order_symbols = symbols
+        self.open_order_sides = sides
+        # A symbol that is no longer working can be noted again if it comes back.
+        self._exit_pending_noted &= {
+            symbol for symbol, working in sides.items() if "sell" in working
+        }
         self._open_orders_read_at = time.monotonic()
         if summary:
             self.journal.append(
@@ -1015,11 +1193,74 @@ class _Loop:
     def handle_quote(self, quote: dict, *, session: str = "regular") -> None:
         if self.should_stop():
             return
-        intents = self.strategy.on_quote(quote)
+        # A retry is pending but not yet due. The strategy holds no "decided
+        # today" marker at this point, so the rebalance runs again the moment
+        # this window closes rather than being lost for the day.
+        if time.monotonic() < self._rebalance_retry_at:
+            return
+        # A strategy cannot see the market's clock through a quote, and it must
+        # not have to: the runtime knows the session, so it says so. The trend
+        # strategy decides its equity book only while that book can be ordered.
+        intents = self.strategy.on_quote({**quote, "market_session": session})
+        outcomes: list[Optional[str]] = []
         for intent in intents:
             if self.should_stop():
                 return
-            self.process_intent(intent, session=session)
+            outcomes.append(self.process_intent(intent, session=session))
+        self.maybe_retry_rebalance(outcomes)
+
+    def maybe_retry_rebalance(self, outcomes: list[Optional[str]]) -> bool:
+        """Give a day's rebalance another attempt when nothing could be decided.
+
+        A once-a-day strategy has exactly one shot. On 2026-09-18 the shot was
+        taken at 00:00 UTC while the per-order cap was still below the broker's
+        minimum, so all five entries were refused and the day traded nothing —
+        a technical refusal that silently became a trading decision.
+
+        Only an *all-technical* outcome is retried, and the retry is released to
+        the strategy (so its day marker is cleared) rather than forced: the
+        strategy re-decides from the tape, it is not told what to send.
+        """
+        if not outcomes or any(outcome != RETRY for outcome in outcomes):
+            return False
+        day = str(getattr(self.strategy, "last_decided_day", "") or "")
+        release = getattr(self.strategy, "release_decision", None)
+        if not day or not callable(release):
+            return False
+        if self._rebalance_retry_day != day:
+            self._rebalance_retry_day = day
+            self._rebalance_retries = 0
+        limit = int(self.config.rebalance_max_retries)
+        if self._rebalance_retries >= limit:
+            self.journal.append(
+                {
+                    "event": "rebalance_abandoned",
+                    "day": day,
+                    "attempts": self._rebalance_retries,
+                    "hint": "the next rebalance is the next trading day",
+                }
+            )
+            return False
+        if not release(day):
+            return False
+        self._rebalance_retries += 1
+        wait = float(self.config.rebalance_retry_seconds)
+        self._rebalance_retry_at = time.monotonic() + wait
+        self.journal.append(
+            {
+                "event": "rebalance_retry",
+                "day": day,
+                "attempt": self._rebalance_retries,
+                "of": limit,
+                "retry_in_seconds": round(wait, 1),
+                "reason": (
+                    "the day's orders were refused for a technical reason, so "
+                    "the decision was returned to the strategy instead of "
+                    "being spent"
+                ),
+            }
+        )
+        return True
 
     def process_intent(self, intent: OrderIntent, *, session: str = "regular") -> None:
         if self.journal.has_decision(intent.decision_id):
@@ -1041,6 +1282,24 @@ class _Loop:
                 proportional=self.config.sizing == "proportional",
             )
             if sized is None:
+                if self.guard.current_equity <= 0:
+                    # The account value has not been read yet, so "this order is
+                    # too small" is not a fact about the trade — it is a fact
+                    # about the clock. Defer it instead of spending the day.
+                    self.journal.append(
+                        {
+                            "decision_id": intent.decision_id,
+                            "event": "decision_deferred",
+                            "reason": "equity_pending",
+                            "symbol": intent.symbol,
+                            "side": side.value,
+                            "hint": (
+                                "waiting for the first account-value read before "
+                                "sizing this order"
+                            ),
+                        }
+                    )
+                    return RETRY
                 self._journal_rejected(intent, "below_min_notional", Decimal("0"))
                 return
             if sized.quantity != intent.quantity:
@@ -1060,8 +1319,57 @@ class _Loop:
         if is_entry and self.orders_today >= self.config.max_orders_per_day:
             self._journal_rejected(intent, "max_orders_per_day", Decimal("0"))
             return
+        if (
+            is_entry
+            and not is_crypto_symbol(intent.symbol)
+            and session != "regular"
+            and intent.quantity is not None
+            and intent.quantity != intent.quantity.to_integral_value()
+        ):
+            # Backstop for the strategy's own session gate. A *fractional* equity
+            # order cannot be placed outside regular hours, and opening a
+            # position that cannot be exited is the one thing this system does
+            # not do. A whole-share order is fine out of hours — it goes in as a
+            # marketable limit — so this defers only the case it has to.
+            self.journal.append(
+                {
+                    "decision_id": intent.decision_id,
+                    "event": "decision_deferred",
+                    "reason": "session_closed_for_equities",
+                    "symbol": intent.symbol,
+                    "session": session,
+                    "hint": (
+                        "equities are decided while the regular session is open, "
+                        "where a fractional order can also be exited"
+                    ),
+                }
+            )
+            return RETRY
         if is_entry and intent.symbol.upper() in self.open_order_symbols:
             self._journal_rejected(intent, "open_order_pending", Decimal("0"))
+            return
+
+        # An exit is re-emitted every cycle by design, so the runtime is what
+        # stops "every cycle" from becoming "an order every cycle". While the
+        # first sell is still working there is nothing to add, and the guard's
+        # fresh position read is the second line of defence if this one misses.
+        if not is_entry and "sell" in self.open_order_sides.get(
+            intent.symbol.upper(), set()
+        ):
+            symbol = intent.symbol.upper()
+            if symbol not in self._exit_pending_noted:
+                self._exit_pending_noted.add(symbol)
+                self.journal.append(
+                    {
+                        "decision_id": intent.decision_id,
+                        "event": "exit_skipped",
+                        "symbol": symbol,
+                        "note": (
+                            "a sell for this position is already working; the "
+                            "exit stays pending until it fills or is cancelled"
+                        ),
+                    }
+                )
             return
 
         # Jev's entry judgment, read from cache: is this entry chasing a move
@@ -1172,7 +1480,7 @@ class _Loop:
                     advisor=advisor_payload,
                 )
                 self.note_error("positions_read_error", exc)
-                return
+                return RETRY
 
         try:
             decision = self.guard.evaluate(intent, snapshot)
@@ -1185,6 +1493,10 @@ class _Loop:
             self._journal_rejected(
                 intent, decision.reason, decision.notional, advisor=advisor_payload
             )
+            if not is_entry and decision.reason == "would_short":
+                # We believed we held this and the broker says we do not: the
+                # book moved under us. Re-read it instead of arguing with it.
+                self.reconcile_strategy_positions()
             return
 
         try:
@@ -1206,7 +1518,10 @@ class _Loop:
                 decision.notional,
                 advisor=advisor_payload,
             )
-            return
+            # A fractional order outside regular hours is refused by design —
+            # the position could not be exited there. That is a "not yet", not
+            # a rejection: the session opens and the same decision is valid.
+            return RETRY if "regular_hours" in str(exc) else None
 
         # Review is a read-only simulation. It runs in both modes so the
         # operator sees the broker's pre-trade alerts before going live.
@@ -1222,7 +1537,7 @@ class _Loop:
                 }
             )
             self.note_error("review_failed", exc)
-            return
+            return RETRY
         self.journal.append(
             {
                 "decision_id": intent.decision_id,
@@ -1292,7 +1607,10 @@ class _Loop:
                     }
                 )
             self.guard.persist(self.config.state_dir)
-            return
+            # The evidence gate and the broker both said yes; only the operator's
+            # arming switch is closed. If they arm it later today, the decision
+            # should still be live rather than a day old.
+            return RETRY
 
         self._place(intent, request)
         self.guard.persist(self.config.state_dir)
@@ -1329,6 +1647,12 @@ class _Loop:
             return
 
         self.consecutive_errors = 0
+        # Remember in-process that this side is working: the broker's own
+        # open-order list is only re-read every `open_order_refresh_seconds`,
+        # and in that window an exit would otherwise be re-sent.
+        self.open_order_sides.setdefault(intent.symbol.upper(), set()).add(
+            "buy" if intent.side is Side.BUY else "sell"
+        )
         self.journal.append(
             {
                 "decision_id": intent.decision_id,
@@ -1337,6 +1661,10 @@ class _Loop:
                 "order": result,
             }
         )
+        # A fill is not instant, but reading the book straight after a placement
+        # closes most of the window in which the strategy does not yet know what
+        # it owns; the periodic reconcile closes the rest.
+        self.reconcile_strategy_positions()
 
     def apply_auto_arm(self) -> Optional[dict[str, Any]]:
         """Run the pre-flight checklist and act on the verdict.
@@ -1542,7 +1870,9 @@ class _Loop:
         """
         if self.entry_advisor is None:
             return 0
-        wanted = [s.upper() for s in (symbols or sorted(self.config.symbol_whitelist))]
+        wanted = [
+            s.upper() for s in (symbols or sorted(self.config.effective_whitelist))
+        ]
         return len(
             self.entry_advisor.refresh_due(wanted, lambda s: self.market_features(s))
         )
@@ -1557,7 +1887,7 @@ class _Loop:
         if self.regime_gate is None:
             return []
         refreshed = self.regime_gate.refresh_due(
-            [s.upper() for s in self.config.symbol_whitelist],
+            [s.upper() for s in self.config.effective_whitelist],
             lambda symbol: self.market_features(symbol),
             max_per_pass=max_per_pass,
         )
@@ -1728,6 +2058,7 @@ def run_daemon(
     duration_seconds: Optional[float] = None,
     once: bool = False,
     force_shadow: bool = False,
+    strategy_factory: Optional[Callable[[Config], Any]] = None,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     sleep: Callable[[float], None] = time.sleep,
     session_clock: Optional[Callable[[], str]] = None,
@@ -1747,11 +2078,18 @@ def run_daemon(
     print(
         f"[{datetime.now(timezone.utc).isoformat()}] starting: "
         f"mode={effective_mode(config)} strategy={config.strategy} "
-        f"symbols={len(config.symbol_whitelist)} pid={os.getpid()}",
+        f"symbols={len(config.effective_whitelist)} pid={os.getpid()}",
         flush=True,
     )
 
-    loop = _Loop(config, broker, strategy, stop_event, force_shadow=force_shadow)
+    loop = _Loop(
+        config,
+        broker,
+        strategy,
+        stop_event,
+        force_shadow=force_shadow,
+        strategy_factory=strategy_factory,
+    )
     if feed is None:
         feed = build_quote_feed(config, broker)
 
@@ -1792,7 +2130,7 @@ def run_daemon(
         cycle_seconds = 0.0
         fresh_total = 0
         decisions_base = loop.orders_today
-        from agentic_trading import account
+        from agentic_trading import account, discovery
 
         while not loop.should_stop():
             cycle_started = time.monotonic()
@@ -1814,7 +2152,14 @@ def run_daemon(
             )
             # The effective policy comes from the loop: the agent may widen it
             # within the operator's bound as its confidence grows.
-            if not session_allows(loop.session_policy, session):
+            equity_session_open = session_allows(loop.session_policy, session)
+            # Crypto does not close. A pair that can only be sold while the
+            # stock market is open is a position held hostage by the wrong
+            # calendar, so outside the equity window the loop keeps polling and
+            # acts on the pairs alone: stocks are untouched and their exits
+            # still wait for the session, while crypto keeps its exit.
+            crypto_session = (not equity_session_open) and loop.trades_crypto
+            if not equity_session_open and not crypto_session:
                 now = time.monotonic()
                 if (now - last_heartbeat) >= _HEARTBEAT_SECONDS:
                     journal.append(
@@ -1831,6 +2176,24 @@ def run_daemon(
                     break
                 sleep(config.poll_seconds)
                 continue
+            if crypto_session:
+                now = time.monotonic()
+                if (now - last_heartbeat) >= _HEARTBEAT_SECONDS:
+                    journal.append(
+                        {
+                            "event": "crypto_session",
+                            "session": session,
+                            "equity_policy": loop.session_policy,
+                            "note": (
+                                "the stock market is closed under this policy; "
+                                "crypto pairs are still watched and can still "
+                                "be sold"
+                            ),
+                            "symbols": sorted(loop.config.effective_whitelist),
+                            "mode": loop.mode,
+                        }
+                    )
+                    last_heartbeat = now
 
             # Self-evaluation is offline research and must never block the live
             # path. With 30 symbol files it runs for minutes, which previously
@@ -1862,6 +2225,10 @@ def run_daemon(
             now = time.monotonic()
             if (now - last_equity_at) >= config.equity_refresh_seconds:
                 loop.refresh_equity()
+                # The broker's book is the truth about what is held; the
+                # strategy's copy of it has to be told, or live exits never
+                # fire and live entries stack (see the method).
+                loop.reconcile_strategy_positions()
                 last_equity_at = now
 
             # Regime views expire; refresh a batch on a worker so the order path
@@ -1915,6 +2282,78 @@ def run_daemon(
                 loop.selfcheck_thread.start()
                 workers.append(loop.selfcheck_thread)
 
+            # The scout re-reads the market's own discovery lists and may change
+            # which symbols the book may hold. Its cadence comes from its state
+            # file, so a restart resumes the schedule rather than re-running the
+            # pass or silently skipping one.
+            discovery_worker = getattr(loop, "discovery_thread", None)
+            if (
+                not once
+                and config.discovery_enabled
+                and config.autonomy != "manual"
+                and not (discovery_worker and discovery_worker.is_alive())
+                and discovery.due_for_pass(loop.config)
+            ):
+
+                def _discover(_loop: _Loop = loop) -> None:
+                    from agentic_trading import discovery as scout
+
+                    try:
+                        report = scout.rebalance(
+                            _loop.config,
+                            _loop.broker,
+                            held=_loop.held_symbols(),
+                        )
+                    except Exception as exc:  # noqa: BLE001 — never kill the loop
+                        scout.note_failure(_loop.config, str(exc))
+                        _loop.note_agent("scout", ok=False, error=str(exc))
+                        _loop.journal.append(
+                            {"event": "discovery_failed", "error": str(exc)[:200]}
+                        )
+                        return
+                    _loop.note_agent(
+                        "scout",
+                        ok=True,
+                        detail={
+                            "adopted": len(report.get("adopted") or []),
+                            "added": report.get("added") or [],
+                            "dropped": report.get("dropped") or [],
+                            "considered": report.get("considered", 0),
+                        },
+                    )
+                    _loop.journal.append(
+                        {
+                            "event": "discovery",
+                            "adopted": report.get("adopted") or [],
+                            "added": report.get("added") or [],
+                            "dropped": report.get("dropped") or [],
+                            "held_back": report.get("held_back") or [],
+                            "considered": report.get("considered", 0),
+                            "notes": (report.get("notes") or [])[:3],
+                        }
+                    )
+                    # Adoption is applied by the loop's own thread: it owns the
+                    # quote feed, the strategy rebuild and the guard's whitelist.
+                    _loop.adopt_universe(report.get("adopted") or [])
+
+                loop.discovery_thread = threading.Thread(  # type: ignore[attr-defined]
+                    target=_discover, daemon=True, name="symbol-scout"
+                )
+                loop.discovery_thread.start()
+                workers.append(loop.discovery_thread)
+
+            if loop.universe_dirty:
+                # The feed was built from the old symbol list; the new symbols
+                # would never be quoted otherwise.
+                feed = build_quote_feed(loop.config, broker)
+                loop.universe_dirty = False
+                journal.append(
+                    {
+                        "event": "quote_feed_rebuilt",
+                        "symbols": len(loop.config.effective_whitelist),
+                    }
+                )
+
             regime_worker = getattr(loop, "regime_thread", None)
             if (
                 loop.regime_gate is not None
@@ -1963,6 +2402,14 @@ def run_daemon(
             except Exception as exc:  # noqa: BLE001 — feed errors must not crash
                 journal.append({"event": "quote_read_failed", "error": str(exc)})
                 quotes = []
+            if crypto_session:
+                # The equity market is closed: only the pairs are actionable,
+                # and reporting stock quotes as stale here would be noise.
+                quotes = [
+                    quote
+                    for quote in quotes
+                    if is_crypto_symbol(str(quote.get("symbol") or ""))
+                ]
 
             now_dt = clock()
             fresh: list[dict] = []
@@ -2435,7 +2882,10 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
 
                 state = compute_state(
                     config.history_path,
-                    config.symbol_whitelist,
+                    # Everything tradeable, not just the operator's core: a pair
+                    # the scout adopted with no correlation entry would fail the
+                    # guard's duplicate test as "unknown" and be refused.
+                    config.effective_whitelist,
                     lookback=config.correlation_lookback_days,
                     threshold=config.correlation_threshold,
                 )

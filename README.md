@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-677%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-719%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -20,7 +20,9 @@ history, decides with a fixed, pre-registered trend rule, sizes positions from
 its own measured evidence, and refuses to trade when the evidence, the regime or
 the risk budget says no. It runs 24/7 (crypto included), keeps a full journal of
 every decision, grades each one, and promotes or demotes itself as the evidence
-changes.
+changes. When you let it, it also keeps its own watch list: a scout grades what
+the market is paying attention to and adds or drops symbols from data, so a
+trend it was not configured for is not a trend it misses.
 
 ## What this is not
 
@@ -46,7 +48,9 @@ quotes ─► strategy ─► risk guard ─► gates ─► journal ─► cons
 1. **Strategy** — a fixed multi-horizon trend rule (50/100/200/252-bar votes),
    rebalanced once per UTC day, sized inversely to volatility.
 2. **Risk guard** — per-order and daily notional caps, symbol whitelist, daily
-   loss limit, correlation clusters, kill switch.
+   loss limit, correlation clusters, kill switch. The caps bound *opening*
+   exposure; a close is always allowed, because an exit that the entry budget
+   can veto is a position that cannot be sold.
 3. **Gates** — an LLM regime read (chop/panic blocks entries), an advisory veto,
    and the evidence gate: a walk-forward report that must be fresh, and a book
    that must fit inside the size its drawdown allows.
@@ -82,7 +86,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 677 tests
+.venv/bin/python -m pytest tests -q                     # 719 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -210,8 +214,9 @@ agent's success path — from telemetry alone, which is the standard it is held 
 
 ## The agents
 
-One process, five agents with different jobs, different cadences and different
-authority. Authority is ranked and enforced in one place
+One process, six agents with different jobs, different cadences and different
+authority (the scout only appears once `discovery_enabled = true`). Authority is
+ranked and enforced in one place
 (`src/agentic_trading/agents.py`): `read_only` < `may_reduce_risk` < `may_trade`,
 and only the execution agent holds `may_trade`.
 
@@ -219,6 +224,7 @@ and only the execution agent holds `may_trade`.
 |---|---|---|---|
 | **data** | bars, quotes, correlations, volume repair | read-only | daily |
 | **research** | walk-forward evidence, execution-cost measurement | read-only | weekly |
+| **scout** | which symbols the book may hold (broker discovery lists → graded picks) | read-only | 6 hours |
 | **strategy** | trend signals, advisor and regime gates | may reduce risk | hourly |
 | **execution** | risk guard, sizing, order placement | **may trade** | per cycle |
 | **backcheck** | the six independent health checks | read-only | 30 min |
@@ -233,6 +239,7 @@ $ agentic-trading agents --config config/agentic.toml
 agent       health   authority        last ok      role
 data        ok       read_only        92s ago      bars, quotes, correlations
 research    ok       read_only        92s ago      walk-forward evidence, execution costs
+scout       ok       read_only        4m ago       which symbols the book may hold
 strategy    ok       may_reduce_risk  51s ago      trend signals + advisory gates
 execution   ok       may_trade        51s ago      risk guard, sizing, order placement
 backcheck   ok       read_only        108s ago     independent health checks
@@ -245,6 +252,66 @@ gate can block an entry and nothing else; and **execution** is the only path to
 the broker, gated by the risk guard *and* the operator's arming switch. A stale or
 failing agent shows as `stale` or `failing` on the console rather than being
 inferred by a human reading logs.
+
+## The symbol scout: adding and dropping symbols from data
+
+A watch list written once is a bet that the names that were interesting the day
+you wrote it stay the interesting ones. They do not. With
+`discovery_enabled = true`, a sixth agent — the **scout** — re-reads the market
+on its own cadence and changes which symbols the book may consider.
+
+It reads what the broker already knows about attention: Robinhood's curated
+lists (trending stocks, daily movers, 100 most popular, upcoming earnings,
+tradable crypto, altcoins), your own watchlists, the full tradable crypto pair
+list, and whatever you name in `discovery_candidates`. Then it grades every
+candidate with the same tests the book itself trades under:
+
+| test | why it exists |
+|---|---|
+| **trend** — the same 50/100/200/252-bar vote the strategy uses | a symbol is admitted for the reason it would be held |
+| **history** — `discovery_min_bars` (default 260) | a rule with a 252-bar horizon cannot answer on a short file |
+| **liquidity** — `discovery_min_dollar_volume` (default $5M/day) | a trend in something nobody trades is a trend that cannot be exited |
+| **cost** — quoted spread inside `discovery_max_spread_bps` | a strategy that is right and pays more in spread than it earns is still wrong |
+| **tradability** — the broker's own answer for this account | on a small account a whole-share-only stock is not tradeable at all |
+| **independence** — correlation against what the book holds, under `discovery_max_correlation` | a sixth coin that moves with the first five is one bet wearing six tickers |
+
+The rules that make it safe to leave running:
+
+- **Your list is not its list.** `symbol_whitelist` is always watched and can
+  never be dropped by the scout. Only the scout's own picks are ever removed.
+- **A held symbol is never dropped.** Partly because a position should be
+  finished deliberately, and partly mechanically: dropping the symbol also
+  drops its bars and its quotes, and the strategy can only price an exit with
+  both. A demotion waits until the position is flat.
+- **Hysteresis.** A symbol is added on a strong vote (`discovery_enter_vote`,
+  default 0.75), dropped on a weak one (`discovery_exit_vote`, default 0.25),
+  and never re-decided before `discovery_min_hold_hours` (default 48). A symbol
+  cannot be added and dropped on the same wobble.
+- **Everything it does is journaled** with the numbers that caused it: the vote,
+  the dollar volume, the spread, the correlation, and a plain-language sentence
+  per candidate.
+- **It can only widen what may be considered.** The risk guard's per-order,
+  daily and position caps still bind exactly as before, and the evidence gate is
+  re-priced on the universe that actually trades — so adding a symbol adds
+  opportunity, never a bigger position.
+
+Run it once and read what it would do before letting the daemon do it:
+
+```console
+$ agentic-trading discover --config config/agentic.toml --dry-run
+tradeable now (19): AAPL, AMZN, BTC-USD, LRCX, ... WBD, XLM-USD
+scout's picks: LRCX, WBD, XLM-USD
+added: LRCX, WBD, XLM-USD
+
+graded 30 of 193 candidates:
+ * LRCX       trend is up on 75% of the timeframes, about $3909M trades a day...
+   DOGE-USD   moves 87% in step with XRP-USD, which is already in the book...
+   RIOT       the quoted spread costs 29 basis points to cross, above the 25...
+```
+
+The console shows the same thing live in the **Symbol scout** panel: every name
+it graded, the decision, and why — with *added to the watch list* or *left out*
+in words rather than codes.
 
 ## Models: what each one is allowed to do
 
@@ -415,7 +482,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   677 tests, including the honesty tests for the rig
+tests/                   719 tests, including the honesty tests for the rig
 ```
 
 ## Operations
@@ -663,6 +730,20 @@ writes `state_dir/probe.json`, which contains account data and is gitignored.
 - Stale or future-dated quotes are refused before a strategy or LLM sees them
 - An open order for a symbol blocks another entry in that symbol
 - Kill switch and daily counters survive restarts via `state_dir/risk_guard.json`
+
+### Getting out is not blocked by getting in
+
+The per-order and per-day caps bound how much exposure can be *opened*. They do
+not apply to a close, and a sell does not spend the day's notional budget. This
+is deliberate: a position was sized under the cap that was in force when it was
+opened, and that cap can be smaller by the time the exit fires (a promotion
+window ends, a small-account floor is released, the position simply grew). A
+book that refuses to sell for that reason is stranded, so the guard measures a
+sell against the position instead: something must be held, the quantity must
+not exceed it, and the sell must be verifiable — otherwise it is refused as
+`would_short`, `oversell` or `positions_read_failed`. A symbol you removed from
+the whitelist is still sellable while the position is open, and crypto keeps its
+exit around the clock even when `session_policy` has the equity market closed.
 
 ### Crypto (24/7) — a separate broker namespace
 

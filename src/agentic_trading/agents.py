@@ -81,6 +81,19 @@ FLEET: tuple[Agent, ...] = (
         ),
     ),
     Agent(
+        name="scout",
+        role="which symbols the book may hold",
+        authority=READ_ONLY,
+        cadence_seconds=21_600.0,
+        description=(
+            "Reads the broker's own discovery lists and the crypto pair list, "
+            "grades every candidate with the rule the book trades, and adopts or "
+            "drops its own picks. It can only ever change *what may be "
+            "considered*: it places no orders, cannot touch the operator's core "
+            "whitelist, and cannot drop a symbol the book still holds."
+        ),
+    ),
+    Agent(
         name="strategy",
         role="trend signals + advisory gates",
         authority=MAY_REDUCE_RISK,

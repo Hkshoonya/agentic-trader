@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from agentic_trading.history import Bar, load_bars
+from agentic_trading.orders import is_crypto_symbol
 from agentic_trading.types import OrderIntent, Side, new_decision_id
 
 HORIZONS = (50, 100, 200, 252)
@@ -63,6 +64,10 @@ class TrendCryptoStrategy:
         # ever changed by a *reported fill* — never by emitting an intent.
         self._quantities: dict[str, Decimal] = {}
         self._last_decision_date = ""
+        # The day the *runtime* last saw a rebalance from this strategy. The
+        # runtime reads it to ask for a retry when the day's intents could not
+        # be acted on for a technical reason (see ``release_decision``).
+        self.last_decided_day = ""
         self._load_state()
 
     # -- position bookkeeping --------------------------------------------
@@ -201,7 +206,29 @@ class TrendCryptoStrategy:
     # -- strategy interface ----------------------------------------------
 
     def on_quote(self, quote: dict) -> list[OrderIntent]:
-        """Rebalance once per day; ignore the intraday quote stream."""
+        """Exits every cycle, entries once a day per book.
+
+        The two sides of a rebalance do not deserve the same clock. An entry
+        spends risk budget on a signal that the daily bars produced, and doing
+        that repeatedly through the day would turn one decision into many. An
+        exit *removes* risk, and the position it closes is a position the rule
+        no longer wants — so it is re-emitted on every quote until the fill
+        actually arrives. Previously an exit was emitted once and then never
+        again: if that single sell was refused or cancelled, the book sat in a
+        position the strategy had already decided to leave, until the next
+        day's rebalance.
+
+        The crypto book and the equity book also do not share a clock, because
+        they do not share a market. Crypto trades around the clock and decides
+        at the UTC day roll. An equity can only be ordered *fractionally* while
+        the regular session is open — outside it the broker refuses a fractional
+        order, and a position that cannot be exited must not be opened — so the
+        equity book decides on the first quote of its own session. That is what
+        keeps a sell aligned with the hours in which the sell can execute.
+
+        The runtime suppresses a repeat while the first sell is still working,
+        so "every quote" does not mean "an order every quote".
+        """
 
         def broker_form(normalized: str) -> str:
             """BTCUSD (bar-file key) -> BTC-USD (broker symbol)."""
@@ -219,16 +246,18 @@ class TrendCryptoStrategy:
             stamp = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return []
-        day = stamp.astimezone(timezone.utc).date().isoformat()
-        if day == self._last_decision_date:
-            return []
+        is_crypto = is_crypto_symbol(quote_symbol)
 
-        self._last_decision_date = day
-        self._save_state()  # a restart must not re-run today's rebalance
+        def in_same_book(key: str) -> bool:
+            return is_crypto_symbol(key) == is_crypto
+
         targets = set(self.target_symbols(as_of=stamp))
         intents: list[OrderIntent] = []
 
-        for exiting in sorted(self._held - targets):
+        held = {key for key in self._held if in_same_book(key)}
+        wanted = {key for key in targets if in_same_book(key)}
+
+        for exiting in sorted(held - wanted):
             bars = self.history.get(exiting) or []
             price = quote.get("bid") if exiting == symbol else None
             if price is None and bars:
@@ -249,7 +278,21 @@ class TrendCryptoStrategy:
                     created_at=stamp,
                 )
             )
-        entering = sorted(targets - self._held)
+
+        day = stamp.astimezone(timezone.utc).date().isoformat()
+        book = "crypto" if is_crypto else "equity"
+        decision_key = f"{book}:{day}"
+        if not is_crypto and str(quote.get("market_session") or "") != "regular":
+            # Nothing to decide: this book can only be ordered while its session
+            # is open, and the exits above have already been considered.
+            return intents
+        if decision_key == self._last_decision_date:
+            return intents
+
+        self._last_decision_date = decision_key
+        self.last_decided_day = decision_key
+        self._save_state()  # a restart must not re-run today's entries
+        entering = sorted(wanted - held)
         weights = self.target_weights(as_of=stamp)
         for new_symbol in entering:
             price = quote.get("ask") if new_symbol == symbol else None
@@ -276,6 +319,27 @@ class TrendCryptoStrategy:
         return intents
 
     # -- position bookkeeping --------------------------------------------
+
+    def release_decision(self, day: str) -> bool:
+        """Un-spend a day's rebalance so it can be attempted again.
+
+        Only the runtime calls this, and only after every intent the rebalance
+        produced was refused for a *technical* reason — the account value was
+        not known yet, the runtime's position book could not be read, the
+        operator had not armed the session, or the broker review call failed.
+
+        A rebalance that a **risk** rule refused is never released: regime
+        blocks, model vetoes, position-count and correlation limits are
+        decisions, and retrying until a control changes its mind is not a
+        control. It is also never released once anything was placed, so a retry
+        cannot buy the same symbol twice.
+        """
+        if not day or day != self._last_decision_date:
+            return False
+        self._last_decision_date = ""
+        self.last_decided_day = ""
+        self._save_state()
+        return True
 
     def _held_quantity(self, symbol: str, *, clear: bool = False) -> Decimal:
         key = self._key(symbol)

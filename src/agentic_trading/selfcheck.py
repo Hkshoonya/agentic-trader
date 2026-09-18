@@ -181,7 +181,8 @@ def check_data(config: Any, *, max_bar_age_days: int = MAX_BAR_AGE_DAYS) -> Chec
         stale: list[str] = []
         thin: list[str] = []
         flagged: list[str] = []
-        for symbol in config.symbol_whitelist:
+        universe = config.effective_whitelist
+        for symbol in universe:
             stem = symbol.replace("-", "").upper()
             path = directory / f"{stem}_day.jsonl"
             if not path.is_file():
@@ -209,7 +210,7 @@ def check_data(config: Any, *, max_bar_age_days: int = MAX_BAR_AGE_DAYS) -> Chec
             return WARN, f"short history: {', '.join(thin)}"
         if flagged:
             return WARN, f"quality flags — {'; '.join(flagged[:3])}"
-        return OK, f"{len(config.symbol_whitelist)} symbols current"
+        return OK, f"{len(universe)} symbols current"
 
     return _timed("data", run)
 
@@ -225,9 +226,9 @@ def check_analysis(config: Any) -> Check:
         directory = Path(config.history_path) if config.history_path else None
         if directory is None:
             return FAIL, "no history_path configured"
-        # symbol_whitelist is a frozenset; pick deterministically so the check
-        # is reproducible run to run.
-        symbol = sorted(config.symbol_whitelist)[0]
+        # The universe is a frozenset; pick deterministically so the check is
+        # reproducible run to run.
+        symbol = sorted(config.effective_whitelist)[0]
         stem = symbol.replace("-", "").upper()
         path = directory / f"{stem}_day.jsonl"
         if not path.is_file():
@@ -305,9 +306,9 @@ def check_broker(config: Any, broker: Any) -> Check:
     """Read-only round trips: can we still see the account and the market?"""
 
     def run() -> tuple[str, str]:
-        crypto = [s for s in config.symbol_whitelist if is_crypto_symbol(s)][:6]
+        crypto = [s for s in config.effective_whitelist if is_crypto_symbol(s)][:6]
         equity_symbols = [
-            s for s in config.symbol_whitelist if not is_crypto_symbol(s)
+            s for s in config.effective_whitelist if not is_crypto_symbol(s)
         ][:20]
         # One retry: the first back-check runs seconds after a boot, and a cold
         # resolver can fail once while the daemon reconnects fine moments later.

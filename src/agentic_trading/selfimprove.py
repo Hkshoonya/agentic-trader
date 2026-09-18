@@ -56,7 +56,7 @@ def history_plan(
         path.name[: -len(f"_{interval}.jsonl")]
         for path in directory.glob(f"*_{interval}.jsonl")
     )
-    wanted = {bar_stem(symbol) for symbol in (config.symbol_whitelist or [])}
+    wanted = {bar_stem(symbol) for symbol in (config.effective_whitelist or [])}
     selected = [name for name in available if name in wanted] if wanted else []
     return interval, available, selected or available
 

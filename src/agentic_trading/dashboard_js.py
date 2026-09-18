@@ -4,6 +4,334 @@ SCRIPT = """
 const num = (v, d=2) => (v === null || v === undefined || v === '') ? '—' : Number(v).toFixed(d);
 let offset = 0; const seen = new Set();
 
+// The journal speaks in codes because codes can be counted, replayed and
+// tested. The console speaks to a person. Every machine word that would reach
+// the screen passes through these maps, so nobody has to learn what
+// "below_min_notional" or "cycle_stats" means to read their own trading agent.
+const EVENT_TEXT = {
+  accepted: 'order accepted',
+  placed: 'sent to broker',
+  rejected: 'refused',
+  place_failed: 'broker refused it',
+  place_refused: 'not sent',
+  live_gate_blocked: 'waiting for you to arm',
+  decision_deferred: 'decided on the next cycle',
+  rebalance_retry: 're-deciding after a technical refusal',
+  session_closed: 'market closed',
+  crypto_session: 'crypto still trading',
+  cycle_stats: 'heartbeat',
+  history_sync: 'price history updated',
+  history_sync_failed: 'price history update failed',
+  universe_change: 'watched symbols changed',
+  universe: 'symbol scan',
+  selfcheck: 'back-check',
+  selfcheck_failed: 'back-check failed',
+  error_streak: 'repeat errors',
+  error_streak_cleared: 'errors cleared',
+  kill_switch: 'kill switch tripped',
+  open_orders: 'orders still filling',
+  notify: 'alert sent',
+  advisor: 'AI review',
+  advisor_error: 'AI review unavailable',
+  advisor_budget: 'AI review budget reached',
+  entry_context: 'AI entry check',
+  entry_context_failed: 'AI entry check failed',
+  regime: 'market read',
+  regime_failed: 'market read failed',
+  evaluation: 'evidence review',
+  evaluation_skipped: 'evidence unchanged',
+  evolution_failed: 'evidence run failed',
+  evolution_skipped: 'evidence run skipped',
+  caps_applied: 'risk budget updated',
+  promotion: 'stage raised',
+  demotion: 'stage lowered',
+  resized: 'order resized',
+  small_account_mode: 'small-account mode',
+  strategy_seeded: 'positions loaded',
+  strategy_reseeded: 'positions updated',
+  strategy_seed_failed: 'could not load positions',
+  recovered_after_stop: 'recovered after a stop',
+  execution_costs: 'fill costs measured',
+  execution_costs_failed: 'fill-cost measurement failed',
+  correlations: 'correlation map updated',
+  correlations_failed: 'correlation update failed',
+  quote_read_failed: 'could not read quotes',
+  stale_quotes_rejected: 'stale quotes ignored',
+  equity_read_failed: 'could not read the balance',
+  positions_read_failed: 'could not read holdings',
+  review_failed: 'broker review failed',
+  auto_arm_failed: 'auto-arm check failed',
+  auto_arm: 'auto-armed',
+  auto_disarm: 'auto-disarmed',
+  self_improve_skipped: 'evidence run skipped',
+};
+
+const REASON_TEXT = {
+  symbol_not_whitelisted: 'not on the watched list',
+  over_max_order: 'bigger than the per-order limit',
+  over_daily_notional: 'would use more than the daily limit',
+  max_open_positions: 'already holding as many positions as allowed',
+  correlated_exposure: 'would double up on a position already held',
+  correlation_unknown: 'not enough shared history to measure the overlap',
+  would_short: 'nothing held to sell',
+  oversell: 'more than the position holds',
+  kill_switch: 'the kill switch is on',
+  positions_read_failed: 'holdings could not be read',
+  max_orders_per_day: 'the daily order limit is reached',
+  open_order_pending: 'an order for this symbol is still filling',
+  below_min_notional: 'too small for the broker minimum order',
+  unknown_side: 'unrecognised order side',
+  guard_error: 'the risk check failed',
+  order_invalid: 'the broker would refuse this order',
+  llm_veto: 'the AI adviser blocked it',
+  regime_block: 'the market read blocks new entries',
+  jev_chase: 'this entry looks like chasing a move that already ran',
+  session_closed_for_equities: 'the stock market is closed',
+  crypto_requires_live_stage: 'crypto needs the top promotion stage',
+  confidence_flat: 'confidence did not move',
+  confidence_down: 'confidence fell',
+  reset_after_demotion: 'budget reset after a demotion',
+  ceiling_reconciled: 'budget matched the operator ceiling',
+  budget_above_target: 'budget above the evidence target',
+  live_daily_loss: 'the daily loss limit was hit',
+  shadow_daily_loss: 'the simulated daily loss limit was hit',
+  consecutive_broker_errors: 'the broker kept failing',
+  consecutive_loop_error: 'the loop kept failing',
+};
+
+const REGIME_TEXT = {
+  trend: 'trending',
+  chop: 'choppy',
+  panic: 'panicking',
+  neutral: 'calm',
+  unknown: 'unclear',
+};
+
+const STRATEGY_TEXT = {
+  fixture: 'test fixture',
+  spy_scalper: 'S&P 500 scalper',
+  llm: 'AI multi-asset',
+  trend_crypto: 'crypto trend following',
+};
+
+const SESSION_TEXT = {
+  premarket: 'before the open',
+  regular: 'regular hours',
+  afterhours: 'after hours',
+  overnight: 'overnight',
+  weekend: 'weekend',
+  holiday: 'market holiday',
+};
+
+const POLICY_TEXT = {
+  regular: 'regular hours only',
+  extended: 'pre-market and after-hours too',
+  all: 'around the clock',
+  any: 'any time',
+};
+
+const CONFIDENCE_TEXT = {
+  confidence_up: 'confidence rose',
+  confidence_down: 'confidence fell',
+  confidence_flat: 'confidence did not move',
+  reset_after_demotion: 'reset after a demotion',
+  ceiling_reconciled: 'matched to your ceiling',
+  budget_above_target: 'above the evidence target',
+};
+
+const AGENT_STATUS_TEXT = {
+  ok: 'working',
+  stale: 'not reporting',
+  failing: 'failing',
+  degraded: 'running slowly',
+  disabled: 'switched off',
+  unknown: 'no activity yet',
+};
+
+const ORDER_TYPE_TEXT = {
+  market: 'market',
+  limit: 'limit',
+  stop_market: 'stop',
+  stop_limit: 'stop-limit',
+};
+
+const STAGE_TEXT = {
+  shadow: 'practice only',
+  probation: 'small live trades',
+  live: 'live',
+};
+
+// A candidate row's "why" comes from the rule's own arithmetic. Same number,
+// fewer machine words.
+function plainCandidateReason(text) {
+  const t = String(text || '');
+  let match = t.match(/^vote ([\\d.-]+) \\((\\d+)\\/(\\d+) horizons up\\)$/);
+  if (match) {
+    return match[2] + ' of ' + match[3] + ' timeframes rising (score ' + match[1] + ')';
+  }
+  match = t.match(/^trend vote ([\\d.-]+) < ([\\d.-]+) \\((\\d+)\\/(\\d+) horizons up\\)$/);
+  if (match) {
+    return 'only ' + match[3] + ' of ' + match[4] + ' timeframes rising — needs ' + match[2];
+  }
+  match = t.match(/^only (\\d+) bars \\(needs (\\d+)\\)$/);
+  if (match) return 'only ' + match[1] + ' days of prices — needs ' + match[2];
+  match = t.match(/^ranked (\\d+) of (\\d+), only (\\d+) slots$/);
+  if (match) {
+    return 'ranked ' + match[1] + ' of ' + match[2] + ', and only ' + match[3] + ' slots are open';
+  }
+  if (/^no usable volatility estimate$/.test(t)) {
+    return 'not enough movement to size it safely';
+  }
+  return humanise(t);
+}
+
+// What is holding a candidate back, from the console's own checks.
+function plainBlocker(text) {
+  const t = String(text || '');
+  if (t === 'already held') return 'already holding it';
+  const match = t.match(/^regime ([a-z_]+) c=([\\d.]+)$/i);
+  if (match) {
+    return 'market read: ' + plainRegime(match[1]) + ' (' + match[2] + ')';
+  }
+  return humanise(t);
+}
+
+// The pre-flight checklist is written for a developer; this is the same answer
+// for the person deciding whether to arm an account.
+function plainCheckDetail(text) {
+  let t = String(text || '');
+  t = t.replace(/last assessment eligible: (true|false)/i, (match, value) =>
+    value.toLowerCase() === 'true'
+      ? 'the last assessment passed' : 'the last assessment did not pass');
+  t = t.replace(/^stage is (\\w+)$/i, (match, value) =>
+    'stage: ' + (STAGE_TEXT[value] || humanise(value)));
+  t = t.replace(/healthy=(true|false)/i, (match, value) =>
+    value.toLowerCase() === 'true' ? 'checks passed' : 'problems found');
+  t = t.replace(/^missing$/, 'no report yet');
+  t = t.replace(/^clear$/, 'not tripped');
+  t = t.replace(/^equity ([\\d.]+)$/, 'balance $1');
+  t = t.replace(/^([\\d.]+) of ([\\d.]+)$/, (match, a, b) =>
+    num(Number(a) * 100, 2) + '% per order, ceiling ' + num(Number(b) * 100, 2) + '%');
+  return t;
+}
+
+function humanise(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .replace(/_/g, ' ').replace(/\\s+/g, ' ').trim();
+}
+
+function plainEvent(name) {
+  return EVENT_TEXT[name] || humanise(name) || 'event';
+}
+
+function plainStatus(status) {
+  return AGENT_STATUS_TEXT[status] || humanise(status) || 'unknown';
+}
+
+function plainStrategy(name) {
+  return STRATEGY_TEXT[name] || humanise(name) || '—';
+}
+
+// Free-text sentences (the cadence note) name the strategy plugin directly.
+function plainStrategyWord(text) {
+  let out = String(text || '');
+  Object.keys(STRATEGY_TEXT)
+    .sort((a, b) => b.length - a.length)
+    .forEach(key => {
+      out = out.replace(new RegExp('\\\\b' + key + '\\\\b', 'g'), STRATEGY_TEXT[key]);
+    });
+  return out;
+}
+
+function plainSession(name) {
+  return name ? (SESSION_TEXT[name] || humanise(name)) : '—';
+}
+
+function plainRegime(name) {
+  return name ? (REGIME_TEXT[name] || humanise(name)) : '—';
+}
+
+// One refusal code, in a sentence. Parametrised reasons keep their detail, with
+// the machine-shaped parts (bracketed lists, "c=0.81") turned into prose.
+function plainReason(reason) {
+  const text = String(reason || '').trim();
+  if (!text) return '';
+  const cut = text.indexOf(':');
+  const head = (cut >= 0 ? text.slice(0, cut) : text).trim();
+  let detail = cut >= 0 ? text.slice(cut + 1).trim() : '';
+  const phrase = REASON_TEXT[head] || humanise(head);
+  if (!detail) return phrase;
+  if (head === 'regime_block') {
+    const match = detail.match(/^([a-z_]+)\\s+c=([\\d.]+)$/i);
+    if (match) {
+      return 'the market read says ' + plainRegime(match[1]) +
+        ' (confidence ' + match[2] + ')';
+    }
+  }
+  if (head === 'jev_chase') {
+    const match = detail.match(/^p=([\\d.]+)$/i);
+    if (match) return phrase + ' (chance ' + match[1] + ')';
+  }
+  const list = detail.match(/^\\[(.*)\\]$/);
+  if (list) {
+    const names = list[1].split(',')
+      .map(part => part.trim().replace(/^['"]|['"]$/g, ''))
+      .filter(Boolean);
+    if (names.length === 1) detail = names[0];
+    else if (names.length > 1) {
+      detail = names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+    }
+  }
+  return phrase + ' (' + detail + ')';
+}
+
+// The promotion gate's reasons are policy sentences written for the journal.
+// They are correct and they are unreadable; this is the same fact in the words
+// an operator would use.
+function plainGateReason(reason) {
+  const text = String(reason || '').trim();
+  if (!text) return '';
+  let match = text.match(/^only (\\d+)\\/(\\d+) out-of-sample folds profitable \\(need (\\d+)%\\)$/);
+  if (match) {
+    return 'only ' + match[1] + ' of ' + match[2] + ' held-back periods made money ' +
+      '(needs ' + match[3] + '%)';
+  }
+  match = text.match(/^(?:in-sample|out-of-sample|walk-forward) sample too small \\((\\d+) trades < (\\d+)\\)$/);
+  if (match) return 'only ' + match[1] + ' trades in the held-back test (needs ' + match[2] + ')';
+  match = text.match(/(?:out-of-sample|walk-forward) expectancy ([-\\d.]+)bps < required ([-\\d.]+)bps after costs/);
+  if (match) {
+    return 'the held-back test earned ' + match[1] + ' bps per trade; it needs ' +
+      match[2] + ' bps to clear costs';
+  }
+  match = text.match(/edge does not survive the search: p=([\\d.]+) > [\\d.]+ \\(0\\.05 \\/ (\\d+) hypotheses tested\\)/);
+  if (match) {
+    return 'the edge may be luck: after testing ' + match[2] +
+      ' variations the odds are too weak (p=' + match[1] + ')';
+  }
+  match = text.match(/edge indistinguishable from noise \\(bootstrap p=([\\d.]+) > [\\d.]+\\)/);
+  if (match) return 'the edge looks like noise (p=' + match[1] + ')';
+  match = text.match(/(?:out-of-sample|walk-forward) drawdown ([-\\d.]+)% > allowed ([-\\d.]+)%/);
+  if (match) return 'the held-back test fell ' + match[1] + '%; the limit is ' + match[2] + '%';
+  match = text.match(/walk-forward report is ([\\d.]+) days old \\(limit ([\\d.]+)\\)/);
+  if (match) return 'the evidence report is ' + match[1] + ' days old (refresh after ' + match[2] + ')';
+  match = text.match(/no size holds the ([\\d.]+)% drawdown ceiling on this history/);
+  if (match) return 'no position size kept the worst fall under ' + match[1] + '% on this history';
+  match = text.match(/trading ([\\d.]+)% per order but the evidence only supports ([\\d.]+)% inside the drawdown ceiling/);
+  if (match) return 'trading ' + match[1] + '% per order, but the evidence only supports ' + match[2] + '%';
+  match = text.match(/profit factor ([\\d.]+) < 1\\.0 despite positive expectancy/);
+  if (match) return 'wins are smaller than losses (profit factor ' + match[1] + ')';
+  if (/^walk-forward report has no usable timestamp$/.test(text)) {
+    return 'the evidence report has no date on it, so it cannot be trusted';
+  }
+  if (/^no (walk-forward|out-of-sample) folds were evaluated$/.test(text)) {
+    return 'the held-back test produced no periods to judge';
+  }
+  if (/^the agent is still in shadow/.test(text)) {
+    return 'the agent is still practising: it has not cleared its evidence gate';
+  }
+  return humanise(text);
+}
+
 function setBadge(id, text, cls) {
   const el = document.getElementById(id);
   el.textContent = text;
@@ -15,13 +343,14 @@ function renderEvent(r) {
   if (seen.has(key)) return;
   seen.add(key);
   const stream = document.getElementById('stream');
-  const kind = r.event === 'accepted' ? (r.side || 'accepted') : r.event;
+  const kind = r.event === 'accepted'
+    ? (r.side || 'accepted') : plainEvent(r.event);
   const cls = r.event === 'placed' ? 'placed'
     : r.event === 'rejected' ? 'rejected'
     : r.side === 'buy' ? 'buy' : r.side === 'sell' ? 'sell'
     : (r.mode === 'shadow' ? 'shadow' : '');
-  const detail = r.reason || r.symbol
-    || (Array.isArray(r.symbols) ? r.symbols.join(',') : (r.symbols ?? '')) || '';
+  const detail = plainReason(r.reason) || r.symbol
+    || (Array.isArray(r.symbols) ? r.symbols.join(', ') : (r.symbols ?? '')) || '';
   const amount = r.notional ? ' $' + num(r.notional) : (r.count ? ' x' + r.count : '');
   const when = r.at ? new Date(r.at).toLocaleTimeString() : new Date().toLocaleTimeString();
   const div = document.createElement('div');
@@ -76,7 +405,8 @@ function drawChart(curve) {
   ctx.beginPath(); ctx.moveTo(0, h - 22); ctx.lineTo(w, h - 22); ctx.stroke();
   ctx.fillStyle = '#7b8a9e'; ctx.font = '11px monospace';
   ctx.fillText('order notional (max $' + max.toFixed(2) + ') · cumulative $'
-    + maxCum.toFixed(2) + ' · ' + points.length + ' decisions', 12, h - 6);
+    + maxCum.toFixed(2) + ' · ' + points.length
+    + (points.length === 1 ? ' decision' : ' decisions'), 12, h - 6);
 }
 
 // Why the order table can sit still while the cycle stream moves: this
@@ -87,11 +417,11 @@ function renderCadence(cadence) {
   if (!box || !cadence) return;
   const last = cadence.last_decision_at
     ? new Date(cadence.last_decision_at).toLocaleTimeString() : '—';
-  box.textContent = 'decides ' + (cadence.schedule || (cadence.rebalance || '—'))
+  box.textContent = 'decides ' + plainStrategyWord(cadence.schedule || (cadence.rebalance || '—'))
     + ' · last decision ' + last
     + ' · next ' + (cadence.next_decision_local || cadence.next_decision_at || '—')
     + (cadence.held && cadence.held.length ? ' · holding ' + cadence.held.join(', ') : '')
-    + ' — ' + (cadence.explanation || '');
+    + ' — ' + plainStrategyWord(cadence.explanation || '');
 }
 
 // The rule's live opinion, refreshed on its own slower timer: it reads the same
@@ -114,7 +444,7 @@ function renderCandidates(data) {
     return;
   }
   body.innerHTML = rows.map(r => {
-    const blocked = (r.blocked_by || []).join('; ');
+    const blocked = (r.blocked_by || []).map(plainBlocker).join('; ');
     const vote = Number(r.vote || 0);
     const cls = r.selected && !blocked ? 'buy' : (blocked ? 'sell' : 'sub');
     return '<tr><td>' + r.symbol + (r.held ? ' <span class="sub">held</span>' : '') + '</td>'
@@ -122,7 +452,8 @@ function renderCandidates(data) {
       + '<td>' + num(r.vol_pct, 1) + '%</td>'
       + '<td class="' + cls + '">' + (r.selected ? (blocked ? 'yes · held back' : 'yes') : 'no') + '</td>'
       + '<td class="sell">' + (blocked || '—') + '</td>'
-      + '<td class="sub">' + (r.reason || '') + (r.regime ? ' · regime ' + r.regime : '') + '</td></tr>';
+      + '<td class="sub reason">' + plainCandidateReason(r.reason)
+        + (r.regime ? ' · market read ' + plainRegime(r.regime) : '') + '</td></tr>';
   }).join('');
   if (note) {
     note.textContent = (data.note || '')
@@ -186,7 +517,7 @@ function drawActivity(data) {
   const note = document.getElementById('activity-note');
   if (note && (data.reasons || []).length) {
     note.textContent = 'most common refusals: '
-      + data.reasons.map(r => r[0] + ' ×' + r[1]).join(', ');
+      + data.reasons.map(r => plainReason(r[0]) + ' ×' + r[1]).join(', ');
   }
 }
 
@@ -216,26 +547,41 @@ function drawFrontier(data) {
   const py = (dd) => bottom - (Number(dd) / maxY) * (bottom - top);
   ctx.strokeStyle = '#2a3342';
   ctx.beginPath(); ctx.moveTo(left, top); ctx.lineTo(left, bottom); ctx.lineTo(right, bottom); ctx.stroke();
+  // Labels used to pile up on each other at the right edge and on the top
+  // points. Every label now reserves a box and is skipped (or clamped inside
+  // the plot) when it would collide with one already drawn.
+  const placed = [];
+  const label = (text, x, y, colour) => {
+    ctx.font = '9px monospace';
+    const width = ctx.measureText(text).width;
+    const cx = Math.min(Math.max(x, left + 2), right - width - 2);
+    const box = {x: cx - 2, y: y - 9, w: width + 4, h: 11};
+    if (placed.some(b => box.x < b.x + b.w && box.x + box.w > b.x
+      && box.y < b.y + b.h && box.y + box.h > b.y)) return false;
+    placed.push(box);
+    ctx.fillStyle = colour;
+    ctx.fillText(text, cx, y);
+    return true;
+  };
   ctx.setLineDash([4, 4]);
   ctx.strokeStyle = '#f0b429';
   ctx.beginPath(); ctx.moveTo(left, py(ceiling)); ctx.lineTo(right, py(ceiling)); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = '#f0b429'; ctx.font = '9px monospace';
-  ctx.fillText(ceiling + '% gate', left + 4, py(ceiling) - 4);
+  label(ceiling + '% gate', left + 4, py(ceiling) - 4, '#f0b429');
+  label('0%', left - 24, bottom + 3, '#5c6775');
+  label(maxY.toFixed(0) + '%', left - 26, top + 8, '#5c6775');
   points.forEach(p => {
     const x = px(p.per_order_pct), y = py(p.max_drawdown_pct);
     ctx.fillStyle = p.inside_ceiling ? '#35d07f' : '#ff5f6d';
     ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#8b97a8'; ctx.font = '9px monospace';
-    ctx.fillText((Number(p.per_order_pct) * 100).toFixed(2) + '%', x - 12, bottom + 12);
-    ctx.fillText(Number(p.max_drawdown_pct).toFixed(1) + '%', x - 10, y - 7);
+    label((Number(p.per_order_pct) * 100).toFixed(2) + '%', x - 12, bottom + 12, '#8b97a8');
+    label(Number(p.max_drawdown_pct).toFixed(1) + '%', x - 10, y - 7, '#8b97a8');
   });
   const live = Number((data && data.live_pct) || 0);
   if (live > 0) {
     ctx.strokeStyle = '#dfe6f1';
     ctx.beginPath(); ctx.moveTo(px(live), top); ctx.lineTo(px(live), bottom); ctx.stroke();
-    ctx.fillStyle = '#dfe6f1';
-    ctx.fillText('live ' + (live * 100).toFixed(2) + '%', px(live) + 4, top + 10);
+    label('in force ' + (live * 100).toFixed(2) + '%', px(live) + 4, top + 10, '#dfe6f1');
   }
   const costs = (data && data.costs) || {};
   const note = document.getElementById('frontier-note');
@@ -290,7 +636,8 @@ function renderArm(summary) {
   // proper checking": every item named, with its own verdict, before anything
   // reaches the broker.
   const checklist = (arm.checks || []).map(c =>
-    '<div class="sub">' + (c.ok ? '✓' : '✗') + ' ' + c.name + ' — ' + c.detail + '</div>'
+    '<div class="sub">' + (c.ok ? '✓' : '✗') + ' ' + c.name + ' — '
+      + plainCheckDetail(c.detail) + '</div>'
   ).join('');
   if (arm.auto_arm) {
     box.innerHTML = '<b class="' + (arm.passed ? 'buy' : 'sell') + '">AUTONOMOUS '
@@ -329,6 +676,7 @@ function renderAccount(summary) {
   if (!box) return;
   const a = summary.account || {};
   const rt = a.runtime || {}, eq = a.equity || {}, pnl = a.pnl || {};
+  const armState = summary.arm || {};
   const money = (v) => (v === null || v === undefined) ? '—'
     : (Number(v) >= 0 ? '+' : '') + '$' + Number(v).toFixed(2);
   const cls = (v) => (v === null || v === undefined) ? 'sub'
@@ -345,10 +693,17 @@ function renderAccount(summary) {
       + money(pnl.today) + '</b></div>'
     + '<div class="row"><span>P&amp;L since arming</span><b class="' + cls(pnl.since_arming) + '">'
       + (pnl.since_arming === null || pnl.since_arming === undefined
-        ? 'not armed yet' : money(pnl.since_arming)) + '</b></div>'
-    + '<div class="sub">' + (eq.armed_at
-      ? 'armed ' + new Date(eq.armed_at).toLocaleString() + ' at $' + num(Number(eq.at_arm || 0))
-      : 'never armed — nothing has been submitted') + '</div>'
+        ? (armState.armed ? 'waiting for the agent\u2019s balance' : 'not armed yet')
+        : money(pnl.since_arming)) + '</b></div>'
+    // The balance snapshot at arming is written by the running daemon, so a
+    // console-only session has the arm file but no snapshot. Saying "never
+    // armed" next to an ARMED badge is worse than saying what is missing.
+    + '<div class="sub">' + ((eq.armed_at || (armState.armed ? armState.since : ''))
+      ? 'armed since ' + new Date(eq.armed_at || armState.since).toLocaleString()
+        + (eq.at_arm ? ' at $' + num(Number(eq.at_arm)) : '')
+      : (armState.armed
+        ? 'armed — waiting for the agent to record a balance'
+        : 'not armed — no order has been sent')) + '</div>'
     + '<div class="sub">first reading $' + num(Number(eq.first || 0)) + ' on '
       + (eq.first_seen_at ? new Date(eq.first_seen_at).toLocaleString() : '—')
       + ' · P&amp;L is ' + (a.labels && a.labels.all_time ? a.labels.all_time : '') + '</div>'
@@ -376,10 +731,10 @@ async function refresh() {
   }
   setBadge('mode', summary.kill_switch ? 'kill switch' : summary.mode,
     summary.kill_switch ? 'kill' : (summary.mode === 'live' ? 'live' : 'shadow'));
-  setBadge('stage', 'stage: ' + summary.promotion.stage,
+  setBadge('stage', 'stage: ' + (STAGE_TEXT[summary.promotion.stage] || humanise(summary.promotion.stage)),
     summary.promotion.stage === 'live' ? 'live'
       : summary.promotion.stage === 'probation' ? 'probation' : 'stage');
-  setBadge('session', summary.session, summary.session_allowed ? 'stage' : 'shadow');
+  setBadge('session', plainSession(summary.session), summary.session_allowed ? 'stage' : 'shadow');
   // Live mode with no arming switch looks identical to shadow in the numbers,
   // so state it plainly: this is the difference between "not proven" and
   // "proven but not armed".
@@ -387,9 +742,12 @@ async function refresh() {
     summary.armed ? 'LIVE ARMED' : 'disarmed',
     summary.armed ? 'live' : 'shadow');
   document.getElementById('kill').style.display = summary.kill_switch ? '' : 'none';
-  document.getElementById('generated').textContent =
+  const generated = document.getElementById('generated');
+  generated.textContent =
     'updated ' + new Date(summary.generated_at).toLocaleTimeString()
-    + ' · ' + summary.strategy + ' · ' + summary.symbols.join(',');
+    + ' · ' + plainStrategy(summary.strategy)
+    + ' · watching ' + summary.symbols.length + ' symbols';
+  generated.title = summary.symbols.join(', ');
 
   document.getElementById('equity').textContent = num(summary.current_equity);
   document.getElementById('equity-sub').textContent = 'baseline ' + num(summary.baseline_equity)
@@ -399,7 +757,7 @@ async function refresh() {
   document.getElementById('notional-sub').textContent =
     'cap ' + num(Number(summary.current_equity || 0)
       * Number((summary.risk || {}).daily_notional_pct || 0.20))
-    + ' · session policy ' + summary.session_policy;
+    + ' · trading ' + (POLICY_TEXT[summary.session_policy] || humanise(summary.session_policy));
   const counts = summary.event_counts || {};
   document.getElementById('trades').textContent =
     (counts.accepted || 0) + ' / ' + (counts.placed || 0) + ' / ' + (counts.rejected || 0);
@@ -414,13 +772,15 @@ async function refresh() {
   // toward the operator's ceiling as evidence confidence improves.
   const risk = summary.risk || {};
   const budget = '<div class="row"><span>budget / order</span><b>'
-      + num(Number(risk.max_order_pct || 0) * 100) + '% of '
-      + num(Number(risk.ceiling_max_order_pct || 0) * 100) + '% authorized</b></div>'
+      + num(Number(risk.max_order_pct || 0) * 100) + '% (ceiling '
+      + num(Number(risk.ceiling_max_order_pct || 0) * 100) + '%)</b></div>'
     + '<div class="row"><span>budget / day</span><b>'
-      + num(Number(risk.daily_notional_pct || 0) * 100) + '% of '
-      + num(Number(risk.ceiling_daily_notional_pct || 0) * 100) + '% authorized</b></div>'
+      + num(Number(risk.daily_notional_pct || 0) * 100) + '% (ceiling '
+      + num(Number(risk.ceiling_daily_notional_pct || 0) * 100) + '%)</b></div>'
     + '<div class="row"><span>confidence</span><b>' + num(risk.confidence, 3)
-      + (risk.reason ? ' · ' + risk.reason : '') + '</b></div>'
+      + (risk.reason
+        ? ' · ' + (CONFIDENCE_TEXT[risk.reason] || humanise(risk.reason))
+        : '') + '</b></div>'
     + (risk.target_max_order_pct
       ? '<div class="sub">next target '
         + num(Number(risk.target_max_order_pct) * 100) + '% per order</div>'
@@ -460,13 +820,16 @@ async function refresh() {
   document.getElementById('gate').innerHTML = (a.eligible === undefined)
     ? budget + tooSmall + '<div class="sub">no assessment yet — run: agentic-trading evolve</div>'
     : budget + tooSmall
-      + '<div class="row"><span>eligible</span><b>' + (a.eligible ? 'YES' : 'not yet') + '</b></div>'
+      + '<div class="row"><span>cleared the gate</span><b>' + (a.eligible ? 'yes' : 'not yet') + '</b></div>'
       + '<div class="row"><span>score</span><b>' + num(a.score, 3) + '</b></div>'
-      + '<div class="row"><span>OOS trades</span><b>' + (ev.oos_trades ?? '—') + '</b></div>'
-      + '<div class="row"><span>OOS expectancy</span><b>' + num(ev.oos_expectancy_bps) + ' bps</b></div>'
-      + '<div class="row"><span>profitable folds</span><b>' + (ev.folds_positive ?? '—') + '/' + (ev.folds_total ?? '—') + '</b></div>'
-      + '<div class="row"><span>bootstrap p</span><b>' + num(ev.oos_bootstrap_p_value, 3) + '</b></div>'
-      + (reasons.length ? '<div class="sub" style="margin-top:8px">' + reasons.map(r => '• ' + r).join('<br>') + '</div>' : '');
+      + '<div class="row"><span>trades in the held-back test</span><b>' + (ev.oos_trades ?? '—') + '</b></div>'
+      + '<div class="row"><span>average per trade</span><b>' + num(ev.oos_expectancy_bps) + ' bps</b></div>'
+      + '<div class="row"><span>held-back periods that made money</span><b>' + (ev.folds_positive ?? '—') + '/' + (ev.folds_total ?? '—') + '</b></div>'
+      + '<div class="row"><span>chance it is luck (p)</span><b>' + num(ev.oos_bootstrap_p_value, 3) + '</b></div>'
+      + (reasons.length
+        ? '<div class="sub" style="margin-top:8px">'
+          + reasons.map(r => '• ' + plainGateReason(r)).join('<br>') + '</div>'
+        : '');
 
   if (summary.evolution) {
     const e = summary.evolution;
@@ -495,9 +858,9 @@ async function refresh() {
         + (proposals.updated_at ? new Date(proposals.updated_at).toLocaleString() : '—')
         + '</div>'
         + proposals.proposals.slice().reverse().map(p =>
-          '<div class="row"><span>' + p.category + ' · ' + p.title + '</span><b class="sub">'
+          '<div class="row"><span>' + humanise(p.category) + ' · ' + humanise(p.title) + '</span><b class="sub">'
           + num(Number(p.confidence || 0), 2) + ' · ' + p.status + '</b></div>'
-          + '<div class="sub" style="margin:-2px 0 6px">' + (p.evidence || '') + '</div>'
+          + '<div class="sub" style="margin:-2px 0 6px">' + humanise(p.evidence || '') + '</div>'
         ).join('');
     }
   }
@@ -513,8 +876,8 @@ async function refresh() {
       const r = regimes[sym] || {};
       const blocked = r.blocks_entries ? 'sell' : 'buy';
       return '<div class="row"><span>' + sym + '</span><b class="' + blocked + '">'
-        + (r.regime || '—') + ' ' + num(r.confidence, 2)
-        + (r.blocks_entries ? ' · blocking' : '') + '</b></div>';
+        + plainRegime(r.regime) + ' ' + num(r.confidence, 2)
+        + (r.blocks_entries ? ' · blocking new entries' : '') + '</b></div>';
     }).join('');
     document.getElementById('regimes').innerHTML =
       '<h2 style="margin-top:10px">LLM regime read</h2>' + rows;
@@ -549,6 +912,59 @@ async function refresh() {
   renderArm(summary);
   renderAccount(summary);
   renderCadence(summary.cadence);
+  renderUniverse(summary);
+}
+
+// The symbol scout: what the market's own lists put in front of it, and what it
+// decided about each one. "Added" and "dropped" are the only two things that
+// change the book, so they lead.
+function renderUniverse(summary) {
+  const box = document.querySelector('#universe tbody');
+  const note = document.getElementById('universe-note');
+  if (!box) return;
+  const u = summary.universe || {};
+  if (!u.enabled) {
+    box.innerHTML = '<tr><td colspan="6" class="sub">the symbol scout is off — '
+      + 'the watched list is the one written in your config file</td></tr>';
+    if (note) note.textContent = '';
+    return;
+  }
+  const rows = u.rows || [];
+  if (!rows.length) {
+    box.innerHTML = '<tr><td colspan="6" class="sub">the scout ran, but the '
+      + 'market lists gave it nothing it could judge</td></tr>';
+  } else {
+    box.innerHTML = rows.map(r => {
+      const volume = Number(r.median_dollar_volume || 0);
+      const volumeText = volume >= 1e6
+        ? '$' + (volume / 1e6).toFixed(1) + 'M'
+        : (volume > 0 ? '$' + Math.round(volume / 1e3) + 'k' : '—');
+      const spread = (r.spread_bps === null || r.spread_bps === undefined)
+        ? '—' : num(Number(r.spread_bps), 1) + ' bps';
+      const verdict = r.admitted
+        ? '<span class="buy">added to the watch list</span>'
+        : '<span class="sub">left out</span>';
+      return '<tr><td class="nowrap">' + r.symbol + '</td>'
+        + '<td>' + num(Number(r.vote || 0) * 100, 0) + '%</td>'
+        + '<td class="nowrap">' + volumeText + '</td>'
+        + '<td class="nowrap">' + spread + '</td>'
+        + '<td class="nowrap">' + verdict + '</td>'
+        + '<td class="sub reason">' + (r.reason || '') + '</td></tr>';
+    }).join('');
+  }
+  if (note) {
+    const changes = [];
+    if ((u.added || []).length) changes.push('added ' + u.added.join(', '));
+    if ((u.dropped || []).length) changes.push('dropped ' + u.dropped.join(', '));
+    note.textContent =
+      (changes.length ? changes.join(' · ') : 'no change on the last scan')
+      + ' · adopted by the scout: ' + ((u.adopted || []).join(', ') || 'nothing yet')
+      + (u.as_of ? ' · scanned ' + new Date(u.as_of).toLocaleTimeString() : '')
+      + (u.failures
+        ? ' · ' + u.failures + ' failed scans in a row: ' + (u.last_error || '')
+        : '')
+      + (u.notes && u.notes.length ? ' · ' + u.notes.join(' · ') : '');
+  }
 }
 
 // Who is actually making decisions: the bot is a small team of workers, and
@@ -577,9 +993,9 @@ function renderEvidence(summary) {
   const age = e.generated_at
     ? Math.round((Date.now() - new Date(e.generated_at)) / 86400000) : null;
   box.innerHTML =
-    line('risk-parity spec', e.inverse_vol)
-    + line('gate size (in-sample)', e.gate_size)
-    + line('production size', e.production)
+    line('volatility-target rule', e.inverse_vol)
+    + line('largest size inside the drawdown gate', e.gate_size)
+    + line('size in force', e.production)
     + '<div class="sub" style="margin-top:6px">'
       + (e.symbols || []).length + ' symbols · ' + (e.bars ?? '—') + ' bars · '
       + (e.folds ?? '—') + ' walk-forward folds · drawdown ceiling '
@@ -633,7 +1049,9 @@ function renderAgents(summary) {
         bits.push(d.fresh_quotes + ' fresh quotes/cycle');
       }
       if (a.name === 'execution') {
-        bits.push(num(Number((d.max_order_pct || 0))) * 100 + '%/order');
+        // num() returns a string; multiplying it by 100 printed "0%/order" for
+        // every real budget. Format the number, then the unit.
+        bits.push(num(Number(d.max_order_pct || 0) * 100, 2) + '% per order');
         bits.push(d.armed ? 'ARMED' : 'disarmed');
       }
       if (a.name === 'backcheck' && d.ok !== undefined) {
@@ -644,7 +1062,7 @@ function renderAgents(summary) {
       }
       const err = (health.last_error || '').slice(0, 80);
       return '<div class="row"><span>' + a.name + '</span><b class="' + cls + '">'
-        + status + '</b></div><div class="sub" style="margin:-2px 0 6px">'
+        + plainStatus(status) + '</b></div><div class="sub" style="margin:-2px 0 6px">'
         + bits.join(' · ') + (err ? ' · ' + err : '') + '</div>';
     }).join('')
       // The model helpers are not the fleet: they advise, they do not run.
@@ -726,14 +1144,17 @@ function renderOrders(data) {
     const oc = c.order || {};
     const os = (oc.score === null || oc.score === undefined) ? null : Number(oc.score);
     const verdictClass = oc.verdict === 'buy' ? 'buy' : (oc.verdict === 'rejected' ? 'sell' : 'sub');
-    const note = Object.values(oc.notes || {}).join('; ');
+    // The per-order notes are a sentence fragment per check ("trend slope is
+    // negative (-5.2%); volume not measured..."), which turned the column into
+    // a vertical word stack. Keep one line on screen, the rest in the tooltip.
+    const note = Object.values(oc.notes || {}).map(plainReason).join('; ');
     // Rows journaled before per-order grading existed have no snapshot to grade
     // from. Saying so beats an empty cell that reads like a zero.
     const noGrade = !c.order && ev !== null;
     const hasVerdict = !!oc.verdict;
     const confidence = (ai === null && ev === null && os === null && !hasVerdict)
       ? '<span class="sub">—</span>'
-      : '<span class="conf">'
+      : '<span class="conf"' + (note ? ' title="' + note.replace(/"/g, '&quot;') + '"' : '') + '>'
         + (!hasVerdict ? ''
           : '<span class="' + verdictClass + '">' + oc.verdict
             + (os === null ? '' : ' ' + os.toFixed(2))
@@ -747,16 +1168,16 @@ function renderOrders(data) {
             + ai.toFixed(2) + '</span>')
         + ((os !== null || ai !== null) && ev !== null ? '<br>' : '')
         + (ev === null ? '' : '<span class="sub">ev ' + ev.toFixed(2) + '</span>')
-        + (note ? '<br><span class="sub">' + note.slice(0, 120) + '</span>' : '')
+        + (note ? '<br><span class="sub">' + (note.length > 64 ? note.slice(0, 64) + '…' : note) + '</span>' : '')
         + (noGrade ? '<br><span class="sub">order grade: no snapshot</span>' : '')
         + '</span>';
     return '<tr><td>' + at + '</td>'
-      + '<td><span class="pill ' + r.event + '">' + r.event + '</span></td>'
+      + '<td><span class="pill ' + r.event + '">' + plainEvent(r.event) + '</span></td>'
       + '<td>' + confidence + '</td>'
-      + '<td>' + (r.symbol || '—') + '</td>'
+      + '<td class="nowrap">' + (r.symbol || '—') + '</td>'
       + '<td>' + side + '</td>'
-      + '<td>' + (r.type || '—') + '</td>'
-      + '<td>' + (r.session || '—') + '</td>'
+      + '<td class="nowrap">' + (ORDER_TYPE_TEXT[r.type] || r.type || '—') + '</td>'
+      + '<td class="nowrap">' + plainSession(r.session) + '</td>'
       // Only show a size and notional for an order that was actually sized:
       // a refusal before sizing has neither, and a blank is more honest than a
       // raw intent quantity beside $0.00.
@@ -767,7 +1188,7 @@ function renderOrders(data) {
           + (r.last_price_source === 'decision' ? ' <span class="sub">dec</span>' : '')
         : '—') + '</td>'
       + '<td>' + alerts + '</td>'
-      + '<td class="sub">' + (r.reason || '') + '</td></tr>';
+      + '<td class="sub reason">' + plainReason(r.reason) + '</td></tr>';
   }).join('');
 }
 

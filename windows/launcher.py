@@ -289,6 +289,9 @@ class Launcher:
         self.status_text = tk.Label(
             status, text="loading…", bg=PANEL, fg=FG, justify="left",
             anchor="w", font=("Consolas", 10), padx=12, pady=10,
+            # Long status sentences must wrap inside the window instead of
+            # running past its edge; the wrap width follows the window below.
+            wraplength=900,
         )
         self.status_text.pack(fill="x")
 
@@ -341,8 +344,12 @@ class Launcher:
                 "to the broker until you arm it."
             ),
             bg=BG, fg=MUTED, font=("Segoe UI", 9), anchor="w",
+            justify="left", wraplength=900,
         )
         self.hint.pack(fill="x", padx=18)
+        # tk does not reflow a label when the window shrinks, so the wrap width
+        # is recomputed on every resize of the top-level window.
+        self.root.bind("<Configure>", self._on_resize)
 
         log_frame = tk.Frame(self.root, bg=BG)
         log_frame.pack(fill="both", expand=True, padx=16, pady=(6, 14))
@@ -356,6 +363,13 @@ class Launcher:
         )
         self.log_box.pack(fill="both", expand=True)
         self.log_box.configure(state="disabled")
+
+    def _on_resize(self, event: Any) -> None:
+        if event.widget is not self.root:
+            return
+        width = max(320, int(event.width) - 64)
+        self.status_text.configure(wraplength=width)
+        self.hint.configure(wraplength=width)
 
     # -- actions -----------------------------------------------------------
 

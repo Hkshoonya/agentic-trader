@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -58,6 +59,13 @@ class Config:
     max_correlated_positions: Optional[int] = None
     correlation_threshold: float = 0.7
     correlation_lookback_days: int = 120
+    # A once-a-day strategy gets one shot at the day. When every order in that
+    # shot is refused for a *technical* reason — the account value was not read
+    # yet, the broker's position book failed, the session was not armed — the
+    # day's decision is handed back to the strategy instead of being spent, and
+    # retried after this many seconds, at most this many times.
+    rebalance_retry_seconds: float = 900.0
+    rebalance_max_retries: int = 6
     # Phase 4 — self-evaluation, promotion, autonomy
     autonomy: str = "manual"  # manual | assisted | auto
     history_path: Path | None = None
@@ -99,6 +107,64 @@ class Config:
     auto_arm_min_interval_hours: float = 6.0
     jev_veto_chase: bool = False
     jev_chase_threshold: Decimal = Decimal("0.75")
+    # Symbol scout: the agent may add and drop its own symbols as the tape
+    # changes, so a trend it was not configured for is not a trend it misses.
+    # The operator's ``symbol_whitelist`` is the core: the scout can only add
+    # or remove *its own* picks, never the operator's, and it never drops a
+    # symbol the book still holds. Off by default — the whitelist an operator
+    # wrote is the set of instruments the account is authorised to trade until
+    # they say otherwise.
+    discovery_enabled: bool = False
+    # How often the scout re-reads the market and the candidate pool.
+    discovery_interval_hours: float = 6.0
+    # Ceiling on scout-added symbols, on top of the operator's whitelist.
+    discovery_max_symbols: int = 6
+    # Minimum daily bars a candidate must have before it can be traded: the
+    # trend vote reads a 252-session horizon, and a short file cannot answer.
+    discovery_min_bars: int = 260
+    # Trend-vote thresholds (the vote is the share of the 50/100/200/252-bar
+    # horizons that are rising, 0..1). Enter on 3 of 4, leave on 1 of 4, so a
+    # symbol is not added and dropped on the same wobble.
+    discovery_enter_vote: Decimal = Decimal("0.75")
+    discovery_exit_vote: Decimal = Decimal("0.25")
+    # Liquidity floor in dollars of daily volume (median of the last 60 bars).
+    # A trend in something nobody trades is a trend that cannot be exited.
+    discovery_min_dollar_volume: Decimal = Decimal("5000000")
+    # Equity candidates the scout may consider. Stocks have no public
+    # screenshot of "trading right now" from the broker read tools, so the
+    # operator supplies the pool and the scout applies the same data tests to
+    # it. Crypto candidates come from the exchange's live pair list instead.
+    discovery_candidates: tuple[str, ...] = ()
+    # The broker's own discovery lists, by display name. These are Robinhood's
+    # answer to "what is moving today", which is a better pool than any list
+    # written by hand; the scout still applies the full data test to each name.
+    discovery_lists: tuple[str, ...] = ()
+    # How many candidates one pass may fetch history for. Each one costs a
+    # broker call, so this trades coverage against gateway traffic.
+    discovery_max_candidates: int = 40
+    # Widest spread the book will pay to cross, in basis points of the mid. A
+    # rule that is right and pays more in spread than it earns is still wrong.
+    discovery_max_spread_bps: Decimal = Decimal("25")
+    # A candidate that moves this closely with something already held is the
+    # same bet, not a new one.
+    discovery_max_correlation: Decimal = Decimal("0.85")
+    # A newly adopted symbol is held at least this long before a cooling trend
+    # can drop it, so a single quiet week does not churn the book.
+    discovery_min_hold_hours: float = 48.0
+    # What the scout has adopted, read from ``state_dir/universe.json`` at load
+    # time. Kept separate from ``symbol_whitelist`` so the operator's core book
+    # stays exactly what they wrote, and so the scout can tell its own picks
+    # from theirs.
+    discovered_symbols: frozenset[str] = frozenset()
+
+    @property
+    def effective_whitelist(self) -> frozenset[str]:
+        """The core book plus the scout's picks — what may actually be traded.
+
+        One definition, so the risk guard, the quote feed, the strategy, the
+        evidence gate and the self-check cannot disagree about the universe.
+        """
+        return self.symbol_whitelist | self.discovered_symbols
 
     def __post_init__(self) -> None:
         if self.mode not in ("shadow", "live"):
@@ -174,6 +240,62 @@ class Config:
             raise ValueError("sizing must be flat|proportional")
         if not 0 <= float(self.jev_chase_threshold) <= 1:
             raise ValueError("jev_chase_threshold must be between 0 and 1")
+        if self.discovery_interval_hours <= 0:
+            raise ValueError("discovery_interval_hours must be positive")
+        if self.discovery_max_symbols < 0:
+            raise ValueError("discovery_max_symbols must be >= 0")
+        if self.discovery_min_bars < 60:
+            raise ValueError("discovery_min_bars must be >= 60")
+        for name, value in (
+            ("discovery_enter_vote", self.discovery_enter_vote),
+            ("discovery_exit_vote", self.discovery_exit_vote),
+        ):
+            if not 0 <= float(value) <= 1:
+                raise ValueError(f"{name} must be between 0 and 1")
+        if float(self.discovery_exit_vote) >= float(self.discovery_enter_vote):
+            raise ValueError(
+                "discovery_exit_vote must be below discovery_enter_vote "
+                "(otherwise a symbol is added and dropped on the same reading)"
+            )
+        if self.discovery_min_dollar_volume < 0:
+            raise ValueError("discovery_min_dollar_volume must be >= 0")
+        if self.rebalance_retry_seconds <= 0:
+            raise ValueError("rebalance_retry_seconds must be positive")
+        if self.rebalance_max_retries < 0:
+            raise ValueError("rebalance_max_retries must be >= 0")
+        if self.discovery_max_candidates < 0:
+            raise ValueError("discovery_max_candidates must be >= 0")
+        if float(self.discovery_max_spread_bps) < 0:
+            raise ValueError("discovery_max_spread_bps must be >= 0")
+        if not 0 < float(self.discovery_max_correlation) <= 1:
+            raise ValueError("discovery_max_correlation must be in (0, 1]")
+        if self.discovery_min_hold_hours < 0:
+            raise ValueError("discovery_min_hold_hours must be >= 0")
+
+
+def _adopted_symbols(state_dir: Any) -> frozenset[str]:
+    """What the scout has adopted, read straight from its own state file.
+
+    Deliberately a plain JSON read rather than an import of ``discovery``:
+    configuration is the bottom of the dependency graph, and a missing or
+    corrupt file must mean "nothing adopted", never a failed start-up.
+    """
+    if not state_dir:
+        return frozenset()
+    try:
+        payload = json.loads(
+            (Path(state_dir) / "universe.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(payload, dict):
+        return frozenset()
+    adopted = payload.get("adopted")
+    if not isinstance(adopted, list):
+        return frozenset()
+    return frozenset(
+        str(symbol).strip().upper() for symbol in adopted if str(symbol).strip()
+    )
 
 
 def load_config(path: str | Path) -> Config:
@@ -243,4 +365,35 @@ def load_config(path: str | Path) -> Config:
         ),
         jev_veto_chase=bool(raw.get("jev_veto_chase", False)),
         jev_chase_threshold=Decimal(str(raw.get("jev_chase_threshold", "0.75"))),
+        discovery_enabled=bool(raw.get("discovery_enabled", False)),
+        discovery_interval_hours=float(raw.get("discovery_interval_hours", 6.0)),
+        discovery_max_symbols=int(raw.get("discovery_max_symbols", 6)),
+        discovery_min_bars=int(raw.get("discovery_min_bars", 260)),
+        discovery_enter_vote=Decimal(
+            str(raw.get("discovery_enter_vote", "0.75"))
+        ),
+        discovery_exit_vote=Decimal(str(raw.get("discovery_exit_vote", "0.25"))),
+        discovery_min_dollar_volume=Decimal(
+            str(raw.get("discovery_min_dollar_volume", "5000000"))
+        ),
+        discovery_candidates=tuple(
+            str(symbol).upper()
+            for symbol in (raw.get("discovery_candidates") or [])
+        ),
+        discovery_lists=tuple(
+            str(name) for name in (raw.get("discovery_lists") or [])
+        ),
+        discovery_max_candidates=int(raw.get("discovery_max_candidates", 40)),
+        discovery_max_spread_bps=Decimal(
+            str(raw.get("discovery_max_spread_bps", "25"))
+        ),
+        discovery_max_correlation=Decimal(
+            str(raw.get("discovery_max_correlation", "0.85"))
+        ),
+        discovery_min_hold_hours=float(
+            raw.get("discovery_min_hold_hours", 48.0)
+        ),
+        discovered_symbols=_adopted_symbols(raw.get("state_dir")),
+        rebalance_retry_seconds=float(raw.get("rebalance_retry_seconds", 900.0)),
+        rebalance_max_retries=int(raw.get("rebalance_max_retries", 6)),
     )

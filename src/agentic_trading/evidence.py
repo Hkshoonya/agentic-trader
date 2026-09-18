@@ -29,7 +29,9 @@ def load_series(
 ) -> dict[str, list[Bar]]:
     """Every whitelisted symbol that has a usable bar file, in config order."""
     directory = Path(config.history_path or "data/bars")
-    wanted = [s.upper() for s in (symbols or config.symbol_whitelist)]
+    # The effective universe: the evidence gate must price the book that
+    # actually trades, including whatever the scout has adopted.
+    wanted = [s.upper() for s in (symbols or config.effective_whitelist)]
     series: dict[str, list[Bar]] = {}
     for symbol in wanted:
         path = directory / f"{bar_stem(symbol)}_{interval}.jsonl"
@@ -63,7 +65,7 @@ def build_report(
     if not series:
         raise RuntimeError(
             f"no bar files under {config.history_path or 'data/bars'} for "
-            f"{len(list(config.symbol_whitelist))} whitelisted symbols"
+            f"{len(list(config.effective_whitelist))} whitelisted symbols"
         )
     if per_order_pct is None:
         per_order_pct = _effective_per_order_pct(config)

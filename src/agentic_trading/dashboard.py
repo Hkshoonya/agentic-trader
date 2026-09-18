@@ -97,6 +97,46 @@ def _proposals_view(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _universe_view(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """The symbol scout's last pass, trimmed for the console.
+
+    Read straight from ``universe.json``: the scout already writes plain-language
+    reasons per candidate, so the console only has to choose what to show.
+    """
+    if not payload:
+        return {"enabled": False, "rows": [], "adopted": [], "added": [], "dropped": [],
+                "notes": [], "as_of": "", "cycles": 0, "failures": 0, "last_error": ""}
+    report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    for item in (report.get("candidates") or [])[:12]:
+        if not isinstance(item, dict) or not item.get("symbol"):
+            continue
+        rows.append(
+            {
+                "symbol": str(item.get("symbol")),
+                "admitted": bool(item.get("admitted")),
+                "vote": item.get("vote"),
+                "median_dollar_volume": item.get("median_dollar_volume"),
+                "spread_bps": item.get("spread_bps"),
+                "reason": str(item.get("reason") or ""),
+            }
+        )
+    changes = payload.get("changes") or []
+    last = changes[-1] if changes and isinstance(changes[-1], dict) else {}
+    return {
+        "enabled": True,
+        "adopted": [str(symbol) for symbol in (payload.get("adopted") or [])],
+        "added": [str(symbol) for symbol in (last.get("added") or [])],
+        "dropped": [str(symbol) for symbol in (last.get("dropped") or [])],
+        "as_of": str(payload.get("as_of") or ""),
+        "cycles": payload.get("cycles", 0),
+        "failures": payload.get("failures", 0),
+        "last_error": str(payload.get("last_error") or "")[:160],
+        "notes": [str(note) for note in (report.get("notes") or [])][:3],
+        "rows": rows,
+    }
+
+
 def _parse_stamp(value: str) -> Optional[datetime]:
     try:
         stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -800,7 +840,11 @@ class DashboardState:
             "configured_session_policy": self.config.session_policy,
             "next_open": next_session_open(now).isoformat(),
             "strategy": self.config.strategy,
-            "symbols": sorted(self.config.symbol_whitelist),
+            # Everything the agent may actually trade: the operator's list plus
+            # whatever the symbol scout has adopted. The core list is published
+            # separately so the console can say which is which.
+            "symbols": sorted(self.config.effective_whitelist),
+            "core_symbols": sorted(self.config.symbol_whitelist),
             "quote_source": self.config.quote_source,
             "autonomy": self.config.autonomy,
             # Whether the daemon is actually armed to submit real orders (it
@@ -877,6 +921,9 @@ class DashboardState:
             "candidate_summary": self._candidate_summary(),
             "proposals": _proposals_view(
                 _read_json(self.state_dir / "proposals.json")
+            ),
+            "universe": _universe_view(
+                _read_json(self.state_dir / "universe.json")
             ),
             "evidence": _evidence_view(
                 _read_json(self.state_dir / "strategy_evidence.json"),

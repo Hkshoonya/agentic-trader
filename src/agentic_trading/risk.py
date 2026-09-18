@@ -216,11 +216,32 @@ class RiskGuard:
     ) -> GuardDecision:
         self._roll_day_if_needed()
         notional = intent.resolved_notional()
+        side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
+        symbol = intent.symbol.upper()
 
         if self._kill_switch:
             return self._deny(notional, "kill_switch")
 
-        symbol = intent.symbol.upper()
+        # Closing a position is risk-reducing, so it is measured against the
+        # position — never against the entry budget. A held name is always
+        # sellable even if the universe moved on without it, and the per-order
+        # and per-day caps below exist to bound *opening* exposure. Refusing an
+        # exit because the position grew past the entry cap, or because the
+        # day's notional was already spent, is how a book gets stranded.
+        if side is Side.SELL:
+            held_qty = Decimal(str(snapshot.held.get(symbol, Decimal("0"))))
+            if held_qty <= 0:
+                return self._deny(notional, "would_short")
+            if symbol not in self.whitelist and snapshot.positions_read_failed:
+                # No verified position book and no whitelist entry: the sell
+                # cannot be confirmed as a reduction, so it fails closed.
+                return self._deny(notional, "positions_read_failed")
+            if intent.quantity is not None:
+                qty = Decimal(str(intent.quantity))
+                if qty > held_qty:
+                    return self._deny(notional, "oversell")
+            return self._allow(notional)
+
         if symbol not in self.whitelist:
             return self._deny(notional, "symbol_not_whitelisted")
 
@@ -233,7 +254,6 @@ class RiskGuard:
         if self._daily_notional + notional > daily_cap:
             return self._deny(notional, "over_daily_notional")
 
-        side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
         if side is Side.BUY:
             if snapshot.positions_read_failed:
                 return self._deny(notional, "positions_read_failed")
@@ -259,15 +279,6 @@ class RiskGuard:
                     return self._deny(
                         notional, f"correlation_unknown: {sorted(unknown)}"
                     )
-        elif side is Side.SELL:
-            held_qty = Decimal(str(snapshot.held.get(symbol, Decimal("0"))))
-            if held_qty <= 0:
-                return self._deny(notional, "would_short")
-            if intent.quantity is not None:
-                qty = Decimal(str(intent.quantity))
-                if qty > held_qty:
-                    return self._deny(notional, "oversell")
-            # positions_read_failed: close only if held confirms symbol (checked above)
         else:
             return self._deny(notional, "unknown_side")
 
@@ -275,7 +286,11 @@ class RiskGuard:
 
     def record_accepted(self, intent: OrderIntent) -> None:
         self._roll_day_if_needed()
-        self._daily_notional += intent.resolved_notional()
+        # Only opening exposure spends the day's budget. A sell returns capital
+        # and must never consume the budget the next entry needs.
+        side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
+        if side is Side.BUY:
+            self._daily_notional += intent.resolved_notional()
 
     def update_equity(self, equity: Decimal) -> None:
         self._roll_day_if_needed()

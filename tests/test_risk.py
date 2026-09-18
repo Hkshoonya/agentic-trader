@@ -366,5 +366,87 @@ class JournalEmptyIterTests(unittest.TestCase):
             self.assertEqual(list(j.iter_today()), [])
 
 
+class ExitIsNeverBlockedByTheEntryBudgetTests(unittest.TestCase):
+    """A position must always be closable, whatever the entry caps say.
+
+    The per-order and per-day caps exist to bound *opening* exposure. Applying
+    them to a close strands the book: the position was sized under a cap that
+    has since moved (a promotion, a smaller account ceiling, a released
+    small-account floor), or the day's budget was already spent by entries.
+    """
+
+    def _guard(self, **overrides):
+        values = dict(
+            mode="shadow",
+            whitelist=frozenset({"SPY"}),
+            max_order_pct=Decimal("0.01"),
+            daily_notional_pct=Decimal("0.02"),
+            daily_loss_pct=Decimal("0.03"),
+            max_open_positions=1,
+            baseline_equity=Decimal("100"),
+            current_equity=Decimal("100"),
+        )
+        values.update(overrides)
+        return RiskGuard(**values)
+
+    def test_a_position_worth_more_than_the_cap_can_still_be_sold(self):
+        # $5 held against a 1% ($1) cap: the entry rule would refuse this as an
+        # order, and the exit must not.
+        guard = self._guard()
+        snap = PortfolioSnapshot(open_positions=1, held={"SPY": Decimal("5")})
+        close = guard.evaluate(
+            intent(side=Side.SELL, symbol="SPY", notional="5", decision_id="c"),
+            snap,
+        )
+        self.assertTrue(close.allowed, close.reason)
+
+    def test_a_sell_does_not_spend_the_days_notional_budget(self):
+        entry_size = Decimal("1")
+        guard = self._guard()
+        snap = PortfolioSnapshot(open_positions=1, held={"SPY": Decimal("1")})
+        entry = intent(symbol="SPY", notional=str(entry_size), decision_id="e")
+        close = intent(side=Side.SELL, symbol="SPY", notional="1", decision_id="c")
+        self.assertTrue(guard.evaluate(entry, PortfolioSnapshot(0, {})).allowed)
+        guard.record_accepted(entry)
+        self.assertTrue(guard.evaluate(close, snap).allowed)
+        guard.record_accepted(close)
+        self.assertEqual(guard._daily_notional, entry_size)
+
+    def test_a_held_symbol_dropped_from_the_universe_is_still_sellable(self):
+        guard = self._guard(whitelist=frozenset({"QQQ"}))
+        snap = PortfolioSnapshot(open_positions=1, held={"SPY": Decimal("1")})
+        close = guard.evaluate(
+            intent(side=Side.SELL, symbol="SPY", notional="1", decision_id="c"),
+            snap,
+        )
+        self.assertTrue(close.allowed, close.reason)
+
+    def test_a_sell_with_no_verified_book_fails_closed(self):
+        guard = self._guard(whitelist=frozenset({"QQQ"}))
+        snap = PortfolioSnapshot(
+            open_positions=0, held={}, positions_read_failed=True
+        )
+        close = guard.evaluate(
+            intent(side=Side.SELL, symbol="SPY", notional="1", decision_id="c"),
+            snap,
+        )
+        self.assertFalse(close.allowed)
+
+    def test_oversell_is_still_refused(self):
+        guard = self._guard()
+        snap = PortfolioSnapshot(open_positions=1, held={"SPY": Decimal("0.5")})
+        close = guard.evaluate(
+            intent(
+                side=Side.SELL,
+                symbol="SPY",
+                quantity="0.75",
+                ref_price="100",
+                decision_id="c",
+            ),
+            snap,
+        )
+        self.assertFalse(close.allowed)
+
+
 if __name__ == "__main__":
     unittest.main()

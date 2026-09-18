@@ -221,7 +221,12 @@ def merge_records(
 
 
 def write_records(path: Path | str, records: Iterable[dict[str, Any]]) -> None:
-    text = "\n".join(json.dumps(record) for record in records) + "\n"
+    # Compact, matching ``history.save_bars``. The bar files are committed data,
+    # and a sync that rewrites every line with different spacing turns a
+    # two-bar append into a four-thousand-line diff.
+    text = "\n".join(
+        json.dumps(record, separators=(",", ":")) for record in records
+    ) + "\n"
     jsonio.write_text(path, text)
 
 
@@ -405,7 +410,10 @@ def sync_history(
     directory = Path(config.history_path) if config.history_path else None
     if directory is None:
         return [], ["no history_path configured"]
-    wanted = list(symbols if symbols is not None else config.symbol_whitelist)
+    # The effective universe: a symbol the scout adopted needs its bars kept
+    # current exactly like the operator's own, or the self-check fails on it and
+    # the book disarms itself.
+    wanted = list(symbols if symbols is not None else config.effective_whitelist)
     fetch_crypto = crypto_fetch or fetch_crypto_records
 
     results: list[SyncResult] = []

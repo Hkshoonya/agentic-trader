@@ -30,7 +30,15 @@ class FleetTests(unittest.TestCase):
         names = {agent.name for agent in FLEET}
         self.assertEqual(
             names,
-            {"data", "research", "strategy", "execution", "evolution", "backcheck"},
+            {
+                "data",
+                "research",
+                "scout",
+                "strategy",
+                "execution",
+                "evolution",
+                "backcheck",
+            },
         )
 
     def test_the_evolution_agent_cannot_change_anything(self) -> None:

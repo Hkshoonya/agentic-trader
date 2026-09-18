@@ -30,6 +30,12 @@ _EXACT_CAPABILITY_MAP: dict[str, str] = {
     "get_crypto_positions": "get_crypto_positions",
     "get_crypto_orders": "get_crypto_orders",
     "get_pnl_trade_history": "get_trade_history",
+    # Discovery reads the market's own attention surfaces. All read-only, and
+    # all optional: the scout reports a missing mapping instead of guessing.
+    "get_watchlists": "get_watchlists",
+    "get_popular_watchlists": "get_popular_watchlists",
+    "get_watchlist_items": "get_watchlist_items",
+    "get_currency_pairs": "get_currency_pairs",
     "preview_crypto_order": "preview_crypto",
     "place_crypto_order": "place_crypto",
     "cancel_crypto_order": "cancel_crypto",

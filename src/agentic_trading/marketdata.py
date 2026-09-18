@@ -314,15 +314,18 @@ def is_crypto_pair(symbol: str) -> bool:
 
 def build_quote_feed(config: Config, broker: Broker) -> QuoteFeed:
     if config.quote_source == "mcp":
-        equity = sorted(s for s in config.symbol_whitelist if not is_crypto_pair(s))
-        crypto = sorted(s for s in config.symbol_whitelist if is_crypto_pair(s))
+        # The effective universe, not the config file's list: a symbol the scout
+        # adopted has to be quoted or the strategy can never price a trade in it.
+        universe = config.effective_whitelist
+        equity = sorted(s for s in universe if not is_crypto_pair(s))
+        crypto = sorted(s for s in universe if is_crypto_pair(s))
         feeds: list[QuoteFeed] = []
         if equity:
             feeds.append(McpQuoteFeed(broker, equity))
         if crypto:
             feeds.append(CryptoQuoteFeed(broker, crypto))
         if not feeds:
-            return McpQuoteFeed(broker, sorted(config.symbol_whitelist))
+            return McpQuoteFeed(broker, sorted(universe))
         return feeds[0] if len(feeds) == 1 else CompositeQuoteFeed(feeds)
     if config.quote_source == "file":
         return FileQuoteFeed(config.quotes_path)

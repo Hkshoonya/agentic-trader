@@ -266,12 +266,21 @@ class ShadowRuntimeTests(unittest.TestCase):
             rejections = [r for r in records if r.get("event") == "rejected"]
             self.assertTrue(rejections)
             reasons = [str(r.get("reason", "")) for r in rejections]
-            # The entry is unplaceable fractional premarket; any follow-up sell
-            # then has no shadow position to close.
+            # The entry is a fractional equity order premarket, which the broker
+            # will not take. It is deferred rather than spent — the rebalance is
+            # handed back for when the session opens — so the only *rejection*
+            # left is the follow-up sell, which has no shadow position to close.
             self.assertTrue(
-                any(reason.startswith("order_invalid") for reason in reasons), reasons
+                any(reason == "would_short" for reason in reasons), reasons
             )
-            self.assertTrue(any(reason == "would_short" for reason in reasons), reasons)
+            deferred = [r for r in records if r.get("event") == "decision_deferred"]
+            self.assertTrue(
+                any(
+                    r.get("reason") == "session_closed_for_equities"
+                    for r in deferred
+                ),
+                "the unplaceable fractional entry must be deferred, not placed",
+            )
 
 
 class StopBeforePlaceTests(unittest.TestCase):

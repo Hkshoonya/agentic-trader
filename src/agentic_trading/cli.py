@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -257,7 +258,9 @@ def build_strategy(
             )
         return LlmMultiAssetStrategy(
             client=client,
-            whitelist=config.symbol_whitelist,
+            # The effective list: a symbol the scout adopted is one this
+            # strategy may propose, exactly like the operator's own names.
+            whitelist=config.effective_whitelist,
             max_quote_age_seconds=config.max_quote_age_seconds,
         )
     if name == "trend_crypto":
@@ -270,14 +273,20 @@ def build_strategy(
         )
         # Pass the broker form (BTC-USD) so emitted intents pass the RiskGuard
         # whitelist; the strategy maps to the bar-file name (BTCUSD) internally.
+        #
+        # The effective universe is passed whole — equities included. The
+        # evidence gate has always graded this book with the equities in it
+        # (``evidence.load_series`` reads the same universe), so a strategy that
+        # only ever looked at the crypto half was trading a book nobody priced.
+        # The runtime keeps equities inside the regular session, where a
+        # fractional order is both placeable and exitable.
         symbols = [
             symbol.upper()
-            for symbol in sorted(config.symbol_whitelist)
-            if "-" in symbol or symbol.upper().endswith("USD")
+            for symbol in sorted(config.effective_whitelist)
         ]
         if not symbols:
             raise ValueError(
-                "trend_crypto needs crypto pairs in symbol_whitelist, e.g. BTC-USD"
+                "trend_crypto needs symbols in symbol_whitelist, e.g. BTC-USD"
             )
         return TrendCryptoStrategy(
             bar_dir=bar_dir,
@@ -318,6 +327,13 @@ def cmd_run(
             duration_seconds=duration_seconds,
             once=once,
             force_shadow=dry_run,
+            # The scout may change the universe while the daemon runs, and a
+            # strategy built for one symbol list cannot price another.
+            strategy_factory=(
+                (lambda cfg: build_strategy(cfg, strategy_name))
+                if strategy is None
+                else None
+            ),
         )
     else:
         run_loop(
@@ -382,7 +398,7 @@ def cmd_probe(config_path: str, *, out_path: Optional[str] = None) -> int:
             report["account_error"] = str(exc)
 
     try:
-        symbols = sorted(config.symbol_whitelist)[:20]
+        symbols = sorted(config.effective_whitelist)[:20]
         report["quotes_request"] = symbols
         report["quotes"] = broker.get_quotes(symbols)
     except Exception as exc:  # noqa: BLE001
@@ -401,6 +417,69 @@ def cmd_probe(config_path: str, *, out_path: Optional[str] = None) -> int:
         f"\nwrote {destination} (contains account data; keep it out of git)",
         file=sys.stderr,
     )
+    return 0
+
+
+def cmd_discover(config_path: str, *, dry_run: bool = False) -> int:
+    """Run the symbol scout once and print what it decided, in plain words.
+
+    ``--dry-run`` grades against a throwaway copy of the scout's state, so an
+    operator can ask "what would you do?" without changing what the book may
+    trade. Without it, the answer is written and the running daemon picks the
+    change up on its next cycle.
+    """
+    from agentic_trading import discovery
+
+    config = load_config(config_path)
+    temporary: Optional[tempfile.TemporaryDirectory] = None
+    if dry_run:
+        temporary = tempfile.TemporaryDirectory()
+        state = Path(temporary.name) / "state"
+        state.mkdir(parents=True)
+        source = Path(config.state_dir) / "universe.json"
+        if source.is_file():
+            (state / "universe.json").write_text(
+                source.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        config = replace(config, state_dir=state)
+    try:
+        broker, _ = build_broker(config)
+        if not config.discovery_enabled:
+            print(
+                "discovery is off in this config; set discovery_enabled = true "
+                "to let the scout choose symbols"
+            )
+        report = discovery.rebalance(config, broker, held=())
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
+
+    adopted = report.get("adopted") or []
+    print(f"tradeable now ({len(config.symbol_whitelist | frozenset(adopted))}):"
+          f" {', '.join(sorted(config.symbol_whitelist | frozenset(adopted)))}")
+    if adopted:
+        print(f"scout's picks: {', '.join(sorted(adopted))}")
+    for label, key in (("added", "added"), ("dropped", "dropped")):
+        values = report.get(key) or []
+        if values:
+            print(f"{label}: {', '.join(sorted(values))}")
+    held_back = report.get("held_back") or []
+    if held_back:
+        print(
+            "kept only because the book still holds it: "
+            f"{', '.join(sorted(held_back))}"
+        )
+    candidates = sorted(
+        report.get("candidates") or [], key=lambda row: (not row.get("admitted"), row["symbol"])
+    )
+    print(f"\ngraded {len(candidates)} candidates:")
+    for row in candidates:
+        mark = "*" if row.get("action") in ("admit", "keep") else " "
+        print(f" {mark} {row['symbol']:<10} {row.get('reason', '')}")
+    for note in report.get("notes") or []:
+        print(f"   note: {note}")
+    if dry_run:
+        print("\n(dry run — nothing was changed)")
     return 0
 
 
@@ -961,6 +1040,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     agents_p.add_argument("--config", required=True)
 
+    discover_p = sub.add_parser(
+        "discover",
+        help="Run the symbol scout now: grade the market and adopt or drop picks",
+    )
+    discover_p.add_argument("--config", required=True)
+    discover_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Grade and explain, but change nothing",
+    )
+
     llm_p = sub.add_parser(
         "llm-check",
         help="Smoke-test the configured model backends (no trading state touched)",
@@ -1042,6 +1132,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"(confidence {item['confidence']}, {item['status']})"
             )
         return 0
+    if args.command == "discover":
+        return cmd_discover(args.config, dry_run=args.dry_run)
     if args.command == "agents":
         from agentic_trading.agents import load_roster
 

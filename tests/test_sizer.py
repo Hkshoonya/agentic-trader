@@ -299,12 +299,38 @@ class ProportionalSizingTests(unittest.TestCase):
         assert sized is not None
         self.assertEqual(sized.resolved_notional(), Decimal("5.00"))
 
-    def test_a_weight_too_small_to_place_is_refused(self) -> None:
-        """$50 and a 0.33 weight cannot reach the $1 minimum — and must not pretend."""
+    def test_a_weight_too_small_to_place_is_placed_at_the_minimum(self) -> None:
+        """A scaled order under the minimum is no order, so the minimum wins.
+
+        This reversed an earlier decision. Refusing was defensible in isolation
+        — $50 × 2.04% × 0.33 really is $0.34 — but on a small account every
+        weight is below 1, so the rule refused *the whole book*: at 00:00 UTC on
+        2026-09-18 the live daemon's only daily rebalance was thrown away this
+        way, with the per-order cap already raised for the express purpose of
+        clearing Robinhood's $1.00 minimum.
+
+        The minimum is not a licence to trade bigger: the order lands on $1.02,
+        never above the unweighted ceiling, and a ceiling that cannot clear the
+        minimum still refuses (the next test).
+        """
         sized = size_intent(
             self._intent(Decimal("0.33")),
             equity=Decimal("50"),
             max_order_pct=Decimal("0.0204"),
+            proportional=True,
+        )
+        self.assertIsNotNone(sized, "the book would never trade at this weight")
+        assert sized is not None
+        notional = sized.resolved_notional()
+        self.assertGreaterEqual(notional, Decimal("1.00"))
+        self.assertLessEqual(notional, Decimal("1.02"))
+
+    def test_the_minimum_never_exceeds_the_unweighted_ceiling(self) -> None:
+        """The floor is bounded by the operator's ceiling, not by the minimum."""
+        sized = size_intent(
+            self._intent(Decimal("0.33")),
+            equity=Decimal("50"),
+            max_order_pct=Decimal("0.009"),  # $0.45 ceiling
             proportional=True,
         )
         self.assertIsNone(sized)

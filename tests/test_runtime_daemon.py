@@ -447,7 +447,15 @@ class DaemonLiveTests(unittest.TestCase):
                 validate(tool_schema(tools, "place_equity_order"), args), []
             )
 
-    def test_fractional_order_outside_regular_hours_is_refused(self) -> None:
+    def test_fractional_order_outside_regular_hours_is_deferred_not_spent(self) -> None:
+        """A fractional equity order cannot be placed premarket — and is not lost.
+
+        Robinhood refuses fractional equity orders outside regular hours, so
+        09:00 premarket is simply not a moment this order can exist. The
+        runtime now says that instead of rejecting it: the decision is *deferred*
+        and handed back, so the same rebalance can be placed when the session
+        opens. What matters either way is that it never reaches the broker.
+        """
         tools = load_tools()
         client = FakeMcpClient(tools)
         broker = Broker(client, tools)
@@ -465,13 +473,20 @@ class DaemonLiveTests(unittest.TestCase):
                     _StubFeed([_quote()]),
                     session="premarket",
                 )
-            rejected = [r for r in _records(config) if r.get("event") == "rejected"]
+            records = _records(config)
+            deferred = [
+                r for r in records if r.get("event") == "decision_deferred"
+            ]
             self.assertTrue(
                 any(
-                    str(r["reason"]).startswith("order_invalid: fractional")
-                    for r in rejected
+                    r.get("reason") == "session_closed_for_equities"
+                    for r in deferred
                 ),
-                rejected,
+                deferred,
+            )
+            self.assertFalse(
+                any(r.get("would_place") is True for r in records),
+                "a deferred decision must not look placeable",
             )
             self.assertEqual(client.calls_named("place_equity_order"), [])
 

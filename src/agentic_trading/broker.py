@@ -45,6 +45,10 @@ _LIST_KEYS = (
     "items",
     "equity_positions",
     "data",
+    # Discovery surfaces nest their rows one level deeper than the trading
+    # tools do (``data.lists``, ``data.watchlists``, ``data.items``).
+    "lists",
+    "watchlists",
 )
 
 _SYMBOL_KEYS = ("symbol", "instrument_symbol", "ticker")
@@ -215,6 +219,32 @@ class Broker:
         return self._call(
             "get_tradability",
             {"account_number": account, "symbols": [s.upper() for s in symbols]},
+        )
+
+    # -- discovery surfaces ----------------------------------------------
+    #
+    # Read-only lists of what the market is paying attention to. They are the
+    # scout's raw material: a curated list is Robinhood's own answer to "what is
+    # moving", which beats a list of tickers somebody typed once.
+
+    def get_watchlists(self) -> list[dict[str, Any]]:
+        """The user's own lists plus every curated list they follow."""
+        return _first_list(self._call("get_watchlists", {}))
+
+    def get_popular_watchlists(self) -> list[dict[str, Any]]:
+        """Robinhood-curated lists (trending, movers, most popular, crypto)."""
+        return _first_list(self._call("get_popular_watchlists", {}))
+
+    def get_watchlist_items(self, list_id: str) -> list[dict[str, Any]]:
+        """The symbols on one list. Crypto items come back as bare codes."""
+        if not list_id:
+            raise ValueError("list_id required")
+        return _first_list(self._call("get_watchlist_items", {"list_id": list_id}))
+
+    def get_currency_pairs(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Robinhood-supported crypto pairs, with per-pair tradability."""
+        return _first_list(
+            self._call("get_currency_pairs", {"limit": max(1, min(700, int(limit)))})
         )
 
     def get_historicals(
