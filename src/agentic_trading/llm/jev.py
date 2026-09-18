@@ -33,6 +33,15 @@ from agentic_trading.llm.regime import REGIMES, RegimeGate, RegimeView
 DEFAULT_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_MODEL = "jev-latest"
 API_KEY_ENV = "TYPESAFE_API_KEY"
+# Names a person may reasonably guess. Checked in order; the one used is logged,
+# never its value. `apikey_...` pasted into the wrong variable is what prompted
+# this — the code should be forgiving of a near-miss name, not of a missing key.
+API_KEY_ENV_ALIASES = (
+    "TYPESAFE_API_KEY",
+    "TYPESAFE_AI_API_KEY",
+    "TYPESAFE_KEY",
+    "JEV_API_KEY",
+)
 BASE_URL_ENV = "TYPESAFE_BASE_URL"
 MODEL_ENV = "TYPESAFE_MODEL"
 
@@ -259,6 +268,15 @@ class JevRegimeGate(RegimeGate):
         return [views[symbol] for symbol in due if symbol in views]
 
 
+def configured_api_key() -> tuple[Optional[str], str]:
+    """``(key, env_name)`` from the first alias that is set."""
+    for name in API_KEY_ENV_ALIASES:
+        value = os.environ.get(name)
+        if value:
+            return value, name
+    return None, ""
+
+
 def build_jev_gate(
     *,
     state_path: Any = None,
@@ -271,7 +289,9 @@ def build_jev_gate(
     from agentic_trading.llm.client import load_dotenv
 
     load_dotenv()
-    key = api_key if api_key is not None else os.environ.get(API_KEY_ENV)
+    key = api_key
+    if key is None:
+        key, _ = configured_api_key()
     if not key:
         return None
     client = JevClient(

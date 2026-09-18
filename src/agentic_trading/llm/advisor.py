@@ -81,7 +81,14 @@ def build_regime_gate(
 
     if not advisor_enabled():
         return None
-    if os.environ.get("AGENTIC_REGIME_BACKEND", "").strip().lower() == "jev":
+    # `AGENTIC_LLM_REGIME_BACKEND` is a natural guess and was typed by hand once
+    # already; accept it rather than making the operator read the source.
+    backend = (
+        os.environ.get("AGENTIC_REGIME_BACKEND")
+        or os.environ.get("AGENTIC_LLM_REGIME_BACKEND")
+        or ""
+    ).strip().lower()
+    if backend == "jev":
         from agentic_trading.llm.jev import build_jev_gate
 
         gate = build_jev_gate(state_path=state_path)

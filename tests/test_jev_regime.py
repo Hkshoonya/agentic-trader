@@ -13,6 +13,7 @@ service is down.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -271,3 +272,116 @@ class SelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AliasTests(unittest.TestCase):
+    """A near-miss variable name must not leave the key invisible.
+
+    A key was pasted into `AGENTIC_LLM_REGIME_BACKEND` — a switch, misspelled —
+    and the daemon saw nothing. Forgiving the *name* is right; forgiving a
+    *missing* key is not, so the aliases are explicit and the one used is logged.
+    """
+
+    def tearDown(self) -> None:
+        from agentic_trading.llm.jev import API_KEY_ENV_ALIASES
+
+        for name in API_KEY_ENV_ALIASES:
+            os.environ.pop(name, None)
+
+    def test_the_documented_name_wins(self) -> None:
+        from agentic_trading.llm.jev import configured_api_key
+
+        os.environ["TYPESAFE_API_KEY"] = "primary"
+        os.environ["JEV_API_KEY"] = "secondary"
+        key, name = configured_api_key()
+        self.assertEqual((key, name), ("primary", "TYPESAFE_API_KEY"))
+
+    def test_the_plausible_guesses_are_accepted(self) -> None:
+        from agentic_trading.llm.jev import configured_api_key
+
+        for alias in ("TYPESAFE_AI_API_KEY", "TYPESAFE_KEY", "JEV_API_KEY"):
+            for other in ("TYPESAFE_AI_API_KEY", "TYPESAFE_KEY", "JEV_API_KEY"):
+                os.environ.pop(other, None)
+            os.environ[alias] = "sk-x"
+            key, name = configured_api_key()
+            self.assertEqual((key, name), ("sk-x", alias))
+
+    def test_no_key_means_no_gate(self) -> None:
+        from agentic_trading.llm.jev import build_jev_gate
+
+        for name in ("TYPESAFE_API_KEY", "TYPESAFE_AI_API_KEY", "TYPESAFE_KEY", "JEV_API_KEY"):
+            os.environ.pop(name, None)
+        with mock.patch.dict("os.environ", {"AGENTIC_SKIP_DOTENV": "1"}, clear=False):
+            self.assertIsNone(build_jev_gate())
+
+    def test_the_misspelled_backend_switch_is_honoured(self) -> None:
+        from agentic_trading.llm.advisor import build_regime_gate
+
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "AGENTIC_LLM_ADVISOR": "1",
+                "AGENTIC_LLM_REGIME_BACKEND": "jev",
+                "TYPESAFE_API_KEY": "sk-live",
+                "AGENTIC_SKIP_DOTENV": "1",
+            },
+            clear=False,
+        ):
+            os.environ.pop("AGENTIC_REGIME_BACKEND", None)
+            gate = build_regime_gate()
+        self.assertIsInstance(gate, JevRegimeGate)
+
+
+class CheckCommandTests(unittest.TestCase):
+    """`agentic-trading llm-check` answers "is my key working?" in one line."""
+
+    def test_it_reports_an_unconfigured_backend_and_how_to_fix(self) -> None:
+        from agentic_trading.llm.check import format_results
+
+        text = format_results(
+            [
+                {
+                    "name": "TypeSafe Jev (regime classifier)",
+                    "configured": False,
+                    "detail": "TYPESAFE_API_KEY is NOT SET",
+                    "how_to_fix": "add a line to .env: export TYPESAFE_API_KEY=...",
+                }
+            ]
+        )
+        self.assertIn("NOT CONFIGURED", text)
+        self.assertIn("how_to_fix" if False else "export TYPESAFE_API_KEY", text)
+
+    def test_it_reports_a_working_backend_with_latency_and_views(self) -> None:
+        from agentic_trading.llm.check import format_results
+
+        text = format_results(
+            [
+                {
+                    "name": "TypeSafe Jev (regime classifier)",
+                    "configured": True,
+                    "ok": True,
+                    "model": "jev-latest",
+                    "latency_seconds": 1.45,
+                    "views": {"SPY": {"regime": "trend_up", "confidence": 0.99}},
+                }
+            ]
+        )
+        self.assertIn("OK", text)
+        self.assertIn("jev-latest", text)
+        self.assertIn("SPY trend_up 0.99", text)
+
+    def test_a_failure_is_reported_not_raised(self) -> None:
+        from agentic_trading.llm.check import format_results
+
+        text = format_results(
+            [
+                {
+                    "name": "chat model (entry veto + regime)",
+                    "configured": True,
+                    "ok": False,
+                    "detail": "AuthenticationError: bad key",
+                }
+            ]
+        )
+        self.assertIn("FAILED", text)
+        self.assertIn("bad key", text)

@@ -949,6 +949,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     promote_p.add_argument("stage", choices=["shadow", "probation", "live"])
     promote_p.add_argument("--config", required=True)
 
+    llm_p = sub.add_parser(
+        "llm-check",
+        help="Smoke-test the configured model backends (no trading state touched)",
+    )
+    llm_p.add_argument("--config", required=False)
+
     dash_p = sub.add_parser(
         "dashboard", help="Serve the animated read-only operator console"
     )
@@ -1005,6 +1011,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if args.command == "promote":
         return cmd_promote(args.config, args.stage)
+    if args.command == "llm-check":
+        from agentic_trading.llm.check import format_results, run_checks
+
+        results = run_checks()
+        print(format_results(results))
+        failed = [
+            result
+            for result in results
+            if result.get("configured") and not result.get("ok")
+        ]
+        return 1 if failed else 0
     if args.command == "dashboard":
         return cmd_dashboard(
             args.config, host=args.host, port=args.port, open_browser=args.open_browser

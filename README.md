@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-622%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-629%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -82,7 +82,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 622 tests
+.venv/bin/python -m pytest tests -q                     # 629 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -198,17 +198,35 @@ answers all of them **in a single call**, so the whole 16-symbol book is
 classified with a probability for every regime instead of one parsed label per
 round trip.
 
+Put both lines in `.env` (the daemon loads it) or export them in the shell:
+
 ```bash
-export TYPESAFE_API_KEY=...        # console.typesafe.ai/settings/keys
-export AGENTIC_REGIME_BACKEND=jev  # default: the chat model
+TYPESAFE_API_KEY=...        # console.typesafe.ai/settings/keys
+AGENTIC_REGIME_BACKEND=jev  # default: the chat model
 ```
+
+Then confirm it, with a command that touches nothing:
+
+```console
+$ agentic-trading llm-check
+OK              chat model (entry veto + regime): deepseek-flash in 1.86s · said: 'OK'
+OK              TypeSafe Jev (regime classifier): jev-latest in 1.45s · SPY trend_up 0.99
+```
+
+It exits non-zero if a *configured* backend fails, prints `NOT CONFIGURED` with
+the fix when a key is missing, and never prints a key. `TYPESAFE_AI_API_KEY`,
+`TYPESAFE_KEY` and `JEV_API_KEY` are accepted as aliases, and
+`AGENTIC_LLM_REGIME_BACKEND` is accepted as a spelling of the switch — a key was
+pasted into the wrong variable once, and a name should not decide whether the
+agent can see its own credentials.
 
 Optional: `TYPESAFE_BASE_URL`, `TYPESAFE_MODEL` (default `jev-latest`).
 
 What changes, concretely:
 
-- one request per refresh instead of one per symbol (the chat-model gate made
-  368 calls on a quiet day here);
+- one request per refresh instead of one per symbol: measured live on this
+  book, **all 16 symbols in one call, 1.85 s**, against 368 chat-model calls on
+  a quiet day;
 - every view carries its distribution, so the console can show
   `chop 0.65, trend_down 0.20, trend_up 0.10, panic 0.05` instead of a label;
 - the same rule as before still decides: a regime blocks entries only when the
@@ -261,7 +279,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   622 tests, including the honesty tests for the rig
+tests/                   629 tests, including the honesty tests for the rig
 ```
 
 ## Operations
