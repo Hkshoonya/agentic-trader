@@ -52,6 +52,10 @@ max_open_positions = 1
 # size. 0 disables the rule and the agent simply refuses to trade until the
 # account grows.
 small_account_max_order_pct = "0"
+# "flat" gives every entry the same dollars. "proportional" scales the budget by
+# the strategy's inverse-volatility weight (1.0 = a 20%-vol asset), which on this
+# universe earns the same bps per trade with roughly a third of the drawdown.
+sizing = "flat"
 equity_refresh_ticks = 30
 equity_refresh_seconds = 60
 timezone = "local"

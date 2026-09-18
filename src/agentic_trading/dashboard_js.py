@@ -214,8 +214,11 @@ async function refresh() {
       + num(Number(risk.effective_order_pct || 0) * 100) + '% ($'
       + num(Number(risk.effective_order_notional || 0)) + ' per order)'
       + (risk.drawdown_at_effective_pct !== null && risk.drawdown_at_effective_pct !== undefined
-        ? ' — the walk-forward measured ' + num(Number(risk.drawdown_at_effective_pct))
+        ? ' — the walk-forward measures ' + num(Number(risk.drawdown_at_effective_pct))
           + '% max drawdown at that size'
+          + (Number(risk.drawdown_at_effective_pct) <= 15
+            ? ' (inside the 15% gate)'
+            : ' (above the 15% gate — this is the trade you authorised)')
         : '')
       + '. It drops back to ' + num(Number(risk.max_order_pct || 0) * 100)
       + '% at $' + num(Number(risk.equity_needed || 0)) + ' equity.</div>'

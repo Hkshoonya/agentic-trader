@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-592%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-601%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -82,7 +82,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 592 tests
+.venv/bin/python -m pytest tests -q                     # 601 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -102,6 +102,37 @@ Nothing else decides how much the agent may do on its own.
 Both are session environment, not configuration files, so a copy of this repo on
 someone else's machine starts inert whatever the state files say. A promoted but
 unarmed agent journals `live_gate_blocked` with the order it *would* have sent.
+
+## How positions are sized
+
+Two things decide the dollars in an order: the operator's ceiling, and the
+strategy's own inverse-volatility weight.
+
+The rule computes a weight per symbol — `min(1.5, 20% / σ)` — so a 9%-vol ETF
+weighs `1.50` and a 60%-vol pair weighs `0.33`. With `sizing = "proportional"`
+the per-order budget is scaled by that weight (capped at 1.0, so a quiet asset
+never exceeds your ceiling); with `sizing = "flat"` every entry gets the same
+dollars and the weight only decides *which* symbols get slots.
+
+That difference is not cosmetic. Same rule, same 495 trades, same +856 bps per
+trade, measured on 11 years of the current universe:
+
+| sizing | per order | max drawdown | $50 → |
+|---|---|---|---|
+| flat | 0.92% | 13.0% | $72 |
+| **proportional** | 0.92% | **4.1%** | $58 |
+| flat | 2.04% | 23.9% | $106 |
+| **proportional** | 2.04% | **9.0%** | $67 |
+
+Flat sizing hands a 60%-vol pair the same dollars as a 14%-vol ETF, so the risk
+concentrates in exactly the instruments the weighting meant to hold back. The
+proportional book gives up some upside (fewer dollars in the wild names) and
+takes roughly a third of the drawdown for it — which is why it is what the
+shipped Windows template uses.
+
+```
+sizing = "proportional"   # or "flat" for the older behaviour
+```
 
 ## Trading a small account
 
@@ -128,18 +159,16 @@ small_account_mode  engaged=true  sufficient=true
   $1.00 minimum + rounding margin / $50 = 2.04%
 ```
 
-It is a deliberate trade, not a free upgrade: 2.04% per order is above the size
-the walk-forward supports, and the console says what that costs — the measured
-max drawdown at that size comes straight from the evidence report's size
-frontier (`/api/summary` → `risk.drawdown_at_effective_pct`), reproduced here for
-the current sample:
+The console says what that size costs, from the evidence report's own size
+frontier (`/api/summary` → `risk.drawdown_at_effective_pct`). Measured on the
+current 16-symbol universe with **proportional sizing**:
 
 | per order | max drawdown | $50 → | inside the 15% gate |
 |---|---|---|---|
-| 0.50% | 7.7% | $61 | yes |
-| 1.00% | 14.0% | $74 | yes |
-| **2.04%** (small-account mode) | **23.5%** | $105 | **no** |
-| 3.00% | 30.5% | $144 | no |
+| 0.50% | 2.2% | $54 | yes |
+| 0.92% (evidence size) | 4.1% | $58 | yes |
+| **2.04%** (small-account mode) | **8.8%** | $67 | **yes** |
+| 3.00% | 13.1% | $77 | yes |
 
 The daily notional ceiling still applies, and on $50 it binds first: 3.68% of $50
 is $1.84, so **one $1.02 entry a day**, not four. Small-account mode buys you a
@@ -191,7 +220,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   592 tests, including the honesty tests for the rig
+tests/                   601 tests, including the honesty tests for the rig
 ```
 
 ## Operations

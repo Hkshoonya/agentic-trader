@@ -224,6 +224,7 @@ def simulate(
     governor: float = 0.0,
     throttle_min: float = 0.25,
     inverse_vol: bool = False,
+    proportional: bool = False,
 ) -> tuple[list[dict[str, Any]], list[float]]:
     """Trade the fixed rule forward through one window; return round-trip trades.
 
@@ -352,7 +353,13 @@ def simulate(
         for symbol, weight in targets.items():
             if symbol in held or symbol not in prices:
                 continue
-            if inverse_vol:
+            if proportional:
+                # The operator's per-order budget is the ceiling; the strategy's
+                # inverse-vol weight decides how much of it this symbol takes.
+                # A 60%-vol pair gets a third of what a 20%-vol name gets, which
+                # is the point of weighting them in the first place.
+                notional = book_equity * per_order_pct * min(1.0, weight)
+            elif inverse_vol:
                 if weight_total <= 0:
                     continue
                 # ``weight`` is ``min(MAX_LEVERAGE, TARGET_VOL / sigma)``, so
@@ -463,6 +470,7 @@ def walk_forward(
     governor: float = 0.0,
     throttle_min: float = 0.25,
     inverse_vol: bool = False,
+    proportional: bool = False,
     max_gross: float = 1.0,
 ) -> WalkForwardResult:
     """Cut the pooled timeline into consecutive windows and trade each one."""
@@ -492,6 +500,7 @@ def walk_forward(
             governor=governor,
             throttle_min=throttle_min,
             inverse_vol=inverse_vol,
+            proportional=proportional,
             max_gross=max_gross,
         )
         equity_curve.extend(fold_curve[1:])
@@ -548,6 +557,7 @@ def build_evidence(
     costs: Optional[CostModel] = None,
     starting_cash: float = 50.0,
     grid: tuple[float, ...] = GATE_SIZE_GRID,
+    proportional: bool = False,
 ) -> dict[str, Any]:
     """The three numbers the promotion gate is allowed to see, in one report.
 
@@ -566,6 +576,7 @@ def build_evidence(
             costs=costs,
             starting_cash=starting_cash,
             max_positions=max_positions,
+            proportional=proportional,
             **kwargs,
         )
 
@@ -574,6 +585,7 @@ def build_evidence(
     report: dict[str, Any] = {
         "hypotheses": 1,
         "alpha": 0.05,
+        "sizing": "proportional" if proportional else "flat",
         "drawdown_ceiling_pct": DRAWDOWN_CEILING_PCT,
         "max_positions": max_positions,
         "folds": folds,

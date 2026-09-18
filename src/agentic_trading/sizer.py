@@ -58,8 +58,15 @@ def size_intent(
     equity: Decimal,
     max_order_pct: Decimal,
     min_notional: Decimal = Decimal("1.00"),
+    proportional: bool = False,
 ) -> Optional[OrderIntent]:
     """Return an intent whose notional fits the per-order cap.
+
+    ``max_order_pct`` is the ceiling. With ``proportional=True`` and a weight on
+    the intent, the ceiling is scaled by that weight — a 60%-vol pair gets a
+    third of the budget a 20%-vol name gets, which is what the strategy asked
+    for. The weight is capped at 1.0: a quiet asset does not get *more* than the
+    operator's per-order ceiling for being quiet.
 
     Returns ``None`` when the intent cannot be sized to at least
     ``min_notional``, which means the account is too small for this trade.
@@ -67,7 +74,15 @@ def size_intent(
     if equity <= 0:
         return None
 
-    cap = equity * Decimal(str(max_order_pct))
+    budget = Decimal(str(max_order_pct))
+    if proportional and intent.weight is not None:
+        try:
+            weight = Decimal(str(intent.weight))
+        except (ArithmeticError, TypeError, ValueError):
+            weight = Decimal("1")
+        if weight > 0:
+            budget = budget * min(Decimal("1"), weight)
+    cap = equity * budget
     notional = intent.resolved_notional()
     side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
 

@@ -74,6 +74,9 @@ def build_report(
         folds=folds,
         grid=grid,
         starting_cash=50.0,
+        # Grade the sizing the account actually trades. Quoting a flat-sizing
+        # frontier next to a proportional book would misstate the drawdown.
+        proportional=getattr(config, "sizing", "flat") == "proportional",
     )
     report["generated_at"] = datetime.now(timezone.utc).isoformat()
     report["history_path"] = str(config.history_path or "data/bars")

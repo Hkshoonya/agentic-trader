@@ -410,6 +410,42 @@ class SmallAccountConfigTests(unittest.TestCase):
         readme = (REPO / "README.md").read_text(encoding="utf-8")
         self.assertIn("## Trading a small account", readme)
         self.assertIn("small_account_max_order_pct", readme)
-        # The honest cost, and the real capacity: one entry a day at $50.
-        self.assertIn("23.5%", readme)
+        # The honest cost of the raised cap, and the real capacity at $50.
+        self.assertIn("8.8%", readme)
         self.assertIn("one $1.02 entry a day", readme)
+        # And the sizing rule that produced those numbers.
+        self.assertIn("## How positions are sized", readme)
+        self.assertIn('sizing = "proportional"', readme)
+
+
+class SizingModeTests(unittest.TestCase):
+    """The sizing mode has to be the same one the evidence is priced with."""
+
+    def test_the_shipped_configs_agree_with_the_docs(self) -> None:
+        import tomllib
+
+        with open(PACKAGE / "agentic.windows.toml", "rb") as handle:
+            windows = tomllib.load(handle)
+        with open(REPO / "config" / "agentic.example.toml", "rb") as handle:
+            example = tomllib.load(handle)
+        self.assertEqual(windows["sizing"], "proportional")
+        # A fresh clone keeps the old behaviour until the operator opts in.
+        self.assertEqual(example["sizing"], "flat")
+
+    def test_the_evidence_is_priced_with_the_configured_sizing(self) -> None:
+        """A flat-sizing frontier beside a proportional book would misstate risk."""
+        source = (REPO / "src" / "agentic_trading" / "evidence.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('getattr(config, "sizing", "flat") == "proportional"', source)
+        report = (REPO / "src" / "agentic_trading" / "walkforward.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"sizing": "proportional" if proportional else "flat"', report)
+
+    def test_the_strategy_attaches_its_weight_to_entries(self) -> None:
+        source = (
+            REPO / "src" / "agentic_trading" / "strategies" / "trend_crypto.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("weight=weights.get(new_symbol)", source)
+        self.assertIn("def target_weights(", source)

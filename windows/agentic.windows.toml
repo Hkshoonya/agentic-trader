@@ -36,6 +36,9 @@ daily_loss_pct = "0.03"
 # drop back the moment the account is big enough. 0 = off, which means refusing
 # to trade rather than trading bigger than the evidence supports.
 small_account_max_order_pct = "0.025"
+# Size entries in proportion to each symbol's inverse-volatility weight, so a
+# 60%-vol pair takes a third of the dollars a 20%-vol name takes.
+sizing = "proportional"
 min_order_notional = "1.00"
 max_open_positions = 4
 max_correlated_positions = 2

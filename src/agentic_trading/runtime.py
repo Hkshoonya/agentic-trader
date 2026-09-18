@@ -462,11 +462,18 @@ class _Loop:
             ),
         }
         if engaged:
-            # Attach the measured cost of the bigger size, from the same report
-            # the promotion gate reads. "You authorised 2.04%" is half a
-            # sentence; "...and the walk-forward measures 23.5% drawdown there"
-            # is the other half.
-            event["drawdown_at_effective_pct"] = self._evidence_drawdown(effective)
+            # Quote the measured cost of this size from the same report the
+            # promotion gate reads. "You authorised 2.04%" is half a sentence;
+            # "...and the walk-forward measures 8.8% drawdown there, against a
+            # 15% ceiling" is the other half.
+            measured = self._evidence_drawdown(effective)
+            event["drawdown_at_effective_pct"] = measured
+            if measured is not None:
+                event["reason"] = (
+                    f"{event['reason']}; the walk-forward measures "
+                    f"{measured:.2f}% max drawdown at this size, against a 15% "
+                    "ceiling"
+                )
         self.journal.append(event)
         return event
 
@@ -946,6 +953,7 @@ class _Loop:
                 equity=self.guard.current_equity,
                 max_order_pct=self.guard.max_order_pct,
                 min_notional=self.config.min_order_notional,
+                proportional=self.config.sizing == "proportional",
             )
             if sized is None:
                 self._journal_rejected(intent, "below_min_notional", Decimal("0"))

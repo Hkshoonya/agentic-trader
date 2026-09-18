@@ -142,10 +142,18 @@ class TrendCryptoStrategy:
 
     # -- signal ----------------------------------------------------------
 
-    def target_symbols(self, *, as_of: Optional[datetime] = None) -> list[str]:
-        """Symbols with a majority-positive trend vote, ranked by conviction."""
+    def target_weights(
+        self, *, as_of: Optional[datetime] = None
+    ) -> dict[str, Decimal]:
+        """The book the rule wants: ``{bar-file symbol: inverse-vol weight}``.
+
+        The weight is ``min(MAX_LEVERAGE, TARGET_VOL / sigma)`` — 1.0 for a
+        20%-vol asset, lower for wilder ones. Ranking uses vote × weight, and the
+        runtime sizes each entry by the weight, so a 60%-vol pair ends up with a
+        third of the dollars a 20%-vol name gets instead of the same amount.
+        """
         cutoff = as_of or datetime.now(timezone.utc)
-        scored: list[tuple[float, str]] = []
+        scored: list[tuple[float, str, float]] = []
         for symbol, bars in self.history.items():
             closes = [float(b.close) for b in bars if b.start < cutoff]
             if len(closes) < max(HORIZONS) + 2:
@@ -160,9 +168,18 @@ class TrendCryptoStrategy:
                 continue
             sigma = self._ewma_vol(closes)
             size = min(MAX_LEVERAGE, TARGET_VOL / sigma) if sigma else 0.0
-            scored.append((vote * size, symbol))
+            if size <= 0:
+                continue
+            scored.append((vote * size, symbol, size))
         scored.sort(reverse=True)
-        return [symbol for _, symbol in scored[: self.max_positions]]
+        return {
+            symbol: Decimal(str(round(size, 6)))
+            for _, symbol, size in scored[: self.max_positions]
+        }
+
+    def target_symbols(self, *, as_of: Optional[datetime] = None) -> list[str]:
+        """Symbols with a majority-positive trend vote, ranked by conviction."""
+        return list(self.target_weights(as_of=as_of))
 
     @staticmethod
     def _ewma_vol(closes: list[float]) -> Optional[float]:
@@ -233,6 +250,7 @@ class TrendCryptoStrategy:
                 )
             )
         entering = sorted(targets - self._held)
+        weights = self.target_weights(as_of=stamp)
         for new_symbol in entering:
             price = quote.get("ask") if new_symbol == symbol else None
             bars = self.history.get(new_symbol) or []
@@ -249,6 +267,9 @@ class TrendCryptoStrategy:
                     ref_price=Decimal(str(price)),
                     reason="trend_entry",
                     created_at=stamp,
+                    # The same weight the ranking used, so the dollars match the
+                    # conviction instead of every symbol getting the same size.
+                    weight=weights.get(new_symbol),
                 )
             )
 

@@ -24,6 +24,13 @@ class OrderIntent:
     quantity: Optional[Decimal] = None
     ref_price: Optional[Decimal] = None
     metadata: Optional[dict[str, Any]] = None
+    # The strategy's inverse-volatility weight for this intent, when it has one:
+    # 1.0 means "a 20%-vol asset", 0.33 a 60%-vol one. Sizing uses it to keep
+    # positions in the proportions the strategy asked for instead of handing
+    # every symbol the same dollars. None means "size me flat", which is what
+    # every strategy did before this existed. Declared last so existing
+    # positional construction keeps its meaning.
+    weight: Optional[Decimal] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", self.symbol.upper())

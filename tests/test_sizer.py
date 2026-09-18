@@ -214,3 +214,121 @@ class SmallAccountFloorTests(unittest.TestCase):
         self.assertIsNotNone(sized)
         assert sized is not None
         self.assertGreaterEqual(sized.resolved_notional(), D("1"))
+
+
+class ProportionalSizingTests(unittest.TestCase):
+    """Size in proportion to the strategy's weighting, not flat dollars.
+
+    The strategy computes an inverse-volatility weight — 1.50 for a 9%-vol ETF,
+    0.33 for a 60%-vol pair — and the runtime used to ignore it, giving every
+    symbol the same dollars. On the current universe that flat book carried
+    23.9% max drawdown at 2.04% per order; the proportional book carries 9.0%
+    for the same trades and the same bps per trade.
+    """
+
+    def _intent(self, weight):
+        from decimal import Decimal as D
+
+        from agentic_trading.types import OrderIntent, Side
+
+        return OrderIntent(
+            decision_id="w",
+            symbol="SPY",
+            side=Side.BUY,
+            quantity=D("1"),
+            ref_price=D("100"),
+            reason="trend_entry",
+            created_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+            weight=weight,
+        )
+
+    def test_flat_is_still_flat(self) -> None:
+        sized = size_intent(
+            self._intent(Decimal("0.33")),
+            equity=Decimal("100"),
+            max_order_pct=Decimal("0.05"),
+            proportional=False,
+        )
+        assert sized is not None
+        self.assertEqual(sized.resolved_notional(), Decimal("5.00"))
+
+    def test_a_wild_symbol_gets_a_smaller_share(self) -> None:
+        quiet = size_intent(
+            self._intent(Decimal("1.5")),
+            equity=Decimal("100"),
+            max_order_pct=Decimal("0.05"),
+            proportional=True,
+        )
+        wild = size_intent(
+            self._intent(Decimal("0.33")),
+            equity=Decimal("100"),
+            max_order_pct=Decimal("0.05"),
+            proportional=True,
+        )
+        assert quiet is not None and wild is not None
+        # 1.5 is capped at 1.0: quiet assets do not exceed the operator's ceiling.
+        self.assertEqual(quiet.resolved_notional(), Decimal("5.00"))
+        self.assertAlmostEqual(float(wild.resolved_notional()), 1.65, places=2)
+        self.assertLess(wild.resolved_notional(), quiet.resolved_notional())
+
+    def test_the_proportions_match_the_weights(self) -> None:
+        base = size_intent(
+            self._intent(Decimal("1.0")),
+            equity=Decimal("100"),
+            max_order_pct=Decimal("0.05"),
+            proportional=True,
+        )
+        third = size_intent(
+            self._intent(Decimal("0.33")),
+            equity=Decimal("100"),
+            max_order_pct=Decimal("0.05"),
+            proportional=True,
+        )
+        assert base is not None and third is not None
+        ratio = float(third.resolved_notional() / base.resolved_notional())
+        self.assertAlmostEqual(ratio, 0.33, places=2)
+
+    def test_no_weight_falls_back_to_flat(self) -> None:
+        """Strategies that predate weights keep their old sizing exactly."""
+        sized = size_intent(
+            self._intent(None),
+            equity=Decimal("100"),
+            max_order_pct=Decimal("0.05"),
+            proportional=True,
+        )
+        assert sized is not None
+        self.assertEqual(sized.resolved_notional(), Decimal("5.00"))
+
+    def test_a_weight_too_small_to_place_is_refused(self) -> None:
+        """$50 and a 0.33 weight cannot reach the $1 minimum — and must not pretend."""
+        sized = size_intent(
+            self._intent(Decimal("0.33")),
+            equity=Decimal("50"),
+            max_order_pct=Decimal("0.0204"),
+            proportional=True,
+        )
+        self.assertIsNone(sized)
+
+    def test_an_unreadable_weight_does_not_break_sizing(self) -> None:
+        from decimal import Decimal as D
+
+        from agentic_trading.types import OrderIntent, Side
+
+        intent = OrderIntent(
+            decision_id="bad",
+            symbol="SPY",
+            side=Side.BUY,
+            quantity=D("1"),
+            ref_price=D("100"),
+            reason="trend_entry",
+            created_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+            weight="not-a-number",  # type: ignore[arg-type]
+        )
+        sized = size_intent(
+            intent,
+            equity=Decimal("100"),
+            max_order_pct=Decimal("0.05"),
+            proportional=True,
+        )
+        assert sized is not None
+        self.assertEqual(sized.resolved_notional(), Decimal("5.00"))
