@@ -2130,7 +2130,7 @@ def run_daemon(
         cycle_seconds = 0.0
         fresh_total = 0
         decisions_base = loop.orders_today
-        from agentic_trading import account, discovery
+        from agentic_trading import account, discovery, selfimprove
 
         while not loop.should_stop():
             cycle_started = time.monotonic()
@@ -2287,13 +2287,35 @@ def run_daemon(
             # file, so a restart resumes the schedule rather than re-running the
             # pass or silently skipping one.
             discovery_worker = getattr(loop, "discovery_thread", None)
-            if (
+            discovery_due = (
                 not once
                 and config.discovery_enabled
                 and config.autonomy != "manual"
                 and not (discovery_worker and discovery_worker.is_alive())
                 and discovery.due_for_pass(loop.config)
-            ):
+            )
+            # Adoption widens what the book may hold to instruments the operator
+            # never named, so it needs the same per-session consent as every
+            # other self-directed change: a config file alone is policy, the
+            # switch is permission. The scout stays idle and the console is told
+            # why, rather than the book quietly following the market.
+            if discovery_due and not selfimprove.autonomy_enabled():
+                if not getattr(loop, "_discovery_hold_noted", False):
+                    loop._discovery_hold_noted = True
+                    journal.append(
+                        {
+                            "event": "discovery_held",
+                            "reason": "autonomy_switch_closed",
+                            "note": (
+                                "symbol discovery is enabled in the config, but "
+                                "this session has not allowed autonomy, so the "
+                                "book stays on the operator's list; set "
+                                "AGENTIC_ALLOW_AUTONOMY=1 to let the scout pick "
+                                "symbols"
+                            ),
+                        }
+                    )
+            elif discovery_due:
 
                 def _discover(_loop: _Loop = loop) -> None:
                     from agentic_trading import discovery as scout

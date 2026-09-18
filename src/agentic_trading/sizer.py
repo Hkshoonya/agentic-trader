@@ -68,6 +68,16 @@ def size_intent(
     for. The weight is capped at 1.0: a quiet asset does not get *more* than the
     operator's per-order ceiling for being quiet.
 
+    A **weighted** intent is read as "give me my share of the budget", not "buy
+    exactly this", so it is solved against the budget in both directions: down
+    when the share is larger than the ceiling, and up to the broker's minimum
+    when the share would be too small to place at all. That last case is not
+    hypothetical — on a small account every weight is below 1, and at 00:00 UTC
+    on 2026-09-18 it refused all five of the live book's entries: $1.02 of
+    ceiling times a 0.33 weight is $0.34, under Robinhood's $1.00 floor. An
+    unweighted intent is taken at its word, and one below the minimum is still
+    refused.
+
     Returns ``None`` when the intent cannot be sized to at least
     ``min_notional``, which means the account is too small for this trade.
     """
@@ -86,23 +96,6 @@ def size_intent(
             budget = budget * min(Decimal("1"), weight)
     cap = equity * budget
 
-    # A weight-scaled order that cannot clear the broker's minimum is not a
-    # smaller order, it is *no* order — and on a small account every symbol
-    # carries a weight below 1, so proportional sizing alone refuses the whole
-    # book. On 2026-09-18 five entries were refused exactly this way at 00:00
-    # UTC with the per-order cap already raised to clear the minimum: $1.02 × a
-    # 0.33 weight is $0.34, under Robinhood's $1.00 floor.
-    #
-    # So the floor wins, but only as far as the operator's own ceiling already
-    # allows: the order is placed at the minimum, never scaled *up* past it, and
-    # never above the unweighted per-order cap. When the account is too small
-    # even for that, this still returns ``None`` — the guard being honest.
-    floor = min_notional * (Decimal(1) + FLOOR_MARGIN)
-    if weighted and cap < floor:
-        unweighted = equity * Decimal(str(max_order_pct))
-        if unweighted >= min_notional:
-            cap = min(unweighted, floor)
-
     notional = intent.resolved_notional()
     side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
 
@@ -110,13 +103,30 @@ def size_intent(
     if side is Side.SELL:
         return intent if notional >= min_notional or intent.quantity is not None else None
 
-    if notional <= cap:
+    if intent.quantity is None or intent.ref_price is None:
+        # A dollar-denominated intent cannot be resized: it fits, or it does not.
+        return intent if min_notional <= notional <= cap else None
+
+    # The smallest order the broker will take, with the margin needed for a
+    # six-decimal quantity and a little price drift between decision and fill.
+    floor = min_notional * (Decimal(1) + FLOOR_MARGIN)
+    if weighted and cap < floor:
+        # The weighted share cannot clear the minimum on its own. The operator's
+        # ceiling is the authorisation to place the minimum instead — but only
+        # as far as that ceiling already reaches, never past it.
+        unweighted = equity * Decimal(str(max_order_pct))
+        if unweighted >= min_notional:
+            cap = min(unweighted, floor)
+
+    target: Optional[Decimal] = None
+    if notional > cap:
+        target = cap
+    elif weighted and notional < floor:
+        target = min(cap, floor)
+    if target is None:
         return intent if notional >= min_notional else None
 
-    if intent.quantity is None or intent.ref_price is None:
-        return None
-
-    resized = (cap / intent.ref_price).quantize(
+    resized = (target / intent.ref_price).quantize(
         QUANTITY_STEP, rounding=ROUND_DOWN
     )
     if resized <= 0:
