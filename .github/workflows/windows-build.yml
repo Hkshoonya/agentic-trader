@@ -7,7 +7,12 @@ run-name: Build the Windows app (${{ github.ref_name }})
 
 on:
   workflow_dispatch:
+  # Every pull request to the protected branch gets the same build and smoke
+  # test, so a contribution cannot merge on a green Linux-only run.
+  pull_request:
+    branches: [master]
   push:
+    branches: [master]
     tags:
       - "v*"
 

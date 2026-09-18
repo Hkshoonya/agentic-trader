@@ -1,0 +1,18 @@
+# Every path is owned by the maintainer, so a pull request cannot merge without
+# their review. Keep this list ahead of the files it protects: the rules are
+# read top-down, and the first match wins.
+
+*                       @Hkshoonya
+
+# Money-moving code, called out separately so a reviewer knows to look here.
+/src/agentic_trading/runtime.py      @Hkshoonya
+/src/agentic_trading/risk.py         @Hkshoonya
+/src/agentic_trading/orders.py       @Hkshoonya
+/src/agentic_trading/limits.py       @Hkshoonya
+/src/agentic_trading/promotion.py    @Hkshoonya
+/src/agentic_trading/evidence.py     @Hkshoonya
+/src/agentic_trading/walkforward.py  @Hkshoonya
+
+# The switches. A change here is a change to what can spend money.
+/config/                             @Hkshoonya
+/windows/agentic.windows.toml        @Hkshoonya

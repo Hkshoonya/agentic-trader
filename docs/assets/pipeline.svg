@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300"
+     role="img" aria-label="How the trading agent decides: quotes flow through the strategy, the risk guard and three gates, then reach the journal and the console.">
+  <title>How a decision is made</title>
+  <desc>Animated diagram: market data flows into the strategy, through the risk guard, then through the regime gate, the advisory veto and the size limits, before it is journalled. A pulse travels the path; the submission switch blinks while disarmed.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f1219"/>
+      <stop offset="100%" stop-color="#141a24"/>
+    </linearGradient>
+    <style>
+      .box { fill: #161b24; stroke: #2a3342; stroke-width: 1.5; rx: 10; }
+      .label { font: 600 13px -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #dfe6f1; }
+      .sub { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #8b97a8; }
+      .flow { stroke: #2a3342; stroke-width: 2; fill: none; }
+      .pulse { fill: #35d07f; }
+      .gate { stroke-dasharray: 4 4; }
+      /* The travelling decision: one dot per stage, staggered. */
+      .p1 { animation: travel1 6s linear infinite; }
+      .p2 { animation: travel2 6s linear infinite; }
+      .p3 { animation: travel3 6s linear infinite; }
+      .p4 { animation: travel4 6s linear infinite; }
+      @keyframes travel1 { 0%{opacity:0; transform:translateX(0)} 5%{opacity:1}
+        25%{opacity:1; transform:translateX(150px)} 30%{opacity:0; transform:translateX(150px)}
+        100%{opacity:0; transform:translateX(150px)} }
+      @keyframes travel2 { 0%{opacity:0; transform:translateX(150px)} 25%{opacity:0; transform:translateX(150px)}
+        30%{opacity:1} 50%{opacity:1; transform:translateX(300px)} 55%{opacity:0; transform:translateX(300px)}
+        100%{opacity:0; transform:translateX(300px)} }
+      @keyframes travel3 { 0%{opacity:0; transform:translateX(300px)} 50%{opacity:0; transform:translateX(300px)}
+        55%{opacity:1} 75%{opacity:1; transform:translateX(450px)} 80%{opacity:0; transform:translateX(450px)}
+        100%{opacity:0; transform:translateX(450px)} }
+      @keyframes travel4 { 0%{opacity:0; transform:translateX(450px)} 75%{opacity:0; transform:translateX(450px)}
+        80%{opacity:1} 98%{opacity:1; transform:translateX(600px)} 100%{opacity:0; transform:translateX(600px)} }
+      .blink { animation: blink 2.4s ease-in-out infinite; }
+      @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+      .armed-off { fill:#ff5f6d; }
+      @media (prefers-reduced-motion: reduce) {
+        .p1,.p2,.p3,.p4,.blink { animation: none; }
+      }
+    </style>
+  </defs>
+
+  <rect width="900" height="300" fill="url(#bg)"/>
+  <text x="24" y="34" class="label" style="font-size:15px">How a decision is made</text>
+  <text x="24" y="54" class="sub">nothing is sent to the broker unless every stage says yes, and the operator has armed it</text>
+
+  <!-- stages -->
+  <g>
+    <rect class="box" x="24" y="86" width="132" height="70"/>
+    <text x="38" y="112" class="label">Market data</text>
+    <text x="38" y="132" class="sub">16 symbols, 24/7</text>
+    <text x="38" y="148" class="sub">quotes + daily bars</text>
+  </g>
+  <g>
+    <rect class="box" x="174" y="86" width="132" height="70"/>
+    <text x="188" y="112" class="label">Strategy</text>
+    <text x="188" y="132" class="sub">trend vote, vol-scaled</text>
+    <text x="188" y="148" class="sub">1 rebalance / UTC day</text>
+  </g>
+  <g>
+    <rect class="box" x="324" y="86" width="132" height="70"/>
+    <text x="338" y="112" class="label">Risk guard</text>
+    <text x="338" y="132" class="sub">caps, whitelist, kill</text>
+    <text x="338" y="148" class="sub">daily loss, correlation</text>
+  </g>
+  <g>
+    <rect class="box gate" x="474" y="86" width="132" height="70"/>
+    <text x="488" y="112" class="label">Gates</text>
+    <text x="488" y="132" class="sub">regime · advisor veto</text>
+    <text x="488" y="148" class="sub">evidence age &amp; size</text>
+  </g>
+  <g>
+    <rect class="box" x="624" y="86" width="132" height="70"/>
+    <text x="638" y="112" class="label">Journal</text>
+    <text x="638" y="132" class="sub">every decision, with</text>
+    <text x="638" y="148" class="sub">its evidence grade</text>
+  </g>
+  <g>
+    <rect class="box" x="774" y="86" width="102" height="70"/>
+    <text x="788" y="112" class="label">Console</text>
+    <text x="788" y="132" class="sub">read-only</text>
+    <text x="788" y="148" class="sub">127.0.0.1</text>
+  </g>
+
+  <!-- flow -->
+  <path class="flow" d="M156 121 H174 M306 121 H324 M456 121 H474 M606 121 H624 M756 121 H774"/>
+  <g>
+    <circle class="pulse p1" cx="160" cy="121" r="4"/>
+    <circle class="pulse p2" cx="160" cy="121" r="4"/>
+    <circle class="pulse p3" cx="160" cy="121" r="4"/>
+    <circle class="pulse p4" cx="160" cy="121" r="4"/>
+  </g>
+
+  <!-- the switch -->
+  <g>
+    <rect x="474" y="196" width="292" height="64" rx="10" fill="#1b1418" stroke="#3a1f24" stroke-width="1.5"/>
+    <circle class="blink armed-off" cx="498" cy="228" r="5"/>
+    <text x="514" y="224" class="label">Order submission</text>
+    <text x="514" y="244" class="sub">DISARMED · needs AGENTIC_ALLOW_LIVE=1</text>
+  </g>
+  <path class="flow" d="M620 156 V196" stroke-dasharray="4 4"/>
+
+  <!-- annotations -->
+  <text x="24" y="228" class="sub">Every gate can only refuse. Nothing downstream can create a trade that the</text>
+  <text x="24" y="246" class="sub">strategy did not ask for, or make one larger than the evidence supports.</text>
+</svg>

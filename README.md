@@ -1,13 +1,180 @@
-# Agentic Robinhood trading (shadow-first)
+# Agentic Trader
 
-Two systems live in this repo:
+**An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
-1. **`paper_scalper.py`** — an offline, deterministic $50 paper-trading experiment over recorded quotes. Every trade and balance it produces is simulated; it makes no network calls and holds no credentials.
-2. **`agentic_trading`** — a shadow-first autonomous agent that talks to Robinhood's Trading MCP (`https://agent.robinhood.com/mcp/trading`): quotes → strategy → RiskGuard → decision journal, with optional live order placement behind two independent gates.
+[![tests](https://img.shields.io/badge/tests-559%20passing-35d07f)](#verify)
+[![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
+[![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
+[![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
+[![license](https://img.shields.io/badge/license-proprietary-8b97a8)](LICENSE)
 
-**Default is shadow mode.** Orders are simulated, reviewed, and journaled — never placed. There is no profit guarantee; an agentic account can lose all of its funds.
+<img src="docs/assets/pipeline.svg" alt="How a decision is made: market data, strategy, risk guard, gates, journal, console — with order submission blinking DISARMED" width="900">
 
-Python 3.10+ is required for the paper scalper (stdlib only). The agentic runtime requires Python 3.11+.
+---
+
+## What this is
+
+A self-hosted trading agent that reads Robinhood's Trading MCP for quotes and
+history, decides with a fixed, pre-registered trend rule, sizes positions from
+its own measured evidence, and refuses to trade when the evidence, the regime or
+the risk budget says no. It runs 24/7 (crypto included), keeps a full journal of
+every decision, grades each one, and promotes or demotes itself as the evidence
+changes.
+
+## What this is not
+
+- **Not a guaranteed money-maker.** The honest measured result on 11 years of the
+  current 16-symbol universe is a thin edge: **+856 bps expectancy per trade**,
+  495 trades, 5 of 6 walk-forward folds positive, p = 0.0005 — and at a
+  drawdown-compliant size that is roughly **$2/year on a $50 account**. Sized
+  larger, the same rule carries a ~30% drawdown. Both numbers are on the console.
+- **Not financial advice**, not a signal service, and not something to run with
+  money you cannot afford to lose.
+- **Not agentic in the "does whatever it likes" sense.** The LLM in this system
+  can only ever *refuse* a trade. It cannot invent one, size one, or extend a
+  hold.
+
+## 60-second overview
+
+```text
+quotes ─► strategy ─► risk guard ─► gates ─► journal ─► console (read-only)
+                                       │
+                                       └─► order submission  ◄── you arm this
+```
+
+1. **Strategy** — a fixed multi-horizon trend rule (50/100/200/252-bar votes),
+   rebalanced once per UTC day, sized inversely to volatility.
+2. **Risk guard** — per-order and daily notional caps, symbol whitelist, daily
+   loss limit, correlation clusters, kill switch.
+3. **Gates** — an LLM regime read (chop/panic blocks entries), an advisory veto,
+   and the evidence gate: a walk-forward report that must be fresh, and a book
+   that must fit inside the size its drawdown allows.
+4. **Journal** — every decision, accepted or rejected, with the reason and a
+   confidence grade for that specific order.
+5. **Console** — a read-only local dashboard: order table, live stream,
+   candidates, promotion gate, evidence, back-checks.
+6. **Order submission** — the only path to real money, and it is off until you
+   turn it on.
+
+## Quick start
+
+### Linux / macOS
+
+```bash
+git clone https://github.com/Hkshoonya/agentic-trader.git
+cd agentic-trader
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+cp config/agentic.example.toml config/agentic.toml     # edit paths and caps
+.venv/bin/agentic-trading auth    --config config/agentic.toml   # Robinhood OAuth
+.venv/bin/agentic-trading run     --config config/agentic.toml   # shadow, no orders
+.venv/bin/agentic-trading dashboard --config config/agentic.toml --open
+```
+
+### Windows (one click)
+
+Download `AgenticTrader-windows-x64.zip` from the latest
+[Actions run](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml),
+unzip anywhere writable, and run `AgenticTrader.exe`. It seeds its own workspace
+at `%LOCALAPPDATA%\AgenticTrader` and starts in shadow mode. Build it yourself
+with `windows\build.ps1` — see [windows/README.md](windows/README.md).
+
+### Try it without any credentials
+
+```bash
+.venv/bin/python -m pytest tests -q                     # 559 tests
+.venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
+.venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
+```
+
+`paper_scalper.py` is a separate, fully offline simulation over recorded SPY
+quotes: no network, no credentials, no broker.
+
+## <a name="the-two-switches"></a>The two switches
+
+Nothing else decides how much the agent may do on its own.
+
+| Switch | Default | What it allows | Where |
+|---|---|---|---|
+| Autonomy | **off** | the agent may promote/demote its own stage as evidence changes | `AGENTIC_ALLOW_AUTONOMY=1` |
+| Arm | **off** | real orders may be submitted to the broker | `AGENTIC_ALLOW_LIVE=1` (Windows app: type `ARM`) |
+
+Both are session environment, not configuration files, so a copy of this repo on
+someone else's machine starts inert whatever the state files say. A promoted but
+unarmed agent journals `live_gate_blocked` with the order it *would* have sent.
+
+## The console
+
+<img src="docs/assets/console.png" alt="The read-only console: account equity, promotion gate, market and order table with per-order confidence, candidates, live execution stream, agents on duty, walk-forward evidence" width="900">
+
+Read-only, stdlib-only, bound to `127.0.0.1`. It shows the order table with a
+confidence grade per order, what the rule wants to hold right now and what is
+blocking each name, the promotion gate's unmet requirements, the walk-forward
+evidence the current size is justified by, and a pulse badge that says
+`AGENT SILENT 47m` if the daemon ever stops sending events.
+
+## How it decides
+
+```mermaid
+flowchart LR
+  A[Quotes + daily bars] --> B[Trend vote<br/>50/100/200/252]
+  B -->|positive vote| C[Inverse-vol sizing]
+  C --> D{Risk guard<br/>caps · whitelist · loss · correlation}
+  D -->|allowed| E{Regime gate<br/>chop/panic blocks}
+  E -->|allowed| F{Advisor<br/>veto only}
+  F -->|allowed| G{Evidence gate<br/>fresh report · size fits drawdown}
+  G -->|allowed| H[Journal + console]
+  G -->|blocked| I[Rejected, with reason]
+  H --> J([Order submission]):::armed
+  classDef armed fill:#3a1f24,stroke:#ff5f6d,color:#ff5f6d;
+```
+
+Every arrow can only *remove* a trade. There is no path by which a gate, the
+model, or the dashboard creates one.
+
+## Repo layout
+
+```
+src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
+  runtime.py             the loop, the journal, self-evaluation, self-promotion
+  walkforward.py         the evidence rig: one fixed rule, out-of-sample folds
+  evidence.py            turns that into a report the console and gate read
+  confidence.py          per-order confidence, reporting only
+  llm/                   advisor + regime gate (both may only reduce risk)
+  rh_mcp/                Robinhood MCP client and OAuth
+windows/                 the one-click Windows app (launcher, spec, build)
+paper_scalper.py         offline SPY simulation, no network
+tests/                   559 tests, including the honesty tests for the rig
+```
+
+## Operations
+
+```bash
+systemctl --user status agentic-trading             # or: agentic-trading status
+agentic-trading selfcheck --config config/agentic.toml   # six back-checks
+agentic-trading walkforward --config config/agentic.toml # re-price the rule
+agentic-trading evolve --config config/agentic.toml      # search + assess
+```
+
+The daemon rebuilds its own evidence report when it is older than
+`evidence_refresh_days`, survives a network outage with backoff instead of
+crashing, and alerts the desktop if it stops for good. See
+[When the agent stops](#when-the-agent-stops).
+
+## Contributing, security, licence
+
+- **Security**: see [SECURITY.md](SECURITY.md). This repository is public; no
+  credentials, tokens, journals or live state are ever committed.
+- **Contributing**: see [CONTRIBUTING.md](CONTRIBUTING.md). `master` is
+  protected — changes arrive by pull request, and a review is required.
+- **Licence**: proprietary, all rights reserved — see [LICENSE](LICENSE).
+
+---
+
+## Deep dive
+
+The sections below are the original engineering notes: every phase, every gate,
+the exact order-construction rules, the arithmetic behind the risk budget, and
+the parts that are still unverified.
 
 ## Phase 0 — Agentic shadow foundation
 

@@ -1,0 +1,37 @@
+Copyright (c) 2026 DOM JARVIS. All rights reserved.
+
+PROPRIETARY — ALL RIGHTS RESERVED
+
+This repository is published so that the work can be read, reviewed and
+evaluated. Publication is not a grant of rights.
+
+You may:
+  - read, clone and run this software for your own personal, non-commercial
+    evaluation;
+  - quote short excerpts with clear attribution and a link to this repository.
+
+You may not, without prior written permission from the copyright holder:
+  - copy, modify, or create derivative works from the source code;
+  - redistribute, sublicense, or sell the software or any derivative of it;
+  - use it, or any part of it, to provide a commercial product or service;
+  - remove or alter this notice or any other copyright notice.
+
+Contributions are welcome only under the terms in CONTRIBUTING.md, which assign
+copyright in the contribution to the copyright holder.
+
+NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+TRADING RISK
+
+This software can place real orders in a real brokerage account when the
+operator arms it. Trading involves substantial risk of loss, including the loss
+of the entire account. Nothing in this repository is financial advice, and no
+result described here is a prediction of future performance. You are solely
+responsible for any orders placed by any copy of this software that you run.
