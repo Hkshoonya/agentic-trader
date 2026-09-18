@@ -160,3 +160,35 @@ class AssetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DocumentedCountTests(unittest.TestCase):
+    """A stale number on the front page is the thing readers check first.
+
+    The badge has been wrong twice: 559 while the suite was 570, then 570 while
+    it was 590. `tools/check_doc_counts.py` runs in CI and fails the build on a
+    mismatch; this pins the cheaper half — that the files agree with each other —
+    so a partial edit is caught without a full collection pass.
+    """
+
+    def test_every_documented_count_agrees(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "check_doc_counts", REPO / "tools" / "check_doc_counts.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        counts = {
+            count for values in module.claimed_counts().values() for count in values
+        }
+        self.assertEqual(
+            len(counts), 1, f"the documents disagree with each other: {counts}"
+        )
+
+    def test_the_guard_is_wired_into_ci(self) -> None:
+        workflow = (REPO / ".github" / "workflows" / "windows-build.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("tools/check_doc_counts.py", workflow)

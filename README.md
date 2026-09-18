@@ -2,7 +2,8 @@
 
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
-[![tests](https://img.shields.io/badge/tests-559%20passing-35d07f)](#verify)
+[![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
+[![tests](https://img.shields.io/badge/tests-592%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -81,7 +82,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 559 tests
+.venv/bin/python -m pytest tests -q                     # 592 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -190,7 +191,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   559 tests, including the honesty tests for the rig
+tests/                   592 tests, including the honesty tests for the rig
 ```
 
 ## Operations

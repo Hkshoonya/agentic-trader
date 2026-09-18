@@ -38,6 +38,10 @@ jobs:
           python -m pytest tests -q
           python -m PyInstaller --noconfirm --clean windows/AgenticTrader.spec
 
+      - name: Check the documented test count
+        shell: pwsh
+        run: python tools/check_doc_counts.py
+
       - name: Smoke-test the frozen build
         shell: pwsh
         run: |
