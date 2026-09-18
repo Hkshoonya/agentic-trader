@@ -965,3 +965,58 @@ class PulseTests(unittest.TestCase):
             summary = DashboardState(config).summary()
         self.assertIn("pulse", summary)
         self.assertIn("silent", summary["pulse"])
+
+
+class SizeFloorTests(unittest.TestCase):
+    """An account too small to trade its own size limit must say so.
+
+    On 2026-09-18 the agent sat in live mode refusing every entry with
+    `below_min_notional`: at $50 with a 0.92% ceiling the order is $0.46 and the
+    minimum is $1.00. The guard was right; the console was silent about it.
+    """
+
+    def _config(self, tmp: Path):
+        config = DashboardTests()._config(tmp)
+        Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+        Path(config.journal_dir).mkdir(parents=True, exist_ok=True)
+        return config
+
+    def test_it_reports_the_equity_that_would_fix_it(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            (tmp / "state" / "effective_limits.json").write_text(
+                _json.dumps({"max_order_pct": "0.00919975"})
+            )
+            (tmp / "state" / "risk_guard.json").write_text(
+                _json.dumps({"current_equity": "50"})
+            )
+            risk = DashboardState(config).summary()["risk"]
+        self.assertTrue(risk["too_small_to_trade"])
+        self.assertEqual(risk["order_at_ceiling"], "0.46")
+        self.assertEqual(risk["equity_needed"], "108.70")
+
+    def test_a_big_enough_account_is_not_flagged(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config(tmp)
+            (tmp / "state" / "effective_limits.json").write_text(
+                _json.dumps({"max_order_pct": "0.01"})
+            )
+            (tmp / "state" / "risk_guard.json").write_text(
+                _json.dumps({"current_equity": "250"})
+            )
+            risk = DashboardState(config).summary()["risk"]
+        self.assertFalse(risk["too_small_to_trade"])
+        self.assertEqual(risk["equity_needed"], "100.00")
+
+    def test_an_unknown_equity_is_not_flagged(self) -> None:
+        """No equity reading yet is not the same as too small."""
+        with tempfile.TemporaryDirectory() as tmp_name:
+            config = self._config(Path(tmp_name))
+            risk = DashboardState(config).summary()["risk"]
+        self.assertFalse(risk.get("too_small_to_trade", False))

@@ -657,3 +657,46 @@ class StartupResilienceTests(unittest.TestCase):
                     )
         # The original error, not UnboundLocalError about `workers`.
         self.assertIn("startup exploded", str(caught.exception))
+
+
+class StartupBannerTests(unittest.TestCase):
+    """`tail daemon.log` must show the present, not a crash from hours ago.
+
+    The daemon writes to the journal when healthy and to stdout only when
+    something goes wrong, so without a banner the log's last lines are the last
+    failure — which reads as "it is still broken" long after it was fixed.
+    """
+
+    def test_the_daemon_announces_its_start_with_a_timestamp(self) -> None:
+        from agentic_trading import runtime as module
+        from unittest import mock
+        import io
+        import contextlib
+
+        tools = load_tools()
+        client = FakeMcpClient(tools)
+        broker = Broker(client, tools)
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config_path = _write_config(
+                tmp, mode="shadow", extra=['autonomy = "manual"']
+            )
+            config = load_config(config_path)
+            buffer = io.StringIO()
+            with mock.patch(
+                "agentic_trading.runtime._start_with_retry"
+            ), contextlib.redirect_stdout(buffer):
+                module.run_daemon(
+                    config,
+                    broker=broker,
+                    strategy=FixtureStrategy(),
+                    tools=tools,
+                    once=True,
+                    sleep=lambda _: None,
+                )
+        output = buffer.getvalue()
+        self.assertIn("starting:", output)
+        self.assertIn("mode=", output)
+        self.assertIn("started:", output)
+        # A banner without a date cannot answer "when did this last start?".
+        self.assertRegex(output, r"\[\d{4}-\d{2}-\d{2}T")

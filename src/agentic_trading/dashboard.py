@@ -474,6 +474,38 @@ class DashboardState:
             "generated_at": payload.get("generated_at", ""),
         }
 
+    def _size_floor(self, limits: dict[str, Any], risk: dict[str, Any]) -> dict[str, Any]:
+        """Whether the account is big enough to trade the size the evidence allows.
+
+        On 2026-09-18 the agent sat in live mode refusing every entry with
+        `below_min_notional`: at $50 and a 0.92% ceiling the order is $0.46, and
+        the broker minimum is $1.00. That is the guard working — it refuses
+        rather than oversizing — but five identical rejects are a poor way to
+        learn "your account is too small". Say it once, with the number that
+        would fix it.
+        """
+        from decimal import Decimal
+
+        try:
+            cap = Decimal(str(limits.get("max_order_pct") or self.config.max_order_pct))
+        except (ArithmeticError, TypeError, ValueError):
+            return {}
+        try:
+            equity = Decimal(str(risk.get("current_equity") or "0"))
+        except (ArithmeticError, TypeError, ValueError):
+            equity = Decimal("0")
+        minimum = Decimal(str(self.config.min_order_notional))
+        if cap <= 0:
+            return {}
+        needed = (minimum / cap).quantize(Decimal("0.01"))
+        order = (equity * cap).quantize(Decimal("0.01"))
+        return {
+            "min_order_notional": str(minimum),
+            "order_at_ceiling": str(order),
+            "equity_needed": str(needed),
+            "too_small_to_trade": bool(equity > 0 and equity < needed),
+        }
+
     def pulse(self) -> dict[str, Any]:
         """How long since the agent last did anything.
 
@@ -604,6 +636,7 @@ class DashboardState:
             },
             "risk": {
                 "max_order_pct": limits.get("max_order_pct", str(self.config.max_order_pct)),
+                **self._size_floor(limits, risk),
                 "daily_notional_pct": limits.get(
                     "daily_notional_pct", str(self.config.daily_notional_pct)
                 ),

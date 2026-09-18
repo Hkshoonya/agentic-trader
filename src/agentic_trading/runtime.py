@@ -1408,6 +1408,16 @@ def run_daemon(
     if tools is not None:
         write_tools_snapshot(tools, config.tools_snapshot_path)
 
+    # One line on stdout per start. The daemon writes to the journal when it is
+    # healthy and to stdout only when something goes wrong, so without a banner
+    # `tail daemon.log` shows a crash from hours ago and reads like the present.
+    print(
+        f"[{datetime.now(timezone.utc).isoformat()}] starting: "
+        f"mode={effective_mode(config)} strategy={config.strategy} "
+        f"symbols={len(config.symbol_whitelist)} pid={os.getpid()}",
+        flush=True,
+    )
+
     loop = _Loop(config, broker, strategy, stop_event, force_shadow=force_shadow)
     if feed is None:
         feed = build_quote_feed(config, broker)
@@ -1433,6 +1443,12 @@ def run_daemon(
     workers: list[threading.Thread] = []
     try:
         _start_with_retry(loop, sleep=sleep)
+        print(
+            f"[{datetime.now(timezone.utc).isoformat()}] started: "
+            f"stage={loop.stage} equity={loop.guard.current_equity} "
+            f"per_order_cap={loop.guard.max_order_pct}",
+            flush=True,
+        )
         last_equity_at = time.monotonic()
         journal = loop.journal
         last_stats_at = time.monotonic()

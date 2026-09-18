@@ -199,9 +199,20 @@ async function refresh() {
       ? '<div class="sub">next target '
         + num(Number(risk.target_max_order_pct) * 100) + '% per order</div>'
       : '');
+  // Call out the case where the account cannot afford the size the evidence
+  // allows: the guard refuses every entry, and five identical rejects are a bad
+  // way to learn that.
+  const tooSmall = risk.too_small_to_trade
+    ? '<div class="row"><span>account</span><b class="sell">too small to trade</b></div>'
+      + '<div class="sub">a ' + num(Number(risk.min_order_notional || 0))
+      + ' minimum order is ' + num(Number(risk.order_at_ceiling || 0))
+      + ' at the current ' + num(Number(risk.max_order_pct || 0) * 100) + '% ceiling — '
+      + 'entries are refused until equity reaches $'
+      + num(Number(risk.equity_needed || 0)) + '</div>'
+    : '';
   document.getElementById('gate').innerHTML = (a.eligible === undefined)
-    ? budget + '<div class="sub">no assessment yet — run: agentic-trading evolve</div>'
-    : budget
+    ? budget + tooSmall + '<div class="sub">no assessment yet — run: agentic-trading evolve</div>'
+    : budget + tooSmall
       + '<div class="row"><span>eligible</span><b>' + (a.eligible ? 'YES' : 'not yet') + '</b></div>'
       + '<div class="row"><span>score</span><b>' + num(a.score, 3) + '</b></div>'
       + '<div class="row"><span>OOS trades</span><b>' + (ev.oos_trades ?? '—') + '</b></div>'
