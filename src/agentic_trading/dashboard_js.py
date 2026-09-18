@@ -132,14 +132,180 @@ function renderCandidates(data) {
 }
 
 
-async function refresh() {
-  let summary, curve, feed, orders;
+// Decisions per day: what the agent actually produced, refusals included. The
+// old chart drew accepted orders only, so a system that had never filled an
+// order showed an empty canvas all day and read as "stuck".
+function drawActivity(data) {
+  const canvas = document.getElementById('chart');
+  if (!canvas) return;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * ratio;
+  canvas.height = canvas.clientHeight * ratio;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const days = (data && data.days) || [];
+  if (!days.length) {
+    ctx.fillStyle = '#7b8a9e'; ctx.font = '12px monospace';
+    ctx.fillText('no decisions recorded yet', 12, h / 2);
+    return;
+  }
+  const totals = days.map(d => (d.accepted || 0) + (d.placed || 0)
+    + (d.rejected || 0) + (d.failed || 0));
+  const max = Math.max(...totals, 1);
+  const plotH = h - 46;
+  const slot = (w - 24) / days.length;
+  const barW = Math.max(4, Math.min(30, slot - 6));
+  days.forEach((d, i) => {
+    const x = 12 + i * slot;
+    const refused = (d.rejected || 0) + (d.failed || 0);
+    const done = (d.accepted || 0) + (d.placed || 0);
+    const refusedH = (refused / max) * plotH;
+    const doneH = (done / max) * plotH;
+    if (refused) {
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = '#ff5f6d';
+      ctx.fillRect(x, h - 24 - refusedH, barW, Math.max(1, refusedH));
+      ctx.globalAlpha = 1;
+    }
+    if (done) {
+      ctx.fillStyle = '#35d07f';
+      ctx.fillRect(x, h - 24 - refusedH - doneH, barW, Math.max(1, doneH));
+    }
+    ctx.fillStyle = '#5c6775';
+    ctx.font = '9px monospace';
+    ctx.fillText(d.day.slice(5), x, h - 10);
+    if (totals[i]) {
+      ctx.fillStyle = '#8b97a8';
+      ctx.fillText(String(totals[i]), x, h - 26 - refusedH - doneH - 2);
+    }
+  });
+  ctx.strokeStyle = '#2a3342';
+  ctx.beginPath(); ctx.moveTo(0, h - 24); ctx.lineTo(w, h - 24); ctx.stroke();
+  const note = document.getElementById('activity-note');
+  if (note && (data.reasons || []).length) {
+    note.textContent = 'most common refusals: '
+      + data.reasons.map(r => r[0] + ' ×' + r[1]).join(', ');
+  }
+}
+
+// What sizing up costs: the evidence report's measured drawdown per per-order
+// size, with the size in force marked and the 15% gate drawn across it.
+function drawFrontier(data) {
+  const canvas = document.getElementById('frontier');
+  if (!canvas) return;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * ratio;
+  canvas.height = canvas.clientHeight * ratio;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const points = ((data && data.points) || []).filter(p => p.per_order_pct);
+  if (!points.length) {
+    ctx.fillStyle = '#7b8a9e'; ctx.font = '12px monospace';
+    ctx.fillText('no evidence report yet — run: agentic-trading walkforward', 12, h / 2);
+    return;
+  }
+  const ceiling = Number((data && data.ceiling_pct) || 15);
+  const maxY = Math.max(ceiling * 1.3, ...points.map(p => Number(p.max_drawdown_pct || 0)));
+  const maxX = Math.max(...points.map(p => Number(p.per_order_pct || 0)));
+  const left = 42, bottom = h - 30, top = 14, right = w - 16;
+  const px = (pct) => left + (Number(pct) / maxX) * (right - left);
+  const py = (dd) => bottom - (Number(dd) / maxY) * (bottom - top);
+  ctx.strokeStyle = '#2a3342';
+  ctx.beginPath(); ctx.moveTo(left, top); ctx.lineTo(left, bottom); ctx.lineTo(right, bottom); ctx.stroke();
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = '#f0b429';
+  ctx.beginPath(); ctx.moveTo(left, py(ceiling)); ctx.lineTo(right, py(ceiling)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#f0b429'; ctx.font = '9px monospace';
+  ctx.fillText(ceiling + '% gate', left + 4, py(ceiling) - 4);
+  points.forEach(p => {
+    const x = px(p.per_order_pct), y = py(p.max_drawdown_pct);
+    ctx.fillStyle = p.inside_ceiling ? '#35d07f' : '#ff5f6d';
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#8b97a8'; ctx.font = '9px monospace';
+    ctx.fillText((Number(p.per_order_pct) * 100).toFixed(2) + '%', x - 12, bottom + 12);
+    ctx.fillText(Number(p.max_drawdown_pct).toFixed(1) + '%', x - 10, y - 7);
+  });
+  const live = Number((data && data.live_pct) || 0);
+  if (live > 0) {
+    ctx.strokeStyle = '#dfe6f1';
+    ctx.beginPath(); ctx.moveTo(px(live), top); ctx.lineTo(px(live), bottom); ctx.stroke();
+    ctx.fillStyle = '#dfe6f1';
+    ctx.fillText('live ' + (live * 100).toFixed(2) + '%', px(live) + 4, top + 10);
+  }
+  const costs = (data && data.costs) || {};
+  const note = document.getElementById('frontier-note');
+  if (note && costs.break_even_per_side_bps !== undefined) {
+    note.textContent = 'break-even cost ' + num(Number(costs.break_even_per_side_bps))
+      + ' bps/side vs ' + num(Number(costs.assumed_per_side_bps)) + ' assumed';
+  }
+}
+
+// The arm control. It is *not shown* unless the system has reached the state
+// that justifies it — promotion gate pass, stage at least probation, and a
+// current evidence report — which is what the operator asked for: no button to
+// press before the agent has earned the right to be armed. Disarming is always
+// available, because lowering risk never needs permission.
+async function setArmed(armed) {
   try {
-    [summary, curve, feed, orders] = await Promise.all([
+    const response = await fetch(armed ? '/api/arm' : '/api/disarm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({confirm: armed ? 'ARM' : 'DISARM'}),
+    });
+    const data = await response.json();
+    const box = document.getElementById('arm-status');
+    if (box) {
+      box.textContent = data.refused
+        ? 'refused: ' + (data.reason || 'not eligible')
+        : (armed ? 'armed — orders may be submitted' : 'disarmed');
+    }
+    refresh();
+  } catch (err) {
+    const box = document.getElementById('arm-status');
+    if (box) box.textContent = 'could not reach the agent';
+  }
+}
+
+function renderArm(summary) {
+  const box = document.getElementById('arm');
+  if (!box) return;
+  const arm = summary.arm || {};
+  const badge = document.getElementById('armed');
+  if (badge) {
+    badge.textContent = arm.armed ? 'ARMED' : 'DISARMED';
+    badge.className = 'badge ' + (arm.armed ? 'kill' : '');
+  }
+  if (arm.armed) {
+    box.innerHTML = '<button class="armbtn" onclick="setArmed(false)">Disarm</button>'
+      + '<span class="sub" style="margin-left:8px">armed since '
+      + (arm.since ? new Date(arm.since).toLocaleString() : '—') + '</span>';
+    return;
+  }
+  if (!arm.available) {
+    // Not eligible: say why, and show nothing to click. A greyed-out button
+    // invites a fight with the UI; the reason is the honest answer.
+    box.innerHTML = '<span class="sub">not yet armed — ' + (arm.reason || '') + '</span>';
+    return;
+  }
+  box.innerHTML = '<button class="armbtn" onclick="setArmed(true)">Arm live trading</button>'
+    + '<span class="sub" style="margin-left:8px">' + (arm.reason || '') + '</span>';
+}
+
+async function refresh() {
+  let summary, curve, feed, orders, activity, frontier;
+  try {
+    [summary, curve, feed, orders, activity, frontier] = await Promise.all([
       fetch('/api/summary').then(r => r.json()),
       fetch('/api/equity').then(r => r.json()),
       fetch('/api/journal?offset=' + offset).then(r => r.json()),
       fetch('/api/orders').then(r => r.json()),
+      fetch('/api/activity').then(r => r.json()),
+      fetch('/api/frontier').then(r => r.json()),
     ]);
   } catch (err) {
     // The console is restarted by systemd on deploys and failures; an open tab
@@ -317,7 +483,10 @@ async function refresh() {
   feed.records.forEach(renderEvent);
   offset = feed.offset;
   drawChart(curve);
+  drawActivity(activity);
+  drawFrontier(frontier);
   renderOrders(orders);
+  renderArm(summary);
   renderCadence(summary.cadence);
 }
 
@@ -527,8 +696,11 @@ function renderOrders(data) {
       + '<td>' + side + '</td>'
       + '<td>' + (r.type || '—') + '</td>'
       + '<td>' + (r.session || '—') + '</td>'
-      + '<td>' + size + '</td>'
-      + '<td>$' + num(r.notional) + '</td>'
+      // Only show a size and notional for an order that was actually sized:
+      // a refusal before sizing has neither, and a blank is more honest than a
+      // raw intent quantity beside $0.00.
+      + '<td>' + (r.sized === false ? '—' : size) + '</td>'
+      + '<td>' + (r.sized === false ? '—' : '$' + num(r.notional)) + '</td>'
       + '<td>' + (r.last_price
         ? '$' + num(r.last_price)
           + (r.last_price_source === 'decision' ? ' <span class="sub">dec</span>' : '')

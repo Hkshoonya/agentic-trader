@@ -53,6 +53,7 @@ tr:hover td{background:#151d28}
 .flash{animation:flash .7s ease}
 @keyframes flash{from{background:#17263a}to{background:transparent}}
 @media(max-width:900px){.span3,.span4,.span5,.span7,.span8,.span12{grid-column:span 12}}
+.armbtn{background:#3a1f24;color:#ff5f6d;border:0;padding:8px 12px;font:600 13px -apple-system,'Segoe UI',Roboto,sans-serif;cursor:pointer;border-radius:6px}.armbtn:hover{background:#4a262c}
 </style></head>
 <body>
 <header><h1>Agentic Trader</h1>
@@ -66,9 +67,12 @@ tr:hover td{background:#151d28}
 <div class="card span3"><h2>Account equity</h2><div class="metric" id="equity">—</div><div class="sub" id="equity-sub">—</div></div>
 <div class="card span3"><h2>Daily notional used</h2><div class="metric" id="notional">—</div><div class="sub" id="notional-sub">—</div></div>
 <div class="card span3"><h2>Accepted / placed / rejected</h2><div class="metric" id="trades">0</div><div class="sub">today (UTC — the strategy's day)</div></div>
+<div class="card span3"><h2>Order submission</h2><div id="arm" class="sub">checking…</div><div class="sub" id="arm-status"></div></div>
 <div class="card span3"><h2>Promotion streak</h2><div class="metric" id="streak">0</div><div class="sub" id="streak-sub">assessments to next stage</div><div class="gauge" style="margin-top:8px"><div id="streak-bar"></div></div></div>
-<div class="card span8"><h2>Order flow · notional per decision &amp; cumulative</h2><canvas id="chart"></canvas>
-  <div class="legend"><span><i class="dot buy"></i>buy</span><span><i class="dot sell"></i>sell</span><span><i class="line"></i>cumulative notional</span></div></div>
+<div class="card span8"><h2>Decisions per day · accepted, placed, refused</h2><canvas id="chart"></canvas>
+  <div class="legend"><span><i class="dot buy"></i>placed/accepted</span><span><i class="dot sell"></i>refused</span><span class="sub" id="activity-note"></span></div></div>
+<div class="card span8"><h2>What sizing up costs · measured drawdown by per-order size</h2><canvas id="frontier"></canvas>
+  <div class="legend"><span><i class="dot buy"></i>inside the 15% ceiling</span><span><i class="dot sell"></i>above it</span><span><i class="line"></i>15% gate</span><span class="sub" id="frontier-note"></span></div></div>
 <div class="card span4"><h2>Promotion gate</h2><div id="gate"></div></div>
 <div class="card span12"><h2>Market &amp; order table</h2>
   <div class="tablewrap"><table id="orders">

@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
+from agentic_trading.arming import arm as arm_now
+from agentic_trading.arming import arm_status, disarm as disarm_now
 from agentic_trading.config import Config, load_config
 from agentic_trading.dashboard_html import HTML
 from agentic_trading.jsonio import dumps as json_dumps
@@ -36,6 +38,13 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
     except (json.JSONDecodeError, OSError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _notional_is_positive(value: Any) -> bool:
+    try:
+        return Decimal(str(value or "0")) > 0
+    except (ArithmeticError, TypeError, ValueError):
+        return False
 
 
 def _proposals_view(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -596,6 +605,81 @@ class DashboardState:
             counts[key] += 1
         return counts
 
+    def activity(self, *, days: int = 14) -> dict[str, Any]:
+        """Decisions per day, refusals included.
+
+        The order-flow chart plotted *accepted* orders only, so on a system that
+        has never been allowed to fill an order it drew nothing at all — honest
+        and useless. What the agent actually produces every day is decisions:
+        a few entries and a set of refusals with reasons, and that is what the
+        operator needs to see moving.
+        """
+        cache = getattr(self, "_activity_cache", None)
+        now = datetime.now(timezone.utc)
+        if cache is not None and (now - cache[0]).total_seconds() < 60:
+            return cache[1]
+        wanted = [
+            (now.date() - timedelta(days=offset)).isoformat()
+            for offset in range(days - 1, -1, -1)
+        ]
+        buckets: dict[str, dict[str, int]] = {
+            day: {"accepted": 0, "placed": 0, "rejected": 0, "failed": 0}
+            for day in wanted
+        }
+        reasons: dict[str, int] = {}
+        for record in self.recent_records(days=days):
+            event = str(record.get("event") or "")
+            key = "failed" if event == "place_failed" else event
+            if key not in ("accepted", "placed", "rejected"):
+                continue
+            at = str(
+                (record.get("intent") or {}).get("created_at")
+                or record.get("at")
+                or ""
+            )
+            day = at[:10]
+            if day not in buckets:
+                continue
+            buckets[day][key] += 1
+            if key == "rejected":
+                reason = str(record.get("reason", "")).split(":")[0].strip() or "unknown"
+                reasons[reason] = reasons.get(reason, 0) + 1
+        payload = {
+            "days": [{"day": day, **counts} for day, counts in buckets.items()],
+            "reasons": sorted(reasons.items(), key=lambda item: -item[1])[:6],
+            "generated_at": now.isoformat(),
+        }
+        self._activity_cache = (now, payload)
+        return payload
+
+    def frontier(self) -> dict[str, Any]:
+        """What sizing up costs, measured — the evidence report's own frontier."""
+        report = _read_json(self.state_dir / "strategy_evidence.json") or {}
+        limits = _read_json(self.state_dir / "effective_limits.json") or {}
+        rows = [
+            {
+                "per_order_pct": row.get("per_order_pct"),
+                "max_drawdown_pct": row.get("max_drawdown_pct"),
+                "expectancy_bps": row.get("expectancy_bps"),
+                "final_equity": row.get("final_equity"),
+                "inside_ceiling": row.get("inside_ceiling"),
+            }
+            for row in (report.get("size_frontier") or [])
+            if isinstance(row, dict)
+        ]
+        try:
+            live = float(limits.get("max_order_pct") or 0.0)
+        except (TypeError, ValueError):
+            live = 0.0
+        return {
+            "points": rows,
+            "live_pct": live,
+            "ceiling_pct": report.get("drawdown_ceiling_pct"),
+            "sizing": report.get("sizing", ""),
+            "costs": report.get("costs") or {},
+            "generated_at": report.get("generated_at", ""),
+        }
+
     def pulse(self) -> dict[str, Any]:
         """How long since the agent last did anything.
 
@@ -756,6 +840,7 @@ class DashboardState:
             # Why the order table is allowed to be static, and what the rule
             # would hold if it decided this second.
             "cadence": self.cadence(),
+            "arm": arm_status(self.state_dir),
             "pulse": self.pulse(),
             "candidate_summary": self._candidate_summary(),
             "proposals": _proposals_view(
@@ -893,6 +978,11 @@ class DashboardState:
                     "dollar_amount": request.get("dollar_amount"),
                     "limit_price": request.get("limit_price"),
                     "notional": record.get("notional", "0"),
+                    # A refusal can happen before sizing (below_min_notional,
+                    # regime block, advisor veto). Showing the raw intent
+                    # quantity next to a $0.00 notional reads as "it wanted to
+                    # buy 1 SOL for nothing" — say it was never sized instead.
+                    "sized": _notional_is_positive(record.get("notional")),
                     "mode": record.get("mode", ""),
                     "session": record.get("session", ""),
                     # A rejected order never reaches the broker's quote review,
@@ -1024,6 +1114,78 @@ class _Handler(BaseHTTPRequestHandler):
             "application/json",
         )
 
+    # -- the one write path ------------------------------------------------
+
+    def do_POST(self) -> None:  # noqa: N802
+        """Arm or disarm order submission. Nothing else is writable.
+
+        The console has been read-only since it existed; this is the single
+        exception, and it is fenced: loopback only, POST only, an explicit
+        confirmation phrase, and arming refused unless the promotion gate and a
+        fresh evidence report both say the system earned it. Disarming is always
+        allowed — lowering risk never needs permission.
+        """
+        parsed = urlparse(self.path)
+        if parsed.path not in ("/api/arm", "/api/disarm"):
+            self._json({"error": "not found"}, status=404)
+            return
+        if not self._from_loopback():
+            self._json({"error": "arming is local-only"}, status=403)
+            return
+        payload = self._read_body()
+        if parsed.path == "/api/arm":
+            if str(payload.get("confirm", "")).strip().upper() != "ARM":
+                self._json(
+                    {"error": 'confirmation required: {"confirm": "ARM"}'}, status=400
+                )
+                return
+            result = arm_now(self.state.state_dir, source="console")
+            if result.get("refused"):
+                self._journal_arming(result)
+                self._json(result, status=409)
+                return
+        else:
+            result = disarm_now(self.state.state_dir, source="console")
+        self._journal_arming(result)
+        self._json({**result, "status": arm_status(self.state.state_dir)})
+
+    def _from_loopback(self) -> bool:
+        try:
+            host = str(self.client_address[0])
+        except (AttributeError, IndexError):
+            return False
+        return host in ("127.0.0.1", "::1", "localhost")
+
+    def _read_body(self) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except (TypeError, ValueError):
+            return {}
+        if length <= 0 or length > 4096:
+            return {}
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _journal_arming(self, result: dict[str, Any]) -> None:
+        """Record it where the operator can see it, next to every decision."""
+        try:
+            from agentic_trading.journal import DecisionJournal
+
+            DecisionJournal(Path(self.state.config.journal_dir)).append(
+                {
+                    "event": "arming_changed",
+                    "armed": bool(result.get("armed")),
+                    "source": result.get("source", "console"),
+                    "reason": result.get("reason", ""),
+                    "at": result.get("at", ""),
+                }
+            )
+        except Exception:  # noqa: BLE001 — a journal failure must not fake success
+            return
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
@@ -1034,6 +1196,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/equity":
             self._json(self.state.equity_curve())
+            return
+        if parsed.path == "/api/activity":
+            self._json(self.state.activity())
+            return
+        if parsed.path == "/api/frontier":
+            self._json(self.state.frontier())
             return
         if parsed.path == "/api/orders":
             self._json(self.state.orders_table())

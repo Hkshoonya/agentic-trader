@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-660%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-666%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -82,7 +82,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 660 tests
+.venv/bin/python -m pytest tests -q                     # 666 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -305,6 +305,32 @@ What changes, concretely:
 On Windows, paste the key into **API key…** in the launcher and it writes both
 variables for you.
 
+## Arming from the console
+
+Order submission needs `AGENTIC_ALLOW_LIVE=1` **or** this workspace's arm file.
+The console can write the second one — and the button is **only rendered when the
+system has earned it**: the promotion gate must say eligible, the stage must be at
+least `probation`, and the walk-forward report must be current. Otherwise the
+panel says why arming is unavailable, and there is nothing to click.
+
+That matters because the console was read-only from the start. Adding a write path
+is a real change in the attack surface, so it is fenced in one place
+(`src/agentic_trading/arming.py`):
+
+- **loopback only** — the handler checks the peer address, rather than trusting
+  that the server happened to bind to `127.0.0.1`;
+- **POST only, two paths only** — `/api/arm` and `/api/disarm`; everything else
+  is 404 and no other endpoint has a write side;
+- **typed confirmation** — `{"confirm": "ARM"}`; a stray form post cannot arm an
+  account;
+- **eligibility** — refused unless the gate, the stage and the evidence agree;
+- **disarming is always allowed**, because lowering risk never needs permission;
+- **journalled** — an `arming_changed` event lands next to every decision, so the
+  record shows who armed what and when.
+
+A copy of this workspace elsewhere still starts inert: the arm file lives inside
+the workspace, and a fresh install has none.
+
 ## The console
 
 <img src="docs/assets/console.png" alt="The read-only console: account equity, promotion gate, market and order table with per-order confidence, candidates, live execution stream, agents on duty, walk-forward evidence" width="900">
@@ -346,7 +372,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   660 tests, including the honesty tests for the rig
+tests/                   666 tests, including the honesty tests for the rig
 ```
 
 ## Operations

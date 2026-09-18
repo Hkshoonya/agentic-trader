@@ -593,7 +593,7 @@ class _Loop:
             "mode": self.mode,
             "stage": self.stage,
             "autonomy": self.config.autonomy,
-            "allow_live": os.environ.get("AGENTIC_ALLOW_LIVE") == "1",
+            "allow_live": self.armed_for_submission(),
             "allow_autonomy": os.environ.get("AGENTIC_ALLOW_AUTONOMY") == "1",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -1270,7 +1270,7 @@ class _Loop:
             self.guard.persist(self.config.state_dir)
             return
 
-        if not (decision.may_place and os.environ.get("AGENTIC_ALLOW_LIVE") == "1"):
+        if not (decision.may_place and self.armed_for_submission()):
             if decision.may_place:
                 # The evidence gate has cleared and the stage is live: the only
                 # thing left is the operator's arming switch. Say so instead of
@@ -1333,6 +1333,20 @@ class _Loop:
                 "order": result,
             }
         )
+
+    def armed_for_submission(self) -> bool:
+        """May this session submit? Environment switch **or** the console's arm.
+
+        The environment variable remains the stronger switch and still works
+        alone. The file is the console's equivalent, scoped to this workspace —
+        so copying a workspace cannot arm another machine, which is the property
+        that made the environment-only design worth keeping.
+        """
+        if os.environ.get("AGENTIC_ALLOW_LIVE") == "1":
+            return True
+        from agentic_trading.arming import is_armed
+
+        return is_armed(self.config.state_dir)
 
     def note_error(self, event: str, error: Exception) -> None:
         """Count a broker/loop failure and trip the kill switch if it persists."""

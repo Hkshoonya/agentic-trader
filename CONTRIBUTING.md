@@ -30,7 +30,7 @@ real money, so the bar for changes is higher than for a typical project.
 ## Before opening a PR
 
 ```bash
-.venv/bin/python -m pytest tests -q              # 660 tests, all must pass
+.venv/bin/python -m pytest tests -q              # 666 tests, all must pass
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 ```
 

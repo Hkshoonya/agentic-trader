@@ -429,12 +429,15 @@ class DashboardTests(unittest.TestCase):
                 with urllib.request.urlopen(f"{base}/api/health", timeout=5) as r:
                     self.assertTrue(json.loads(r.read().decode("utf-8"))["ok"])
 
+                # The console is read-only except for arming, which is a
+                # loopback-only POST on exactly two paths. Any other POST is not
+                # a write surface at all.
                 request = urllib.request.Request(
                     f"{base}/api/summary", data=b"{}", method="POST"
                 )
                 with self.assertRaises(urllib.error.HTTPError) as ctx:
                     urllib.request.urlopen(request, timeout=5)
-                self.assertEqual(ctx.exception.code, 501)
+                self.assertEqual(ctx.exception.code, 404)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -1115,3 +1118,202 @@ class DecisionDayTests(unittest.TestCase):
             table = state.orders_table()["counts"]
         self.assertEqual(header["rejected"], 2)
         self.assertEqual(table["rejected"], 2)
+
+
+class ArmingTests(unittest.TestCase):
+    """The console's one write path, and the fences around it.
+
+    Order submission used to require an environment variable only. The console
+    can now arm this workspace, which is a real change in the attack surface, so
+    the fences are tested rather than described: loopback only, POST only, a
+    typed confirmation, and arming refused until the system has earned it.
+    """
+
+    def _config(self, tmp: Path):
+        config = DashboardTests()._config(tmp)
+        Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+        Path(config.journal_dir).mkdir(parents=True, exist_ok=True)
+        return config
+
+    def _eligible(self, tmp: Path) -> None:
+        import json as _json
+
+        (tmp / "state" / "promotion.json").write_text(
+            _json.dumps(
+                {
+                    "stage": "live",
+                    "streak": 0,
+                    "last_assessment": {"eligible": True},
+                }
+            )
+        )
+        (tmp / "state" / "strategy_evidence.json").write_text(
+            _json.dumps({"generated_at": datetime.now(timezone.utc).isoformat()})
+        )
+
+    def test_a_shadow_agent_cannot_be_armed(self) -> None:
+        from agentic_trading.arming import arm, arm_status
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._config(tmp)
+            result = arm(tmp / "state")
+            status = arm_status(tmp / "state")
+        self.assertTrue(result.get("refused"))
+        self.assertIn("shadow", result["reason"])
+        self.assertFalse(status["armed"])
+        self.assertFalse(status["available"])
+
+    def test_a_stale_report_cannot_be_armed(self) -> None:
+        import json as _json
+
+        from agentic_trading.arming import arm
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._config(tmp)
+            self._eligible(tmp)
+            old = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+            (tmp / "state" / "strategy_evidence.json").write_text(
+                _json.dumps({"generated_at": old})
+            )
+            result = arm(tmp / "state")
+        self.assertTrue(result.get("refused"))
+        self.assertIn("days old", result["reason"])
+
+    def test_an_eligible_agent_can_be_armed_and_disarmed(self) -> None:
+        from agentic_trading.arming import arm, arm_status, disarm
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._config(tmp)
+            self._eligible(tmp)
+            armed = arm(tmp / "state")
+            status = arm_status(tmp / "state")
+            disarmed = disarm(tmp / "state", reason="test")
+            after = arm_status(tmp / "state")
+        self.assertTrue(armed["armed"])
+        self.assertTrue(status["available"])
+        self.assertFalse(disarmed["armed"])
+        self.assertFalse(after["armed"])
+        # The workspace records the change, so a restart does not lose it.
+        self.assertIsNotNone(after["since"])
+
+    def test_http_requires_loopback_a_confirmation_and_the_right_method(self) -> None:
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            self._eligible(tmp)
+            server = serve(config, host="127.0.0.1", port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+
+            def post(path: str, body: dict):
+                request = urllib.request.Request(
+                    base + path,
+                    data=_json.dumps(body).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                return urllib.request.urlopen(request, timeout=5)
+
+            try:
+                # No confirmation phrase: refused, and nothing armed.
+                with self.assertRaises(urllib.error.HTTPError) as missing:
+                    post("/api/arm", {})
+                self.assertEqual(missing.exception.code, 400)
+                # With it: armed.
+                with post("/api/arm", {"confirm": "ARM"}) as response:
+                    payload = _json.loads(response.read())
+                self.assertTrue(payload["armed"])
+                # Disarm needs no confirmation, because it lowers risk.
+                with post("/api/disarm", {}) as response:
+                    payload = _json.loads(response.read())
+                self.assertFalse(payload["armed"])
+                # Any other path is not writable at all.
+                with self.assertRaises(urllib.error.HTTPError) as other:
+                    post("/api/limits", {})
+                self.assertEqual(other.exception.code, 404)
+                # GET on the arming endpoint is not a state change either:
+                # there is no read of it, only the POST that changes it.
+                with self.assertRaises(urllib.error.HTTPError) as read_arm:
+                    urllib.request.urlopen(base + "/api/arm", timeout=5)
+                self.assertEqual(read_arm.exception.code, 404)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+
+class NotionalDisplayTests(unittest.TestCase):
+    """A refusal before sizing has no size, and must not look like it does.
+
+    The table showed the raw intent quantity (1.00000000 SOL) beside $0.00 for
+    orders refused before the sizer ran, which reads as "it wanted one SOL for
+    nothing" rather than "it was never sized".
+    """
+
+    def _config(self, tmp: Path):
+        config = DashboardTests()._config(tmp)
+        Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+        Path(config.journal_dir).mkdir(parents=True, exist_ok=True)
+        return config
+
+    def test_a_refusal_before_sizing_is_flagged_as_unsized(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            (tmp / "journal" / f"{date.today().isoformat()}.jsonl").write_text(
+                _json.dumps(
+                    {
+                        "decision_id": "d",
+                        "event": "rejected",
+                        "reason": "below_min_notional",
+                        "symbol": "SOL-USD",
+                        "notional": "0",
+                        "intent": {
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "symbol": "SOL-USD",
+                            "side": "buy",
+                            "quantity": "1",
+                            "ref_price": "100.80",
+                        },
+                    }
+                )
+                + "\n"
+            )
+            row = DashboardState(config).orders_table()["rows"][0]
+        self.assertFalse(row["sized"])
+
+    def test_a_sized_order_is_not_flagged(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            (tmp / "journal" / f"{date.today().isoformat()}.jsonl").write_text(
+                _json.dumps(
+                    {
+                        "decision_id": "d",
+                        "event": "accepted",
+                        "symbol": "SPY",
+                        "notional": "1.02",
+                        "intent": {
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "symbol": "SPY",
+                            "side": "buy",
+                            "quantity": "0.0015",
+                            "ref_price": "680",
+                        },
+                    }
+                )
+                + "\n"
+            )
+            row = DashboardState(config).orders_table()["rows"][0]
+        self.assertTrue(row["sized"])
