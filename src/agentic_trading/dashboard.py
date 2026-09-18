@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 from agentic_trading.arming import arm as arm_now
 from agentic_trading.arming import arm_status, disarm as disarm_now
+from agentic_trading.arming import evaluate as evaluate_arm
 from agentic_trading.config import Config, load_config
 from agentic_trading.dashboard_html import HTML
 from agentic_trading.jsonio import dumps as json_dumps
@@ -38,6 +39,32 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
     except (json.JSONDecodeError, OSError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _account_view(state_dir: Path, equity: Any) -> dict[str, Any]:
+    """Runtime and money, with every P&L number labelled by its origin."""
+    from agentic_trading import account
+
+    view = account.totals(state_dir, equity)
+    risk = _read_json(Path(state_dir) / "risk_guard.json") or {}
+    view["shadow"] = {
+        "realized_today": risk.get("shadow_realized_today", "0"),
+        "realized_total": risk.get("shadow_realized_total", "0"),
+        "note": "simulated fills only — never added to the equity above",
+    }
+    view["session_equity_baseline"] = risk.get("baseline_equity", "0")
+    current = view["equity"].get("current")
+    baseline = risk.get("baseline_equity")
+    try:
+        view["pnl"]["today"] = str(
+            (Decimal(str(current)) - Decimal(str(baseline))).quantize(Decimal("0.01"))
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        view["pnl"]["today"] = None
+    view["labels"]["today"] = (
+        "current equity minus the balance at the first read of this local day"
+    )
+    return view
 
 
 def _notional_is_positive(value: Any) -> bool:
@@ -840,7 +867,12 @@ class DashboardState:
             # Why the order table is allowed to be static, and what the rule
             # would hold if it decided this second.
             "cadence": self.cadence(),
-            "arm": arm_status(self.state_dir),
+            "account": _account_view(self.state_dir, risk.get("current_equity", "0")),
+            "arm": {
+                **arm_status(self.state_dir),
+                **evaluate_arm(self.state_dir),
+                "auto_arm": bool(getattr(self.config, "auto_arm", False)),
+            },
             "pulse": self.pulse(),
             "candidate_summary": self._candidate_summary(),
             "proposals": _proposals_view(

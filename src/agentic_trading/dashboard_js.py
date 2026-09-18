@@ -286,14 +286,74 @@ function renderArm(summary) {
       + (arm.since ? new Date(arm.since).toLocaleString() : '—') + '</span>';
     return;
   }
+  // The pre-flight checklist is the whole point of "execute automatically after
+  // proper checking": every item named, with its own verdict, before anything
+  // reaches the broker.
+  const checklist = (arm.checks || []).map(c =>
+    '<div class="sub">' + (c.ok ? '✓' : '✗') + ' ' + c.name + ' — ' + c.detail + '</div>'
+  ).join('');
+  if (arm.auto_arm) {
+    box.innerHTML = '<b class="' + (arm.passed ? 'buy' : 'sell') + '">AUTONOMOUS '
+      + (arm.passed ? '· will arm on the next cycle' : '· held back') + '</b>'
+      + '<div class="sub">' + (arm.reason || '') + '</div>' + checklist;
+    return;
+  }
   if (!arm.available) {
     // Not eligible: say why, and show nothing to click. A greyed-out button
     // invites a fight with the UI; the reason is the honest answer.
-    box.innerHTML = '<span class="sub">not yet armed — ' + (arm.reason || '') + '</span>';
+    box.innerHTML = '<span class="sub">not yet armed — ' + (arm.reason || '') + '</span>'
+      + checklist;
     return;
   }
   box.innerHTML = '<button class="armbtn" onclick="setArmed(true)">Arm live trading</button>'
-    + '<span class="sub" style="margin-left:8px">' + (arm.reason || '') + '</span>';
+    + '<span class="sub" style="margin-left:8px">' + (arm.reason || '') + '</span>'
+    + checklist;
+}
+
+// Runtime and money. Two clocks — this session, and every session this agent has
+// ever run — and three P&L numbers, each labelled with the snapshot it is
+// measured against, because "profit" without an origin is not actionable.
+function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined) return '—';
+  const s = Math.max(0, Math.round(seconds));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (d) return d + 'd ' + h + 'h';
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm ' + sec + 's';
+  return sec + 's';
+}
+
+function renderAccount(summary) {
+  const box = document.getElementById('account');
+  if (!box) return;
+  const a = summary.account || {};
+  const rt = a.runtime || {}, eq = a.equity || {}, pnl = a.pnl || {};
+  const money = (v) => (v === null || v === undefined) ? '—'
+    : (Number(v) >= 0 ? '+' : '') + '$' + Number(v).toFixed(2);
+  const cls = (v) => (v === null || v === undefined) ? 'sub'
+    : (Number(v) >= 0 ? 'buy' : 'sell');
+  box.innerHTML =
+    '<div class="row"><span>this session</span><b>' + fmtDuration(rt.session_seconds) + '</b></div>'
+    + '<div class="row"><span>all time running</span><b>' + fmtDuration(rt.total_seconds)
+      + (rt.sessions ? ' · ' + rt.sessions + ' start' + (rt.sessions === 1 ? '' : 's') : '')
+      + '</b></div>'
+    + '<div class="row"><span>equity now</span><b>$' + num(Number(eq.current || 0)) + '</b></div>'
+    + '<div class="row"><span>P&amp;L all time</span><b class="' + cls(pnl.all_time) + '">'
+      + money(pnl.all_time) + '</b></div>'
+    + '<div class="row"><span>P&amp;L today</span><b class="' + cls(pnl.today) + '">'
+      + money(pnl.today) + '</b></div>'
+    + '<div class="row"><span>P&amp;L since arming</span><b class="' + cls(pnl.since_arming) + '">'
+      + (pnl.since_arming === null || pnl.since_arming === undefined
+        ? 'not armed yet' : money(pnl.since_arming)) + '</b></div>'
+    + '<div class="sub">' + (eq.armed_at
+      ? 'armed ' + new Date(eq.armed_at).toLocaleString() + ' at $' + num(Number(eq.at_arm || 0))
+      : 'never armed — nothing has been submitted') + '</div>'
+    + '<div class="sub">first reading $' + num(Number(eq.first || 0)) + ' on '
+      + (eq.first_seen_at ? new Date(eq.first_seen_at).toLocaleString() : '—')
+      + ' · P&amp;L is ' + (a.labels && a.labels.all_time ? a.labels.all_time : '') + '</div>'
+    + '<div class="sub">shadow (simulated): ' + money(a.shadow && a.shadow.realized_total)
+      + ' realized all time — ' + ((a.shadow && a.shadow.note) || '') + '</div>';
 }
 
 async function refresh() {
@@ -487,6 +547,7 @@ async function refresh() {
   drawFrontier(frontier);
   renderOrders(orders);
   renderArm(summary);
+  renderAccount(summary);
   renderCadence(summary.cadence);
 }
 

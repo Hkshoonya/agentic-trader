@@ -67,6 +67,7 @@ tr:hover td{background:#151d28}
 <div class="card span3"><h2>Account equity</h2><div class="metric" id="equity">—</div><div class="sub" id="equity-sub">—</div></div>
 <div class="card span3"><h2>Daily notional used</h2><div class="metric" id="notional">—</div><div class="sub" id="notional-sub">—</div></div>
 <div class="card span3"><h2>Accepted / placed / rejected</h2><div class="metric" id="trades">0</div><div class="sub">today (UTC — the strategy's day)</div></div>
+<div class="card span4"><h2>Runtime &amp; P&amp;L</h2><div id="account" class="sub">starting…</div></div>
 <div class="card span3"><h2>Order submission</h2><div id="arm" class="sub">checking…</div><div class="sub" id="arm-status"></div></div>
 <div class="card span3"><h2>Promotion streak</h2><div class="metric" id="streak">0</div><div class="sub" id="streak-sub">assessments to next stage</div><div class="gauge" style="margin-top:8px"><div id="streak-bar"></div></div></div>
 <div class="card span8"><h2>Decisions per day · accepted, placed, refused</h2><canvas id="chart"></canvas>

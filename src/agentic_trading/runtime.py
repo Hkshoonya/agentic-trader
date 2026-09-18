@@ -782,8 +782,12 @@ class _Loop:
             self.journal.append(
                 {"event": "recovered_after_stop", "stopped_at": stopped}
             )
+        from agentic_trading import account
+
+        account.note_session_start(self.config.state_dir)
         self.resolve_account()
         self.refresh_equity()
+        account.note_equity(self.config.state_dir, self.guard.current_equity)
         self.seed_strategy_positions()
         self.write_live_gate_state()
         self.write_agent_state()
@@ -1334,6 +1338,55 @@ class _Loop:
             }
         )
 
+    def apply_auto_arm(self) -> Optional[dict[str, Any]]:
+        """Run the pre-flight checklist and act on the verdict.
+
+        This is the last link in the autonomous chain: the agent promotes
+        itself on evidence, and — when the operator has enabled it — arms itself
+        for real submission once every check passes. It undoes its own arming the
+        moment a check fails, so a tripped kill switch or a stale report takes
+        the account out of the market without waiting for anyone.
+        """
+        from agentic_trading import arming
+
+        now = time.monotonic()
+        if (now - getattr(self, "_last_auto_arm_at", 0.0)) < 30.0:
+            return None
+        self._last_auto_arm_at = now
+        enabled = bool(self.config.auto_arm) and os.environ.get(
+            "AGENTIC_ALLOW_AUTONOMY"
+        ) == "1"
+        try:
+            event = arming.maybe_auto_arm(
+                self.config.state_dir,
+                enabled=enabled,
+                min_interval_hours=self.config.auto_arm_min_interval_hours,
+            )
+        except Exception as exc:  # noqa: BLE001 — never kill the loop
+            self.journal.append(
+                {"event": "auto_arm_failed", "error": str(exc)[:200]}
+            )
+            return None
+        if event is None:
+            return None
+        self.journal.append({**event, "auto_arm_enabled": enabled})
+        if event.get("event") == "auto_disarm":
+            self.set_mode(self.mode)  # keep the guard in step
+        return event
+
+    def note_arming_snapshot(self) -> None:
+        """Record the balance at each arming change, once per change."""
+        from agentic_trading import account, arming
+
+        state = arming.read_arm(self.config.state_dir) or {}
+        account.note_armed(
+            self.config.state_dir,
+            self.guard.current_equity,
+            armed=bool(state.get("armed")),
+            at=str(state.get("at", "")),
+            source=str(state.get("source", "")),
+        )
+
     def armed_for_submission(self) -> bool:
         """May this session submit? Environment switch **or** the console's arm.
 
@@ -1739,10 +1792,20 @@ def run_daemon(
         cycle_seconds = 0.0
         fresh_total = 0
         decisions_base = loop.orders_today
+        from agentic_trading import account
+
         while not loop.should_stop():
             cycle_started = time.monotonic()
             # Equity moves while the loop runs; the size floor follows it.
             loop.apply_size_floor()
+            # Autonomous execution: arm when every check is green, disarm the
+            # moment one is not. Cheap (a few state reads) and cached internally.
+            loop.apply_auto_arm()
+            # Runtime and money: keep the session heartbeat fresh (so an unclean
+            # stop still counts) and snapshot the balance whenever arming
+            # changes, so "before / after arming" are two real numbers.
+            account.note_equity(loop.config.state_dir, loop.guard.current_equity)
+            loop.note_arming_snapshot()
             if deadline is not None and time.monotonic() >= deadline:
                 break
 

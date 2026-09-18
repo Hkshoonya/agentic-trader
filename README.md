@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-666%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-677%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -82,7 +82,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 666 tests
+.venv/bin/python -m pytest tests -q                     # 677 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -305,6 +305,49 @@ What changes, concretely:
 On Windows, paste the key into **API key…** in the launcher and it writes both
 variables for you.
 
+## Autonomous execution, and the numbers around it
+
+The chain has four links and no human in it, when the operator enables it:
+
+```
+evidence gate ──► self-promotion ──► auto-arm ──► order submission
+   (p<0.05,          (3 passing         (all pre-flight        (only while
+    DD ≤ 15%)         assessments)       checks green)          armed)
+```
+
+`auto_arm = true` in the config plus `AGENTIC_ALLOW_AUTONOMY=1` in the session
+turns on the third link. It is not a switch that removes the checks — it is a
+policy that *acts on* them:
+
+- **arming needs every pre-flight check green**: promotion gate eligible, stage
+  at least probation, evidence report current, kill switch clear, account
+  readable, budget within the operator's ceiling, back-check healthy and fresh;
+- **it disarms itself the moment one fails.** A tripped kill switch, a stale
+  report, a demotion or a failing back-check takes the account out of the market
+  without waiting for anyone;
+- **a 15-minute cooldown after a self-disarm**, so a flapping check does not
+  become a flapping order flow, plus a cap of six arms a day — beyond that the
+  event is journalled as `auto_arm_refused` rather than retried;
+- **an arming the operator made is never touched**; auto-arm only manages its own.
+
+### Runtime and P&L, before and after arming
+
+The console carries both clocks and every P&L number with its origin stated:
+
+| field | meaning |
+|---|---|
+| this session | since the daemon started |
+| all time running | accumulated across every session, crediting the previous session up to its last heartbeat |
+| equity now | the account as last read |
+| P&L all time | current equity − the first equity this agent ever saw |
+| P&L today | current equity − the balance at the first read of the local day |
+| P&L since arming | current equity − the balance snapshotted when submission was armed |
+| shadow (simulated) | realized P&L from simulated fills — never added to the equity above |
+
+Restarting does not reset any of it: the origin equity, the accumulated runtime
+and the arming snapshots are one durable record (`data/state/account.json`), and
+"not armed yet" is shown honestly rather than as `+$0.00`.
+
 ## Arming from the console
 
 Order submission needs `AGENTIC_ALLOW_LIVE=1` **or** this workspace's arm file.
@@ -372,7 +415,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   666 tests, including the honesty tests for the rig
+tests/                   677 tests, including the honesty tests for the rig
 ```
 
 ## Operations

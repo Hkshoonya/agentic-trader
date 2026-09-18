@@ -91,6 +91,12 @@ class Config:
     # recorded on every order either way; it only *vetoes* when this is on, and
     # then only at or above the threshold. Advisory by default: the model adds
     # information, the operator decides how much authority it gets.
+    # Autonomous execution: arm this workspace without a human once every
+    # pre-flight check is green, and disarm it the moment one fails. Requires
+    # AGENTIC_ALLOW_AUTONOMY=1 as well, so a config file alone cannot arm an
+    # account anywhere. Off by default.
+    auto_arm: bool = False
+    auto_arm_min_interval_hours: float = 6.0
     jev_veto_chase: bool = False
     jev_chase_threshold: Decimal = Decimal("0.75")
 
@@ -230,6 +236,10 @@ def load_config(path: str | Path) -> Config:
         sizing=str(raw.get("sizing", "flat")),
         evolution_agent_interval_hours=float(
             raw.get("evolution_agent_interval_hours", 24.0)
+        ),
+        auto_arm=bool(raw.get("auto_arm", False)),
+        auto_arm_min_interval_hours=float(
+            raw.get("auto_arm_min_interval_hours", 6.0)
         ),
         jev_veto_chase=bool(raw.get("jev_veto_chase", False)),
         jev_chase_threshold=Decimal(str(raw.get("jev_chase_threshold", "0.75"))),
