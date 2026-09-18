@@ -545,6 +545,18 @@ class _Loop:
     # -- lifecycle --------------------------------------------------------
 
     def start(self) -> None:
+        # The failure alert leaves a marker; a successful start is the other half
+        # of that conversation, and how long the outage lasted is worth knowing.
+        marker = Path(self.config.state_dir) / "STOPPED_AT.txt"
+        if marker.is_file():
+            try:
+                stopped = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                stopped = ""
+            marker.unlink(missing_ok=True)
+            self.journal.append(
+                {"event": "recovered_after_stop", "stopped_at": stopped}
+            )
         self.resolve_account()
         self.refresh_equity()
         self.seed_strategy_positions()
@@ -1276,6 +1288,102 @@ def run_loop(
         loop.finish()
 
 
+def _is_retryable_startup_error(exc: BaseException) -> bool:
+    """Whether a startup failure is worth waiting out.
+
+    The distinction that matters: a network that is down for a minute must not
+    stop the agent for hours, while a configuration mistake must not spin
+    forever pretending it will fix itself.
+    """
+    if isinstance(
+        exc,
+        (
+            FileNotFoundError,
+            PermissionError,
+            IsADirectoryError,
+            NotADirectoryError,
+            ValueError,
+            TypeError,
+            KeyError,
+        ),
+    ):
+        return False
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    # Most socket-level failures arrive as plain OSError (errno 111, 113, -2 for
+    # DNS) or wrapped by httpx; both are worth waiting out.
+    if isinstance(exc, OSError):
+        return True
+    name = type(exc).__name__
+    return name in {
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "ReadError",
+        "WriteError",
+        "RemoteProtocolError",
+        "TransportError",
+        "HTTPError",
+        "gaierror",
+        "SSLError",
+    }
+
+
+def _start_with_retry(
+    loop: "_Loop",
+    *,
+    max_wait_seconds: float = 1800.0,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Bring the broker-facing parts of the loop up, surviving an outage.
+
+    Before this, a DNS failure at startup raised straight out of ``run_daemon``
+    and the service crash-looped: on 2026-09-18 a brief network drop stopped the
+    agent for six and a half hours while systemd restarted it 419 times.
+
+    Retries with backoff for up to ``max_wait_seconds``, journaling each attempt
+    so the console shows why nothing is happening, then re-raises with the real
+    error (not a masked one) so systemd can restart the process and try again.
+    """
+    started = clock()
+    delay = 5.0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            loop.start()
+        except Exception as exc:  # noqa: BLE001 — classified immediately below
+            if not _is_retryable_startup_error(exc):
+                raise
+            waited = clock() - started
+            loop.journal.append(
+                {
+                    "event": "startup_retry",
+                    "attempt": attempt,
+                    "error": f"{type(exc).__name__}: {exc}"[:200],
+                    "waited_seconds": round(waited, 1),
+                    "next_retry_seconds": delay,
+                }
+            )
+            if waited >= max_wait_seconds:
+                raise
+            sleep(delay)
+            delay = min(delay * 2, 60.0)
+            continue
+        if attempt > 1:
+            loop.journal.append(
+                {
+                    "event": "startup_recovered",
+                    "attempts": attempt,
+                    "waited_seconds": round(clock() - started, 1),
+                }
+            )
+        return
+
+
 def run_daemon(
     config: Config,
     *,
@@ -1319,15 +1427,18 @@ def run_daemon(
     last_heartbeat = time.monotonic() - _HEARTBEAT_SECONDS
     last_selfcheck_due = time.monotonic() - max(0.0, config.selfcheck_minutes * 60)
     last_equity_at = 0.0
+    # Declared before the try on purpose: the finally block joins these, and a
+    # startup failure used to be replaced by "UnboundLocalError: workers" —
+    # which hid the network error that actually stopped the agent.
+    workers: list[threading.Thread] = []
     try:
-        loop.start()
+        _start_with_retry(loop, sleep=sleep)
         last_equity_at = time.monotonic()
         journal = loop.journal
         last_stats_at = time.monotonic()
         last_regime_at = 0.0
         last_selfcheck_at = last_selfcheck_due
         kill_state = loop.guard.kill_switch
-        workers: list[threading.Thread] = []
         cycles = 0
         cycle_seconds = 0.0
         fresh_total = 0
@@ -1486,13 +1597,28 @@ def run_daemon(
                     }
                 )
 
+            cycle_had_error = False
             for quote in fresh:
                 if loop.should_stop():
                     break
                 try:
                     loop.handle_quote(quote, session=session)
                 except Exception as exc:  # noqa: BLE001 — one bad tick is not fatal
+                    cycle_had_error = True
                     loop.note_error("loop_error", exc)
+
+            # A tick that raised is counted; a cycle that raises nothing is
+            # evidence the connection is back. Without this reset, three
+            # transient errors spread across an outage would accumulate into a
+            # kill switch and stop the agent until a human cleared it.
+            if loop.consecutive_errors and not cycle_had_error:
+                loop.journal.append(
+                    {
+                        "event": "error_streak_cleared",
+                        "consecutive_errors": loop.consecutive_errors,
+                    }
+                )
+                loop.consecutive_errors = 0
 
             # Cadence heartbeat: every broker round trip is ~1.3s over the MCP
             # gateway, so the operator needs the measured cycle time to tell a

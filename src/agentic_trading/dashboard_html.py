@@ -61,7 +61,7 @@ tr:hover td{background:#151d28}
 <span id="session" class="badge">session</span>
 <span id="armed" class="badge">arming…</span>
 <span id="kill" class="badge kill" style="display:none">kill switch</span>
-<span class="sub" id="generated"></span></header>
+<span class="sub" id="generated"></span><span class="badge" id="pulse" style="display:none">—</span></header>
 <main>
 <div class="card span3"><h2>Account equity</h2><div class="metric" id="equity">—</div><div class="sub" id="equity-sub">—</div></div>
 <div class="card span3"><h2>Daily notional used</h2><div class="metric" id="notional">—</div><div class="sub" id="notional-sub">—</div></div>

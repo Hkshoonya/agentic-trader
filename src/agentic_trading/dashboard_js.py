@@ -240,6 +240,26 @@ async function refresh() {
       '<h2 style="margin-top:10px">LLM regime read</h2>' + rows;
   }
 
+  // A stopped agent leaves every panel frozen at plausible values. Say it out
+  // loud rather than letting a silent daemon look like a quiet market.
+  if (summary.pulse) {
+    const p = summary.pulse;
+    const box = document.getElementById('pulse');
+    const age = p.silent_seconds;
+    if (p.silent) {
+      box.style.display = '';
+      box.className = 'badge kill';
+      box.textContent = 'AGENT SILENT ' + Math.round(age / 60) + 'm'
+        + (p.last_event_at ? ' (last event ' + new Date(p.last_event_at).toLocaleTimeString() + ')' : '');
+    } else if (age !== null && age !== undefined) {
+      box.style.display = '';
+      box.className = 'badge';
+      box.textContent = 'live · last event ' + Math.round(age) + 's ago';
+    } else {
+      box.style.display = 'none';
+    }
+  }
+
   feed.records.forEach(renderEvent);
   offset = feed.offset;
   drawChart(curve);

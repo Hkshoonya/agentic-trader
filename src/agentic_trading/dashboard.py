@@ -474,6 +474,33 @@ class DashboardState:
             "generated_at": payload.get("generated_at", ""),
         }
 
+    def pulse(self) -> dict[str, Any]:
+        """How long since the agent last did anything.
+
+        A stopped daemon leaves every panel frozen at plausible values, which is
+        indistinguishable from a quiet market — the exact question "why did it
+        stop?" that took a manual log dig to answer on 2026-09-18.
+        """
+        now = datetime.now(timezone.utc)
+        records = self.read_records()
+        newest = ""
+        for record in reversed(records):
+            newest = str(record.get("at") or "")
+            if newest:
+                break
+        age: Optional[float] = None
+        seen = _parse_stamp(newest)
+        if seen is not None:
+            age = (now - seen).total_seconds()
+        stale_after = 300.0
+        return {
+            "last_event_at": newest,
+            "silent_seconds": age,
+            "stale_after_seconds": stale_after,
+            "silent": age is not None and age > stale_after,
+            "events_today": len(records),
+        }
+
     def _latest_regimes(self) -> dict[str, dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
         for record in self.read_records(limit=4000):
@@ -601,6 +628,7 @@ class DashboardState:
             # Why the order table is allowed to be static, and what the rule
             # would hold if it decided this second.
             "cadence": self.cadence(),
+            "pulse": self.pulse(),
             "candidate_summary": self._candidate_summary(),
             "evidence": _evidence_view(
                 _read_json(self.state_dir / "strategy_evidence.json"),

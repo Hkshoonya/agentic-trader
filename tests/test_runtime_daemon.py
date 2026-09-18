@@ -564,3 +564,96 @@ class StageApplicationTests(unittest.TestCase):
         assert event is not None
         self.assertEqual(event["event"], "stage_mode_blocked")
         self.assertEqual(loop.mode, "shadow")
+
+
+class StartupResilienceTests(unittest.TestCase):
+    """A network blip must not stop the agent for hours.
+
+    On 2026-09-18 a DNS failure at startup raised straight out of run_daemon and
+    the service crash-looped 419 times over six and a half hours. Two bugs made
+    that possible: the failure was not retried, and the shutdown path masked the
+    real error with an UnboundLocalError.
+    """
+
+    def test_a_network_failure_is_retried_until_it_recovers(self) -> None:
+        from agentic_trading import runtime as module
+
+        attempts = {"n": 0}
+        waits: list[float] = []
+
+        class _Flaky:
+            journal = mock.Mock()
+
+            def start(self) -> None:
+                attempts["n"] += 1
+                if attempts["n"] < 3:
+                    raise OSError("[Errno -2] Name or service not known")
+
+        module._start_with_retry(_Flaky(), sleep=waits.append, clock=lambda: 0.0)
+        self.assertEqual(attempts["n"], 3)
+        self.assertEqual(waits, [5.0, 10.0], "backoff must grow between attempts")
+
+    def test_giving_up_raises_the_real_error_not_a_masked_one(self) -> None:
+        from agentic_trading import runtime as module
+
+        class _Down:
+            journal = mock.Mock()
+
+            def start(self) -> None:
+                raise OSError("Name or service not known")
+
+        clock = iter([0.0, 0.0, 9999.0, 9999.0])
+        with self.assertRaises(OSError) as caught:
+            module._start_with_retry(
+                _Down(), sleep=lambda _: None, clock=lambda: next(clock)
+            )
+        self.assertIn("Name or service", str(caught.exception))
+
+    def test_a_configuration_error_fails_fast(self) -> None:
+        """Waiting forever on a mistake wastes the outage and hides it."""
+        from agentic_trading import runtime as module
+
+        class _BadConfig:
+            journal = mock.Mock()
+
+            def start(self) -> None:
+                raise FileNotFoundError("no tokens.json")
+
+        with self.assertRaises(FileNotFoundError):
+            module._start_with_retry(_BadConfig(), sleep=lambda _: None)
+
+    def test_retryable_classification(self) -> None:
+        from agentic_trading import runtime as module
+
+        for name in ("ConnectError", "ReadTimeout", "gaierror", "SSLError"):
+            exc = type(name, (Exception,), {})("down")
+            self.assertTrue(module._is_retryable_startup_error(exc), name)
+        for exc in (FileNotFoundError("x"), ValueError("x"), TypeError("x")):
+            self.assertFalse(module._is_retryable_startup_error(exc), type(exc).__name__)
+
+    def test_the_daemon_joins_workers_even_when_startup_fails(self) -> None:
+        """The finally block must not reference a name the try never bound."""
+        from agentic_trading import runtime as module
+
+        tools = load_tools()
+        client = FakeMcpClient(tools)
+        broker = Broker(client, tools)
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config_path = _write_config(tmp, mode="shadow", extra=['autonomy = "manual"'])
+            config = load_config(config_path)
+            boom = RuntimeError("startup exploded")
+            with mock.patch(
+                "agentic_trading.runtime._start_with_retry", side_effect=boom
+            ):
+                with self.assertRaises(RuntimeError) as caught:
+                    module.run_daemon(
+                        config,
+                        broker=broker,
+                        strategy=FixtureStrategy(),
+                        tools=tools,
+                        once=True,
+                        sleep=lambda _: None,
+                    )
+        # The original error, not UnboundLocalError about `workers`.
+        self.assertIn("startup exploded", str(caught.exception))

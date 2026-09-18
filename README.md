@@ -815,6 +815,29 @@ Open `results/dashboard.html` in a browser. It is an offline report, with no web
 
 Historical proposals have expired. They are a decision log, not current instructions to buy or sell.
 
+## When the agent stops
+
+It can stop for reasons that are not its code: the machine sleeps, the network
+drops, the broker gateway is unreachable, the refresh token expires. Three
+controls exist so that a stop is short, loud, and explained.
+
+**It survives an outage.** A network failure at startup is retried with backoff
+(5s doubling to 60s, for up to 30 minutes) rather than raising out of the loop,
+and the retries are journalled as `startup_retry` so the console shows why
+nothing is happening. A cycle that completes without an error clears the
+consecutive-error counter, so transient failures spread across an outage can no
+longer accumulate into a kill switch.
+
+**It says so.** The console header carries a pulse badge: `live · last event
+12s ago` normally, and `AGENT SILENT 47m` when the journal stops growing, because
+a dead agent and a quiet market look identical otherwise.
+
+**You get told.** The systemd unit fires `agentic-trading-alert.service` when it
+enters the failed state (after 15 failed restarts in 15 minutes, instead of
+looping 419 times in silence), which sends a critical desktop notification and
+writes `data/state/STOPPED_AT.txt`. The daemon deletes that marker on its next
+successful start and journals `recovered_after_stop` with how long it was down.
+
 ## Follow an incoming quote file
 
 ```bash

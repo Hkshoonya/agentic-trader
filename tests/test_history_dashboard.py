@@ -910,3 +910,58 @@ class RebuiltGradeTests(unittest.TestCase):
             )
             row = DashboardState(config).orders_table()["rows"][0]
         self.assertIsNone(row["confidence"]["order"])
+
+
+class PulseTests(unittest.TestCase):
+    """A stopped agent must look stopped, not merely quiet."""
+
+    def test_a_fresh_journal_reads_as_live(self) -> None:
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = DashboardTests()._config(tmp)
+            journal = Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            journal.write_text(
+                _json.dumps(
+                    {"event": "cycle_stats", "at": datetime.now(timezone.utc).isoformat()}
+                )
+                + "\n"
+            )
+            pulse = DashboardState(config).pulse()
+        self.assertFalse(pulse["silent"])
+        self.assertLess(pulse["silent_seconds"], 60)
+
+    def test_a_silent_journal_is_flagged(self) -> None:
+        """Six hours of nothing looked exactly like a quiet market."""
+        import json as _json
+        from datetime import timedelta
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            config = DashboardTests()._config(tmp)
+            journal = Path(config.journal_dir) / f"{date.today().isoformat()}.jsonl"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            stale = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+            journal.write_text(
+                _json.dumps({"event": "cycle_stats", "at": stale}) + "\n"
+            )
+            pulse = DashboardState(config).pulse()
+        self.assertTrue(pulse["silent"])
+        self.assertGreater(pulse["silent_seconds"], 3600)
+
+    def test_an_empty_journal_is_not_reported_as_live(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            config = DashboardTests()._config(Path(tmp_name))
+            pulse = DashboardState(config).pulse()
+        self.assertIsNone(pulse["silent_seconds"])
+        self.assertFalse(pulse["silent"])
+        self.assertEqual(pulse["events_today"], 0)
+
+    def test_the_summary_carries_the_pulse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            config = DashboardTests()._config(Path(tmp_name))
+            summary = DashboardState(config).summary()
+        self.assertIn("pulse", summary)
+        self.assertIn("silent", summary["pulse"])
