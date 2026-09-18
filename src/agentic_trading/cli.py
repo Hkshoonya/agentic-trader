@@ -949,6 +949,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     promote_p.add_argument("stage", choices=["shadow", "probation", "live"])
     promote_p.add_argument("--config", required=True)
 
+    agents_p = sub.add_parser(
+        "agents", help="Show the agent fleet: role, authority, health"
+    )
+    agents_p.add_argument("--config", required=True)
+
     llm_p = sub.add_parser(
         "llm-check",
         help="Smoke-test the configured model backends (no trading state touched)",
@@ -1011,6 +1016,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if args.command == "promote":
         return cmd_promote(args.config, args.stage)
+    if args.command == "agents":
+        from agentic_trading.agents import load_roster
+
+        config = load_config(args.config)
+        roster = load_roster(config.state_dir)
+        print(
+            f"{'agent':<11} {'health':<8} {'authority':<16} {'last ok':<12} role"
+        )
+        for agent in roster["agents"]:
+            health = agent.get("health") or {}
+            age = health.get("age_seconds")
+            last = "never" if age is None else f"{age:.0f}s ago"
+            print(
+                f"{agent['name']:<11} {health.get('status', '?'):<8} "
+                f"{agent['authority']:<16} {last:<12} {agent['role']}"
+            )
+        return 0
     if args.command == "llm-check":
         from agentic_trading.llm.check import format_results, run_checks
 

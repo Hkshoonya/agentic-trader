@@ -277,6 +277,17 @@ class StalenessTests(unittest.TestCase):
         builder.assert_called_once()
 
 
+class _FakeLoop:
+    """Just enough of the loop for the worker paths: equity and the roster."""
+
+    def __init__(self, equity: str = "50") -> None:
+        self.guard = SimpleNamespace(current_equity=Decimal(equity))
+        self.agents: list[tuple[str, bool, dict]] = []
+
+    def note_agent(self, name, *, ok, detail=None, error="") -> None:
+        self.agents.append((name, ok, dict(detail or {})))
+
+
 class DaemonRefreshTests(unittest.TestCase):
     """The daemon has to refresh it without being asked."""
 
@@ -297,7 +308,7 @@ class DaemonRefreshTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as name:
             config = self._config(Path(name), days=0)
-            loop = SimpleNamespace(guard=SimpleNamespace(current_equity=Decimal("50")))
+            loop = _FakeLoop()
             journal = mock.Mock()
             with mock.patch(
                 "agentic_trading.evidence.refresh_if_stale"
@@ -305,6 +316,7 @@ class DaemonRefreshTests(unittest.TestCase):
                 module._refresh_evidence(config, loop, journal)
         refresh.assert_not_called()
         journal.append.assert_not_called()
+        self.assertEqual(loop.agents, [], "a disabled refresh is not an agent run")
 
     def test_a_refresh_is_journaled_with_its_numbers(self) -> None:
         from unittest import mock
@@ -313,7 +325,7 @@ class DaemonRefreshTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as name:
             config = self._config(Path(name), days=7)
-            loop = SimpleNamespace(guard=SimpleNamespace(current_equity=Decimal("50")))
+            loop = _FakeLoop()
             journal = mock.Mock()
             report = {
                 "configs": {"production": {"per_order_pct": 0.01, "trades": 495}},
@@ -329,6 +341,10 @@ class DaemonRefreshTests(unittest.TestCase):
         self.assertEqual(events[0]["event"], "evidence_refreshed")
         self.assertEqual(events[0]["trades"], 495)
         self.assertEqual(events[0]["age_at_build_days"], 12.0)
+        # The research agent's health comes from this run, not from a label.
+        self.assertEqual(loop.agents[0][0], "research")
+        self.assertTrue(loop.agents[0][1])
+        self.assertEqual(loop.agents[0][2]["trades"], 495)
 
     def test_a_failure_is_journaled_and_not_retried_immediately(self) -> None:
         from unittest import mock
@@ -337,7 +353,7 @@ class DaemonRefreshTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as name:
             config = self._config(Path(name), days=7)
-            loop = SimpleNamespace(guard=SimpleNamespace(current_equity=Decimal("50")))
+            loop = _FakeLoop()
             journal = mock.Mock()
             with mock.patch(
                 "agentic_trading.evidence.refresh_if_stale",

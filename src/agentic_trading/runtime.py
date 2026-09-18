@@ -303,6 +303,8 @@ class _Loop:
         self.session_policy = config.session_policy
         self.evidence_confidence: float = 0.0
         self.last_evolution_at = 0.0
+        # What each agent in the fleet last did; published by write_agent_state().
+        self.agent_runs: dict[str, dict[str, Any]] = {}
         self.advisor = None
         self.regime_gate = None
         try:
@@ -593,6 +595,38 @@ class _Loop:
             return
         self.journal.append({"event": "live_gate", **payload})
 
+    def note_agent(
+        self,
+        name: str,
+        *,
+        ok: bool,
+        detail: Optional[dict[str, Any]] = None,
+        error: str = "",
+    ) -> None:
+        """Record what an agent just did, so its health is observed not assumed."""
+        stamp = datetime.now(timezone.utc).isoformat()
+        entry = self.agent_runs.setdefault(
+            name,
+            {
+                "last_run_at": "",
+                "last_ok_at": "",
+                "consecutive_failures": 0,
+                "errors": 0,
+                "last_error": "",
+            },
+        )
+        entry["last_run_at"] = stamp
+        if ok:
+            entry["last_ok_at"] = stamp
+            entry["consecutive_failures"] = 0
+            entry["last_error"] = ""
+        else:
+            entry["consecutive_failures"] = int(entry.get("consecutive_failures", 0)) + 1
+            entry["errors"] = int(entry.get("errors", 0)) + 1
+            entry["last_error"] = str(error)[:300]
+        if detail:
+            entry.setdefault("detail", {}).update(detail)
+
     def write_agent_state(self) -> None:
         """Publish what every worker in this process is doing.
 
@@ -610,13 +644,37 @@ class _Loop:
         notifier = getattr(self, "notifier", None)
         if notifier is not None:
             channels = [channel.name for channel in notifier.channels]
+        from agentic_trading import agents as fleet
+
+        runs = self.agent_runs
+        declared = {agent.name: agent.to_dict() for agent in fleet.FLEET}
+
+        def _entry(name: str, **extra: Any) -> dict[str, Any]:
+            run = dict(runs.get(name) or {})
+            detail = {**(run.pop("detail", None) or {}), **extra.pop("detail", {})}
+            return {**declared[name], **run, **extra, "detail": detail}
+
         agents = [
-            {
-                "name": "strategy",
-                "role": f"mechanical signals ({self.config.strategy})",
-                "kind": "local",
-                "status": "running" if not self.should_stop() else "stopped",
-            },
+            _entry(
+                "strategy",
+                kind="local",
+                status="running" if not self.should_stop() else "stopped",
+                detail={"strategy": self.config.strategy},
+            ),
+            _entry(
+                "execution",
+                kind="local",
+                status="tripped" if self.guard.kill_switch else "running",
+                reason=self.guard.kill_reason,
+                detail={
+                    "max_order_pct": str(self.guard.max_order_pct),
+                    "daily_notional_pct": str(self.guard.daily_notional_pct),
+                    "armed": os.environ.get("AGENTIC_ALLOW_LIVE") == "1",
+                },
+            ),
+            _entry("data", kind="worker"),
+            _entry("research", kind="worker", stage=self.stage),
+            _entry("backcheck", kind="worker"),
             {
                 "name": "advisor",
                 "role": "LLM entry veto, may only refuse",
@@ -1683,6 +1741,17 @@ def run_daemon(
 
                         report = run_checks(_loop.config, _loop.broker)
                         write_report(_loop.config, report)
+                        _loop.note_agent(
+                            "backcheck",
+                            ok=report.healthy,
+                            detail={
+                                "ok": sum(
+                                    1 for c in report.checks if c.status == "ok"
+                                ),
+                                "failed": [c.name for c in report.failures],
+                            },
+                            error="a check failed" if not report.healthy else "",
+                        )
                         _loop.journal.append(
                             {
                                 "event": "selfcheck",
@@ -1695,6 +1764,7 @@ def run_daemon(
                             }
                         )
                     except Exception as exc:  # noqa: BLE001 — never kill the loop
+                        _loop.note_agent("backcheck", ok=False, error=str(exc))
                         _loop.journal.append(
                             {"event": "selfcheck_failed", "error": str(exc)[:200]}
                         )
@@ -1799,6 +1869,19 @@ def run_daemon(
                 )
             kill_state = loop.guard.kill_switch
 
+            # The strategy and execution agents report from where the work is.
+            loop.note_agent(
+                "strategy",
+                ok=not cycle_had_error,
+                detail={"fresh_quotes": len(fresh), "cycles": cycles + 1},
+                error="tick raised" if cycle_had_error else "",
+            )
+            if fresh:
+                loop.note_agent(
+                    "execution",
+                    ok=True,
+                    detail={"decisions_today": loop.orders_today},
+                )
             cycles += 1
             cycle_seconds += time.monotonic() - cycle_started
             fresh_total += len(fresh)
@@ -1938,8 +2021,22 @@ def _refresh_evidence(config: Config, loop: _Loop, journal: DecisionJournal) -> 
         journal.append({"event": "evidence_refresh_failed", "error": str(exc)[:200]})
         return
     if report is None:
+        loop.note_agent(
+            "research",
+            ok=True,
+            detail={"note": "report still current"},
+        )
         return
     production = (report.get("configs") or {}).get("production") or {}
+    loop.note_agent(
+        "research",
+        ok=True,
+        detail={
+            "trades": production.get("trades"),
+            "expectancy_bps": production.get("expectancy_bps"),
+            "max_drawdown_pct": production.get("max_drawdown_pct"),
+        },
+    )
     journal.append(
         {
             "event": "evidence_refreshed",
@@ -2125,7 +2222,9 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                         "errors": errors,
                     }
                 )
+                loop.note_agent("data", ok=False, error=str(exc))
             except Exception as exc:  # noqa: BLE001 — never kill the loop
+                loop.note_agent("data", ok=False, error=str(exc))
                 journal.append({"event": "history_sync_failed", "error": str(exc)[:200]})
 
             # Correlations and execution costs are recomputed on the same

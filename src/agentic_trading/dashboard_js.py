@@ -349,30 +349,60 @@ function renderAgents(summary) {
   if (!agents.length) {
     box.innerHTML = '<div class="sub">daemon has not published its roster yet</div>';
   } else {
+    // The fleet: each agent's declared authority, its derived health, and when
+    // it last did something. Health is computed from the work, so "running"
+    // cannot be true of an agent that has silently stopped doing anything.
+    const healthCls = {ok: 'buy', stale: 'sell', failing: 'sell',
+                       disabled: 'sub', unknown: 'sub'};
+    const authorityLabel = {read_only: 'read-only',
+                            may_reduce_risk: 'reduce risk only',
+                            may_trade: 'may trade'};
+    const fmtAge = (seconds) => {
+      if (seconds === null || seconds === undefined) return 'never';
+      if (seconds < 90) return Math.round(seconds) + 's ago';
+      if (seconds < 5400) return Math.round(seconds / 60) + 'm ago';
+      return Math.round(seconds / 3600) + 'h ago';
+    };
     box.innerHTML = agents.map(a => {
-      const cls = a.status === 'running' ? 'buy'
-        : (a.status === 'tripped' ? 'sell' : 'sub');
-      let detail = '';
-      if (a.name === 'advisor') {
-        detail = (a.calls || 0) + ' calls · ' + (a.errors || 0) + ' errors';
-      } else if (a.name === 'regime') {
-        detail = (a.views || 0) + ' views'
-          + (a.worker ? ' · worker live' : '');
-      } else if (a.name === 'risk guard') {
-        detail = num(Number(a.max_order_pct || 0) * 100) + '%/order · '
-          + num(Number(a.daily_notional_pct || 0) * 100) + '%/day';
-      } else if (a.name === 'evolution') {
-        detail = 'stage ' + (a.stage || '?');
-      } else if (a.name === 'notifier') {
-        detail = (a.channels && a.channels.length ? a.channels.join('+') : 'none')
-          + ' · ' + (a.sent || 0) + ' sent';
-      } else {
-        detail = a.role || '';
+      const health = a.health || {};
+      const status = health.status || a.status || 'unknown';
+      const cls = healthCls[status] || 'sub';
+      const bits = [];
+      bits.push(fmtAge(health.age_seconds));
+      if (authorityLabel[a.authority]) bits.push(authorityLabel[a.authority]);
+      const d = a.detail || {};
+      if (a.name === 'data' && d.symbols !== undefined) {
+        bits.push(d.symbols + ' symbols synced');
       }
+      if (a.name === 'research' && d.trades !== undefined) {
+        bits.push(d.trades + ' trades · ' + num(Number(d.expectancy_bps || 0)) + ' bps');
+      }
+      if (a.name === 'strategy' && d.fresh_quotes !== undefined) {
+        bits.push(d.fresh_quotes + ' fresh quotes/cycle');
+      }
+      if (a.name === 'execution') {
+        bits.push(num(Number((d.max_order_pct || 0))) * 100 + '%/order');
+        bits.push(d.armed ? 'ARMED' : 'disarmed');
+      }
+      if (a.name === 'backcheck' && d.ok !== undefined) {
+        bits.push(d.ok + ' checks');
+      }
+      if ((a.consecutive_failures || 0) > 0) {
+        bits.push(a.consecutive_failures + ' failures');
+      }
+      const err = (health.last_error || '').slice(0, 80);
       return '<div class="row"><span>' + a.name + '</span><b class="' + cls + '">'
-        + a.status + '</b></div><div class="sub" style="margin:-2px 0 6px">'
-        + detail + '</div>';
-    }).join('');
+        + status + '</b></div><div class="sub" style="margin:-2px 0 6px">'
+        + bits.join(' · ') + (err ? ' · ' + err : '') + '</div>';
+    }).join('')
+      // The model helpers are not the fleet: they advise, they do not run.
+      + (agents.some(a => a.name === 'advisor' || a.name === 'regime')
+        ? '<div class="sub" style="margin-top:6px">supporting</div>' + agents
+          .filter(a => a.name === 'advisor' || a.name === 'regime')
+          .map(a => '<div class="row"><span>' + a.name + '</span><b class="sub">'
+            + (a.status || '') + (a.model ? ' · ' + a.model : '') + '</b></div>')
+          .join('')
+        : '');
   }
   const alerts = summary.alerts || [];
   document.getElementById('alerts').innerHTML = alerts.length

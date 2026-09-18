@@ -617,6 +617,9 @@ class DashboardState:
         gate = _read_json(self.state_dir / "live_gate.json") or {}
         limits = _read_json(self.state_dir / "effective_limits.json") or {}
         agents = _read_json(self.state_dir / "agents.json") or {}
+        from agentic_trading.agents import load_roster
+
+        roster = load_roster(self.state_dir)
         health = _read_json(self.state_dir / "health.json") or {}
         promotion = load_state(self.state_dir)
         evolution = _read_json(self.state_dir / "evolution.json")
@@ -673,7 +676,9 @@ class DashboardState:
             "gate_updated_at": gate.get("updated_at", ""),
             "event_counts": {**counts, **self.decision_counts()},
             "regimes": regimes,
-            "agents": agents.get("agents", []),
+            # The fleet with derived health and declared authority, so the
+            # console can show which agent is well rather than which is named.
+            "agents": (roster.get("agents") if roster else agents.get("agents", [])),
             "agents_updated_at": agents.get("updated_at", ""),
             "alerts": [
                 {

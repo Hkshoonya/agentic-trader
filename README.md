@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-629%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-645%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -82,7 +82,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 629 tests
+.venv/bin/python -m pytest tests -q                     # 645 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -178,6 +178,44 @@ With the rule off (`0`, the default in `config/agentic.example.toml`) nothing
 changes: entries are refused with `below_min_notional` until the account grows
 past the point where the evidence-compliant size clears the minimum (~$110 at a
 1% ceiling).
+
+## The agents
+
+One process, five agents with different jobs, different cadences and different
+authority. Authority is ranked and enforced in one place
+(`src/agentic_trading/agents.py`): `read_only` < `may_reduce_risk` < `may_trade`,
+and only the execution agent holds `may_trade`.
+
+| agent | job | authority | cadence |
+|---|---|---|---|
+| **data** | bars, quotes, correlations, volume repair | read-only | daily |
+| **research** | walk-forward evidence, execution-cost measurement | read-only | weekly |
+| **strategy** | trend signals, advisor and regime gates | may reduce risk | hourly |
+| **execution** | risk guard, sizing, order placement | **may trade** | per cycle |
+| **backcheck** | the six independent health checks | read-only | 30 min |
+
+Why this is more than a roster: **health is derived from work**, not written by
+hand. Each agent publishes when it last ran, when it last *succeeded*, how many
+consecutive failures it has, and its own key numbers — so "running" cannot be
+true of an agent that quietly stopped doing anything.
+
+```console
+$ agentic-trading agents --config config/agentic.toml
+agent       health   authority        last ok      role
+data        ok       read_only        92s ago      bars, quotes, correlations
+research    ok       read_only        92s ago      walk-forward evidence, execution costs
+strategy    ok       may_reduce_risk  51s ago      trend signals + advisory gates
+execution   ok       may_trade        51s ago      risk guard, sizing, order placement
+backcheck   ok       read_only        108s ago     independent health checks
+```
+
+The failure modes are separated on purpose: a **data** problem makes the others
+cautious (the evidence gate refuses stale inputs) but cannot veto a trade; a
+**research** outage leaves execution running on the last report; a **strategy**
+gate can block an entry and nothing else; and **execution** is the only path to
+the broker, gated by the risk guard *and* the operator's arming switch. A stale or
+failing agent shows as `stale` or `failing` on the console rather than being
+inferred by a human reading logs.
 
 ## Models: what each one is allowed to do
 
@@ -279,7 +317,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   629 tests, including the honesty tests for the rig
+tests/                   645 tests, including the honesty tests for the rig
 ```
 
 ## Operations
