@@ -84,6 +84,15 @@ class Config:
     # sizing earns the same bps per trade with a third of the drawdown
     # (2.04%/order: 23.9% -> 9.0% max drawdown).
     sizing: str = "flat"
+    # How often the evolution agent may propose changes to the system. It writes
+    # proposals for review and can apply nothing; 0 disables it.
+    evolution_agent_interval_hours: float = 24.0
+    # Jev's per-entry judgment ("is this entry chasing?"). The probability is
+    # recorded on every order either way; it only *vetoes* when this is on, and
+    # then only at or above the threshold. Advisory by default: the model adds
+    # information, the operator decides how much authority it gets.
+    jev_veto_chase: bool = False
+    jev_chase_threshold: Decimal = Decimal("0.75")
 
     def __post_init__(self) -> None:
         if self.mode not in ("shadow", "live"):
@@ -157,6 +166,8 @@ class Config:
             raise ValueError("small_account_max_order_pct must be >= 0")
         if self.sizing not in ("flat", "proportional"):
             raise ValueError("sizing must be flat|proportional")
+        if not 0 <= float(self.jev_chase_threshold) <= 1:
+            raise ValueError("jev_chase_threshold must be between 0 and 1")
 
 
 def load_config(path: str | Path) -> Config:
@@ -217,4 +228,9 @@ def load_config(path: str | Path) -> Config:
             str(raw.get("small_account_max_order_pct", "0"))
         ),
         sizing=str(raw.get("sizing", "flat")),
+        evolution_agent_interval_hours=float(
+            raw.get("evolution_agent_interval_hours", 24.0)
+        ),
+        jev_veto_chase=bool(raw.get("jev_veto_chase", False)),
+        jev_chase_threshold=Decimal(str(raw.get("jev_chase_threshold", "0.75"))),
     )

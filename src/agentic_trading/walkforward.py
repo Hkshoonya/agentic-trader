@@ -570,10 +570,12 @@ def build_evidence(
       what the rule could carry, not a promise — the report says so explicitly.
     """
     def run(**kwargs: Any) -> WalkForwardResult:
+        # ``costs`` may be overridden per run (the gross pass switches costs off),
+        # so it is popped rather than passed twice.
         return walk_forward(
             series,
             folds=folds,
-            costs=costs,
+            costs=kwargs.pop("costs", costs),
             starting_cash=starting_cash,
             max_positions=max_positions,
             proportional=proportional,
@@ -582,6 +584,11 @@ def build_evidence(
 
     production = run(per_order_pct=per_order_pct)
     inverse = run(per_order_pct=per_order_pct, inverse_vol=True)
+    # What the edge survives in costs. The gate grades with an assumed cost
+    # model, and an edge whose break-even is below realistic costs is not an
+    # edge — so the gross expectancy is measured once with costs switched off
+    # and the break-even implied by it is reported next to the net number.
+    gross = run(per_order_pct=per_order_pct, costs=CostModel(spread_bps=Decimal("0"), slippage_bps=Decimal("0")))
     report: dict[str, Any] = {
         "hypotheses": 1,
         "alpha": 0.05,
@@ -606,6 +613,15 @@ def build_evidence(
             },
         },
         "gate_size": None,
+        "costs": {
+            "gross_expectancy_bps": round(gross.expectancy_bps, 3),
+            "net_expectancy_bps": round(production.expectancy_bps, 3),
+            "break_even_per_side_bps": round(gross.expectancy_bps / 2, 3),
+            "assumed_per_side_bps": float(
+                ((costs or CostModel()).per_side_bps)
+            ),
+            "trades": production.trades,
+        },
         "notes": [
             "Drawdown is measured on the marked-to-market account, not on "
             "realised exits: a position that is 30% under water shows up "

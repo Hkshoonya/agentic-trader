@@ -949,6 +949,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     promote_p.add_argument("stage", choices=["shadow", "probation", "live"])
     promote_p.add_argument("--config", required=True)
 
+    propose_p = sub.add_parser(
+        "propose",
+        help="Ask the evolution agent for system-change proposals (review only)",
+    )
+    propose_p.add_argument("--config", required=True)
+    propose_p.add_argument("--show", action="store_true", help="Print stored proposals")
+
     agents_p = sub.add_parser(
         "agents", help="Show the agent fleet: role, authority, health"
     )
@@ -1016,6 +1023,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if args.command == "promote":
         return cmd_promote(args.config, args.stage)
+    if args.command == "propose":
+        from agentic_trading import evolve_system
+        from agentic_trading.journal import DecisionJournal
+
+        config = load_config(args.config)
+        stored = evolve_system.read(config)
+        if not args.show:
+            journal = DecisionJournal(Path(config.journal_dir))
+            proposals = evolve_system.run(config, journal=journal)
+            print(f"proposed: {len(proposals)}")
+        stored = evolve_system.read(config)
+        queue = stored.get("proposals") or []
+        print(f"queue: {len(queue)} (model {stored.get('model', '?')})")
+        for item in queue:
+            print(
+                f"  [{item['category']:>11}] {item['title']} "
+                f"(confidence {item['confidence']}, {item['status']})"
+            )
+        return 0
     if args.command == "agents":
         from agentic_trading.agents import load_roster
 

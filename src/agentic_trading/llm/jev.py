@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import httpx
@@ -52,6 +53,222 @@ SYSTEM_PROMPT = (
     "direction is unclear, and panic only for disorderly, high-volatility "
     "declines. Judge only from the state given."
 )
+
+
+ENTRY_QUESTIONS: dict[str, dict[str, Any]] = {
+    "chase": {
+        "type": "noul",
+        "instructions": (
+            "Given the state, is a disciplined trend follower entering *now* "
+            "buying after a move that has already run — extended, overbought, "
+            "or far from its recent average?"
+        ),
+        "criteria": {
+            "true": "The move is extended; entering here is chasing it.",
+            "false": "The entry is early or neutral relative to the move.",
+        },
+    },
+    "participation": {
+        "type": "noul",
+        "instructions": (
+            "Given the state, is the recent move backed by participation — "
+            "volume at or above its recent norm — rather than thin or absent?"
+        ),
+        "criteria": {
+            "true": "Volume supports the move.",
+            "false": "Thin, absent or unknown volume.",
+        },
+    },
+}
+
+
+def build_entry_questions(symbols: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Two Noul judgments per symbol, all in one request.
+
+    These are the questions a person asks before every entry and rarely answers
+    consistently: *am I chasing?* and *is anyone else in this move?* They run
+    alongside each other and cost one call for the whole book.
+    """
+    questions: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        key = symbol.upper()
+        for name, template in ENTRY_QUESTIONS.items():
+            questions[f"{name}_{key}"] = {
+                **template,
+                "instructions": f"{template['instructions']} Instrument: {key}.",
+            }
+    return questions
+
+
+def parse_entry_answers(
+    payload: Any, *, symbols: Iterable[str]
+) -> dict[str, dict[str, float]]:
+    """``{symbol: {chase: p, participation: p}}``; fail closed per symbol."""
+    answers = payload.get("answers") if isinstance(payload, dict) else None
+    if not isinstance(answers, dict):
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for symbol in symbols:
+        key = symbol.upper()
+        readings: dict[str, float] = {}
+        for name in ENTRY_QUESTIONS:
+            answer = answers.get(f"{name}_{key}")
+            if not isinstance(answer, dict):
+                continue
+            try:
+                readings[name] = min(1.0, max(0.0, float(answer.get("noul", 0.0))))
+            except (TypeError, ValueError):
+                continue
+        if readings:
+            out[key] = readings
+    return out
+
+
+class JevEntryAdvisor:
+    """Cached per-symbol entry judgments. The order path only ever reads these.
+
+    Judgments come from a worker (one call for the whole book); a decision reads
+    the cache. That keeps a model call off the order path entirely — the same
+    rule the regime gate follows — while still letting the model inform every
+    entry instead of a sample of them.
+    """
+
+    def __init__(
+        self,
+        client: "JevClient",
+        *,
+        ttl_seconds: float = 900.0,
+        clock: Any = None,
+        state_path: Any = None,
+    ) -> None:
+        self.client = client
+        self.model = getattr(client, "model", "")
+        self.ttl_seconds = ttl_seconds
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self.state_path = Path(state_path) if state_path else None  # type: ignore[name-defined]
+        self._views: dict[str, dict[str, Any]] = {}
+        self.errors = 0
+        self.last_error = ""
+        self.calls = 0
+        self.last_run_at = ""
+        self.load()
+
+    # -- reads (never touch the network) ----------------------------------
+
+    def view(self, symbol: str) -> Optional[dict[str, Any]]:
+        return self._views.get(str(symbol).upper())
+
+    def views(self) -> dict[str, dict[str, Any]]:
+        return dict(self._views)
+
+    def due(self, symbol: str) -> bool:
+        entry = self.view(symbol)
+        if entry is None:
+            return True
+        try:
+            seen = datetime.fromisoformat(str(entry.get("at", "")))
+        except ValueError:
+            return True
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        return (self._clock() - seen).total_seconds() >= self.ttl_seconds
+
+    # -- refresh (worker thread only) --------------------------------------
+
+    def refresh_many(
+        self, features_by_symbol: dict[str, Optional[MarketFeatures]]
+    ) -> dict[str, dict[str, Any]]:
+        symbols = [symbol.upper() for symbol in features_by_symbol]
+        if not symbols:
+            return {}
+        state = {
+            "instruments": [
+                symbol_state(symbol, features_by_symbol[symbol]) for symbol in symbols
+            ],
+            "task": (
+                "Judge entries for a systematic trend follower. Answer each "
+                "question about its own instrument only."
+            ),
+        }
+        self.last_run_at = self._clock().isoformat()
+        try:
+            payload = self.client.system_one(
+                state=state, questions=build_entry_questions(symbols)
+            )
+        except Exception as exc:  # noqa: BLE001 — a model outage informs nothing
+            self.errors += 1
+            self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+            return {}
+        readings = parse_entry_answers(payload, symbols=symbols)
+        if not readings:
+            self.errors += 1
+            self.last_error = f"no usable answers in {str(payload)[:200]}"
+            return {}
+        self.calls += 1
+        stamp = self._clock().isoformat()
+        stored: dict[str, dict[str, Any]] = {}
+        for symbol, values in readings.items():
+            entry = {**values, "at": stamp, "model": self.model}
+            self._views[symbol] = entry
+            stored[symbol] = entry
+        self.last_error = ""
+        self.save()
+        return stored
+
+    def refresh_due(
+        self,
+        symbols: Iterable[str],
+        features_for: Any,
+    ) -> list[str]:
+        due = [str(s).upper() for s in symbols if self.due(str(s))]
+        if not due:
+            return []
+        features = {symbol: features_for(symbol) for symbol in due}
+        return list(self.refresh_many(features))
+
+    # -- persistence -------------------------------------------------------
+
+    def save(self) -> None:
+        if self.state_path is None:
+            return
+        from agentic_trading import jsonio
+
+        try:
+            jsonio.write_text(
+                self.state_path,
+                jsonio.dumps(
+                    {"updated_at": self._clock().isoformat(), "views": self._views},
+                    indent=2,
+                )
+                + "\n",
+            )
+        except OSError:
+            return
+
+    def load(self) -> int:
+        if self.state_path is None or not self.state_path.is_file():
+            return 0
+        import json
+
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        views = payload.get("views") if isinstance(payload, dict) else None
+        if not isinstance(views, dict):
+            return 0
+        for symbol, entry in views.items():
+            if isinstance(entry, dict):
+                self._views[str(symbol).upper()] = entry
+        return len(self._views)
+
+
+def build_entry_advisor(*, state_path: Any = None) -> Optional["JevEntryAdvisor"]:
+    """The entry advisor, or ``None`` without a key — always optional."""
+    gate_client = build_jev_gate(state_path=None)
+    if gate_client is None:
+        return None
+    return JevEntryAdvisor(gate_client.client, state_path=state_path)
 
 
 def build_questions(symbols: Iterable[str]) -> dict[str, dict[str, Any]]:

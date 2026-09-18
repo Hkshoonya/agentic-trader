@@ -307,6 +307,7 @@ class _Loop:
         self.agent_runs: dict[str, dict[str, Any]] = {}
         self.advisor = None
         self.regime_gate = None
+        self.entry_advisor = None
         try:
             from agentic_trading.llm.advisor import build_advisor, build_regime_gate
 
@@ -316,9 +317,17 @@ class _Loop:
             self.regime_gate = build_regime_gate(
                 state_path=Path(config.state_dir) / "regimes.json"
             )
+            # Jev's per-entry judgments (chasing, participation), read from a
+            # cache the worker fills. None without a TypeSafe key.
+            from agentic_trading.llm.jev import build_entry_advisor
+
+            self.entry_advisor = build_entry_advisor(
+                state_path=Path(config.state_dir) / "entry_context.json"
+            )
         except Exception:  # noqa: BLE001 — advisory layer must never block startup
             self.advisor = None
             self.regime_gate = None
+            self.entry_advisor = None
         self._feature_cache: dict[str, tuple[float, Any]] = {}
         self.apply_stage_caps()
 
@@ -627,6 +636,9 @@ class _Loop:
         if detail:
             entry.setdefault("detail", {}).update(detail)
 
+    def jev_context_views(self) -> int:
+        return 0 if self.entry_advisor is None else len(self.entry_advisor.views())
+
     def write_agent_state(self) -> None:
         """Publish what every worker in this process is doing.
 
@@ -675,6 +687,17 @@ class _Loop:
             _entry("data", kind="worker"),
             _entry("research", kind="worker", stage=self.stage),
             _entry("backcheck", kind="worker"),
+            {
+                "name": "entry context (jev)",
+                "role": "chase and participation judgments, cached",
+                "kind": "llm",
+                "status": "running" if self.entry_advisor is not None else "disabled",
+                "model": getattr(self.entry_advisor, "model", ""),
+                "views": self.jev_context_views(),
+                "calls": getattr(self.entry_advisor, "calls", 0),
+                "errors": getattr(self.entry_advisor, "errors", 0),
+                "veto": self.config.jev_veto_chase,
+            },
             {
                 "name": "advisor",
                 "role": "LLM entry veto, may only refuse",
@@ -1037,6 +1060,24 @@ class _Loop:
             self._journal_rejected(intent, "open_order_pending", Decimal("0"))
             return
 
+        # Jev's entry judgment, read from cache: is this entry chasing a move
+        # that has already run? Off by default — the judgment is recorded on
+        # every order either way, and only vetoes when the operator asks it to.
+        if is_entry and self.entry_advisor is not None:
+            context = self.entry_advisor.view(intent.symbol) or {}
+            chase = context.get("chase")
+            if (
+                self.config.jev_veto_chase
+                and chase is not None
+                and chase >= self.config.jev_chase_threshold
+            ):
+                self._journal_rejected(
+                    intent,
+                    f"jev_chase: p={float(chase):.2f}",
+                    intent.resolved_notional(),
+                )
+                return
+
         # Regime gate: a bad regime may refuse entries, never create them. It
         # reads a cached classification, so this costs nothing on the order path.
         if is_entry and self.regime_gate is not None:
@@ -1358,6 +1399,15 @@ class _Loop:
             payload["order"] = self._order_confidence(
                 symbol, advisor=advisor, blocked_by=blocked_by
             )
+            if self.entry_advisor is not None:
+                context = self.entry_advisor.view(symbol)
+                if context:
+                    payload["jev"] = {
+                        "chase": context.get("chase"),
+                        "participation": context.get("participation"),
+                        "at": context.get("at", ""),
+                        "model": context.get("model", ""),
+                    }
         return payload
 
     def _order_confidence(
@@ -1416,6 +1466,19 @@ class _Loop:
         )
         self._feature_cache[symbol] = (now, features)
         return features
+
+    def refresh_entry_context(self, *, symbols: Optional[list[str]] = None) -> int:
+        """Fill the Jev entry cache for the symbols that could be traded.
+
+        Called from the worker thread, never the order path. One call covers the
+        whole book, so the cost does not scale with how many symbols are stale.
+        """
+        if self.entry_advisor is None:
+            return 0
+        wanted = [s.upper() for s in (symbols or sorted(self.config.symbol_whitelist))]
+        return len(
+            self.entry_advisor.refresh_due(wanted, lambda s: self.market_features(s))
+        )
 
     def refresh_regimes(self, *, max_per_pass: int = 2) -> list[dict[str, Any]]:
         """Refresh stale regime classifications. Worker thread only.
@@ -1792,6 +1855,22 @@ def run_daemon(
                         _loop.journal.append(
                             {"event": "regime_failed", "error": str(exc)[:200]}
                         )
+                    # Same cadence, same symbols: Jev's per-entry judgments for
+                    # the whole book in one call. Advisory — it fills a cache the
+                    # order path reads and never waits on.
+                    try:
+                        filled = _loop.refresh_entry_context()
+                        if filled:
+                            _loop.journal.append(
+                                {"event": "entry_context", "refreshed": filled,
+                                 "model": getattr(
+                                     getattr(_loop, "entry_advisor", None), "model", ""
+                                 )}
+                            )
+                    except Exception as exc:  # noqa: BLE001 — advisory only
+                        _loop.journal.append(
+                            {"event": "entry_context_failed", "error": str(exc)[:200]}
+                        )
 
                 loop.regime_thread = threading.Thread(  # type: ignore[attr-defined]
                     target=_refresh_regimes,
@@ -1987,6 +2066,37 @@ def _apply_promotion(
             "caps": {"max_order_pct": str(loop.guard.max_order_pct)},
         }
     )
+
+
+def _propose_system_changes(
+    config: Config, loop: _Loop, journal: DecisionJournal
+) -> None:
+    """One evolution pass per day: propose, store, journal. Applies nothing.
+
+    Rate-limited on attempt, like the evidence refresh: a provider outage must
+    not turn into a retry loop, and a proposal queue that refills hourly is
+    noise rather than a review list.
+    """
+    if config.evolution_agent_interval_hours <= 0:
+        return
+    now = time.monotonic()
+    last = getattr(loop, "last_proposal_at", 0.0)
+    if last and (now - last) < config.evolution_agent_interval_hours * 3600:
+        return
+    loop.last_proposal_at = now
+    from agentic_trading import evolve_system
+
+    proposals = evolve_system.run(config, journal=journal)
+    if proposals:
+        loop.note_agent(
+            "evolution",
+            ok=True,
+            detail={"proposed": len(proposals), "pending": len(
+                evolve_system.read(config).get("proposals") or []
+            )},
+        )
+    else:
+        loop.note_agent("evolution", ok=True, detail={"proposed": 0})
 
 
 def _refresh_evidence(config: Config, loop: _Loop, journal: DecisionJournal) -> None:
@@ -2222,7 +2332,19 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                         "errors": errors,
                     }
                 )
-                loop.note_agent("data", ok=False, error=str(exc))
+                # Success heartbeat: the data agent's health comes from the sync
+                # that just returned. (This line was previously inside the try
+                # before `except`, so `exc` was unbound on the success path and
+                # every good sync was reported as a failure.)
+                loop.note_agent(
+                    "data",
+                    ok=True,
+                    detail={
+                        "symbols": len(results),
+                        "added": sum(result.added for result in results),
+                        "quality_issues": len(flagged),
+                    },
+                )
             except Exception as exc:  # noqa: BLE001 — never kill the loop
                 loop.note_agent("data", ok=False, error=str(exc))
                 journal.append({"event": "history_sync_failed", "error": str(exc)[:200]})
@@ -2266,6 +2388,8 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
     # honest moment to re-price the rule — and the gate grades the report, not
     # the search, so a report nobody refreshed is a promotion that never comes.
     _refresh_evidence(config, loop, journal)
+    # The evolution agent reads what the refresh just wrote, so it runs after it.
+    _propose_system_changes(config, loop, journal)
 
     # Skip the (minutes-long) search when nothing the evaluation reads has
     # changed: the journal then explains why confidence is not moving.

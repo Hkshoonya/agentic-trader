@@ -38,6 +38,29 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
+def _proposals_view(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """The evolution agent's queue, trimmed for the console."""
+    if not payload:
+        return {"count": 0, "model": "", "updated_at": "", "proposals": []}
+    items = [
+        {
+            "title": str(item.get("title", ""))[:120],
+            "category": item.get("category", ""),
+            "confidence": item.get("confidence"),
+            "status": item.get("status", "proposed"),
+            "evidence": str(item.get("evidence", ""))[:200],
+        }
+        for item in (payload.get("proposals") or [])
+        if isinstance(item, dict)
+    ]
+    return {
+        "count": len(items),
+        "model": payload.get("model", ""),
+        "updated_at": payload.get("updated_at", ""),
+        "proposals": items[-8:],
+    }
+
+
 def _parse_stamp(value: str) -> Optional[datetime]:
     try:
         stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -735,6 +758,9 @@ class DashboardState:
             "cadence": self.cadence(),
             "pulse": self.pulse(),
             "candidate_summary": self._candidate_summary(),
+            "proposals": _proposals_view(
+                _read_json(self.state_dir / "proposals.json")
+            ),
             "evidence": _evidence_view(
                 _read_json(self.state_dir / "strategy_evidence.json"),
                 auto_refresh_days=self.config.evidence_refresh_days,

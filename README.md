@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-645%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-660%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -82,7 +82,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 645 tests
+.venv/bin/python -m pytest tests -q                     # 660 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -178,6 +178,35 @@ With the rule off (`0`, the default in `config/agentic.example.toml`) nothing
 changes: entries are refused with `below_min_notional` until the account grows
 past the point where the evidence-compliant size clears the minimum (~$110 at a
 1% ceiling).
+
+## The evolution agent
+
+A sixth agent reads the system's own telemetry — refusals and their reasons, the
+evidence and its size frontier, measured execution costs, fleet health, and
+back-check results — and writes **proposals to change the system**. It cannot
+apply them.
+
+That is the design, not a shortcut. Every other model in this repository is
+bounded by "may only reduce risk"; an agent that can change the system can
+increase risk by definition, so this one's authority is `read_only` and a test
+pins it. A proposal is a reviewable artifact: the change, the numbers that
+justify it, the risk of being wrong, and what would falsify it. Implementing one
+goes through the same branch protection as any other change.
+
+```console
+$ agentic-trading propose --config config/agentic.toml
+proposed: 3
+queue: 7 (model deepseek-flash)
+  [reliability] Fix data agent exception handling bug (confidence 0.95, proposed)
+  [  execution] Implement measured execution cost tracking (confidence 0.95, proposed)
+  [   research] Stress-test expectancy against higher execution costs (confidence 0.85, proposed)
+```
+
+It runs once a day from the evaluation worker, and the queue is on the console.
+Proposals with no evidence or no falsification test are dropped rather than
+stored: a queue of opinions is worse than an empty queue. On its first pass it
+found a real defect in this codebase — an unbound exception variable in the data
+agent's success path — from telemetry alone, which is the standard it is held to.
 
 ## The agents
 
@@ -317,7 +346,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   645 tests, including the honesty tests for the rig
+tests/                   660 tests, including the honesty tests for the rig
 ```
 
 ## Operations

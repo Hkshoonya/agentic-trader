@@ -102,6 +102,19 @@ FLEET: tuple[Agent, ...] = (
         ),
     ),
     Agent(
+        name="evolution",
+        role="proposes changes to the system",
+        authority=READ_ONLY,
+        cadence_seconds=86_400.0,
+        description=(
+            "Reads the system's own telemetry — refusals and their reasons, the "
+            "evidence and its size frontier, measured costs, fleet health, "
+            "back-check results — and writes reviewable proposals with the "
+            "numbers attached. It cannot apply them: a model that may change the "
+            "system is a model that may increase risk."
+        ),
+    ),
+    Agent(
         name="backcheck",
         role="independent health checks",
         authority=READ_ONLY,
@@ -186,6 +199,12 @@ def grade_health(
     }
     if failures >= 3:
         return Health(status="failing", age_seconds=age, detail=detail)
+    if failures and detail["last_error"]:
+        # It ran, it succeeded since, but the last recorded error is still
+        # standing. Reporting that as plain "ok" is how a real defect hid in
+        # plain sight: the data agent showed ok while its last_error named an
+        # exception, and only a model reading the telemetry noticed.
+        return Health(status="degraded", age_seconds=age, detail=detail)
     if age is None:
         return Health(status="unknown", age_seconds=None, detail=detail)
     if age > cadence * stale_after_factor:

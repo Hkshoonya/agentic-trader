@@ -254,6 +254,28 @@ async function refresh() {
       + '<div class="row"><span>champion</span><b>' + JSON.stringify(e.champion).slice(0, 90) + '</b></div>'
       + '<div class="sub" style="margin-top:8px">ran ' + (e.run_at || 'never') + '</div>';
   }
+  // The evolution agent's queue: proposals for the operator to review. It can
+  // write these and nothing else — no limit, no gate and no order changes.
+  const proposals = summary.proposals || {};
+  const proposalBox = document.getElementById('proposals');
+  if (proposalBox) {
+    if (!proposals.count) {
+      proposalBox.innerHTML = 'nothing proposed yet — the agent proposes only when '
+        + 'the telemetry shows something worth changing';
+    } else {
+      proposalBox.innerHTML =
+        '<div class="sub">' + proposals.count + ' in the queue · model '
+        + (proposals.model || '?') + ' · updated '
+        + (proposals.updated_at ? new Date(proposals.updated_at).toLocaleString() : '—')
+        + '</div>'
+        + proposals.proposals.slice().reverse().map(p =>
+          '<div class="row"><span>' + p.category + ' · ' + p.title + '</span><b class="sub">'
+          + num(Number(p.confidence || 0), 2) + ' · ' + p.status + '</b></div>'
+          + '<div class="sub" style="margin:-2px 0 6px">' + (p.evidence || '') + '</div>'
+        ).join('');
+    }
+  }
+
   // The model's read on each symbol's regime, and whether it is holding
   // entries back. A "+trend" never creates a trade; only chop/panic stop one.
   const regimes = summary.regimes || {};
@@ -353,7 +375,7 @@ function renderAgents(summary) {
     // it last did something. Health is computed from the work, so "running"
     // cannot be true of an agent that has silently stopped doing anything.
     const healthCls = {ok: 'buy', stale: 'sell', failing: 'sell',
-                       disabled: 'sub', unknown: 'sub'};
+                       degraded: 'shadow', disabled: 'sub', unknown: 'sub'};
     const authorityLabel = {read_only: 'read-only',
                             may_reduce_risk: 'reduce risk only',
                             may_trade: 'may trade'};
