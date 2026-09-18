@@ -458,17 +458,30 @@ class Launcher:
                          relief="flat")
         model.insert(0, "deepseek-chat")
         model.pack(padx=14, pady=4)
+        tk.Label(
+            dialog,
+            text=(
+                "TypeSafe API key (optional) — Jev classifies the regime for the "
+                "whole book in one call:"
+            ),
+            bg=BG, fg=FG, font=("Segoe UI", 10),
+        ).pack(padx=14, pady=(8, 0), anchor="w")
+        typesafe = tk.Entry(dialog, width=64, show="•", bg=PANEL, fg=FG,
+                            insertbackground=FG, relief="flat")
+        typesafe.pack(padx=14, pady=4)
 
         def save() -> None:
-            write_dotenv(
-                self.workspace / ".env",
-                {
-                    "AGENTIC_LLM_API_KEY": entry.get().strip(),
-                    "AGENTIC_LLM_BASE_URL": base.get().strip(),
-                    "AGENTIC_LLM_MODEL": model.get().strip(),
-                    "AGENTIC_LLM_ADVISOR": "1",
-                },
-            )
+            values = {
+                "AGENTIC_LLM_API_KEY": entry.get().strip(),
+                "AGENTIC_LLM_BASE_URL": base.get().strip(),
+                "AGENTIC_LLM_MODEL": model.get().strip(),
+                "AGENTIC_LLM_ADVISOR": "1",
+            }
+            key = typesafe.get().strip()
+            if key:
+                values["TYPESAFE_API_KEY"] = key
+                values["AGENTIC_REGIME_BACKEND"] = "jev"
+            write_dotenv(self.workspace / ".env", values)
             self.advisor_var.set(True)
             self._set_advisor()
             self.log("API key saved; the advisor is on for the next start")

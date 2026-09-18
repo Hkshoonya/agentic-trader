@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-604%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-622%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -82,7 +82,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 604 tests
+.venv/bin/python -m pytest tests -q                     # 622 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -179,6 +179,47 @@ changes: entries are refused with `below_min_notional` until the account grows
 past the point where the evidence-compliant size clears the minimum (~$110 at a
 1% ceiling).
 
+## Models: what each one is allowed to do
+
+The system uses models for *judgment*, never for creation. Both backends below
+can only refuse an entry; neither can invent a trade, size one, or extend a
+hold.
+
+| Role | Default | Alternative |
+|---|---|---|
+| Entry veto + regime read | any OpenAI-compatible chat model (`AGENTIC_LLM_API_KEY`) | **TypeSafe Jev** (below) |
+
+### TypeSafe Jev for the regime read
+
+Jev returns *typed judgments* — a choice, a probability per option, and a
+confidence — rather than prose. That makes it a better fit for the regime gate
+than a chat model, and cheaper: the gate asks one question per symbol, and Jev
+answers all of them **in a single call**, so the whole 16-symbol book is
+classified with a probability for every regime instead of one parsed label per
+round trip.
+
+```bash
+export TYPESAFE_API_KEY=...        # console.typesafe.ai/settings/keys
+export AGENTIC_REGIME_BACKEND=jev  # default: the chat model
+```
+
+Optional: `TYPESAFE_BASE_URL`, `TYPESAFE_MODEL` (default `jev-latest`).
+
+What changes, concretely:
+
+- one request per refresh instead of one per symbol (the chat-model gate made
+  368 calls on a quiet day here);
+- every view carries its distribution, so the console can show
+  `chop 0.65, trend_down 0.20, trend_up 0.10, panic 0.05` instead of a label;
+- the same rule as before still decides: a regime blocks entries only when the
+  model is at least `block_confidence` (0.60) sure, and low confidence means the
+  gate stands aside rather than guessing;
+- if the key is missing the daemon logs that it is falling back to the chat
+  model, rather than silently using a different model's judgments.
+
+On Windows, paste the key into **API key…** in the launcher and it writes both
+variables for you.
+
 ## The console
 
 <img src="docs/assets/console.png" alt="The read-only console: account equity, promotion gate, market and order table with per-order confidence, candidates, live execution stream, agents on duty, walk-forward evidence" width="900">
@@ -220,7 +261,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   604 tests, including the honesty tests for the rig
+tests/                   622 tests, including the honesty tests for the rig
 ```
 
 ## Operations

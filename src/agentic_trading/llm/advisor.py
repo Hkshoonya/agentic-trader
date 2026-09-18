@@ -69,12 +69,33 @@ def build_regime_gate(
     model: str = "",
     state_path: Any = None,
 ) -> Optional["RegimeGate"]:
-    """Regime gate on the same opt-in as the advisor; ``None`` when disabled."""
+    """Regime gate on the same opt-in as the advisor; ``None`` when disabled.
+
+    ``AGENTIC_REGIME_BACKEND=jev`` swaps the chat-model classifier for TypeSafe's
+    Jev, which answers a Choice question per symbol and therefore classifies the
+    whole book in one call with a probability per regime. The gate's behaviour is
+    unchanged: a view may only block an entry, never create one.
+    """
     from agentic_trading.llm.regime import RegimeGate
     from agentic_trading.llm.client import FakeLlmClient
 
     if not advisor_enabled():
         return None
+    if os.environ.get("AGENTIC_REGIME_BACKEND", "").strip().lower() == "jev":
+        from agentic_trading.llm.jev import build_jev_gate
+
+        gate = build_jev_gate(state_path=state_path)
+        if gate is not None:
+            return gate
+        # Configured for Jev without a key: say so in the log rather than
+        # silently falling back to a different model's judgments.
+        import logging
+
+        logging.getLogger("agentic_trading.llm").warning(
+            "AGENTIC_REGIME_BACKEND=jev but %s is unset; using the chat model "
+            "regime gate instead",
+            "TYPESAFE_API_KEY",
+        )
     resolved = client if client is not None else build_llm_client()
     if isinstance(resolved, FakeLlmClient):
         return None

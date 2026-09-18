@@ -9,7 +9,7 @@ seriously, so here is exactly what is and is not in the repository.
 | Secret | Where it lives instead |
 |---|---|
 | Broker OAuth tokens (`data/tokens.json`) | local workspace only; `token_path` is absolute and outside the repo by default |
-| LLM API keys (`.env`) | local `.env`, which is gitignored |
+| LLM and TypeSafe keys (`.env`) | local `.env`, which is gitignored |
 | Account number, equity, positions | `data/state/*.json`, gitignored |
 | Decision journal | `data/journal/*.jsonl`, gitignored |
 | Live configuration (`config/agentic.toml`) | gitignored; only `agentic.example.toml` and the Windows template ship |
