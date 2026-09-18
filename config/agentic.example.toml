@@ -43,6 +43,15 @@ max_order_pct = "0.05"
 daily_notional_pct = "0.20"
 daily_loss_pct = "0.03"
 max_open_positions = 1
+# Small-account mode. A $1.00 minimum order is 2% of a $50 account, so a 1%
+# per-order ceiling can never place one: the agent refuses every entry with
+# `below_min_notional`. Setting this above zero authorises a temporary, larger
+# per-order cap — used only while the account is too small to place an
+# evidence-compliant order, released automatically once it is big enough, and
+# reported on the console with the drawdown the walk-forward measured at that
+# size. 0 disables the rule and the agent simply refuses to trade until the
+# account grows.
+small_account_max_order_pct = "0"
 equity_refresh_ticks = 30
 equity_refresh_seconds = 60
 timezone = "local"

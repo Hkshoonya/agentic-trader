@@ -499,12 +499,53 @@ class DashboardState:
             return {}
         needed = (minimum / cap).quantize(Decimal("0.01"))
         order = (equity * cap).quantize(Decimal("0.01"))
+        ceiling = Decimal(str(getattr(self.config, "small_account_max_order_pct", "0") or "0"))
+        floor_active = bool(ceiling > 0 and equity > 0 and equity < needed)
+        effective = cap
+        if floor_active:
+            effective = min(
+                (minimum / equity) * Decimal("1.02"), ceiling
+            )
         return {
             "min_order_notional": str(minimum),
             "order_at_ceiling": str(order),
             "equity_needed": str(needed),
             "too_small_to_trade": bool(equity > 0 and equity < needed),
+            "small_account_max_order_pct": str(ceiling),
+            "size_floor_active": floor_active,
+            "effective_order_pct": str(effective),
+            "effective_order_notional": str(
+                (equity * effective).quantize(Decimal("0.01"))
+            ),
+            "drawdown_at_effective_pct": self._drawdown_at(effective),
         }
+
+    def _drawdown_at(self, per_order_pct: Any) -> Optional[float]:
+        """What the walk-forward measured at (or nearest to) this size.
+
+        Sizing up on a small account is a trade: more drawdown for the chance to
+        see results. The number comes from the evidence report's own frontier, so
+        the console can state the cost instead of implying there is none.
+        """
+        report = _read_json(self.state_dir / "strategy_evidence.json") or {}
+        frontier = report.get("size_frontier") or []
+        try:
+            wanted = float(per_order_pct)
+        except (TypeError, ValueError):
+            return None
+        rows = [
+            row
+            for row in frontier
+            if isinstance(row, dict) and row.get("per_order_pct") is not None
+        ]
+        if not rows or wanted <= 0:
+            return None
+        nearest = min(rows, key=lambda row: abs(float(row["per_order_pct"]) - wanted))
+        # Only quote it when it is genuinely close to the size being traded.
+        if abs(float(nearest["per_order_pct"]) - wanted) > max(0.005, wanted * 0.5):
+            return None
+        value = nearest.get("max_drawdown_pct")
+        return None if value is None else float(value)
 
     def pulse(self) -> dict[str, Any]:
         """How long since the agent last did anything.

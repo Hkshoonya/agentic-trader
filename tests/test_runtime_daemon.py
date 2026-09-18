@@ -80,13 +80,17 @@ class _AlwaysBuy:
 
 
 def _write_config(
-    tmp: Path, *, mode: str = "shadow", extra: list[str] | None = None
+    tmp: Path,
+    *,
+    mode: str = "shadow",
+    extra: list[str] | None = None,
+    max_order_pct: str = "0.05",
 ) -> Path:
     config_path = tmp / "agentic.toml"
     lines = [
         f'mode = "{mode}"',
         'symbol_whitelist = ["SPY"]',
-        'max_order_pct = "0.05"',
+        f'max_order_pct = "{max_order_pct}"',
         'daily_notional_pct = "0.20"',
         'daily_loss_pct = "0.03"',
         "max_open_positions = 1",
@@ -700,3 +704,114 @@ class StartupBannerTests(unittest.TestCase):
         self.assertIn("started:", output)
         # A banner without a date cannot answer "when did this last start?".
         self.assertRegex(output, r"\[\d{4}-\d{2}-\d{2}T")
+
+
+class SmallAccountModeTests(unittest.TestCase):
+    """The operator can authorise a bigger temporary bet on a small account.
+
+    Without it, a $50 account refuses every entry: 0.92% of $50 is $0.46 and the
+    broker minimum is $1.00. The rule has to raise the cap *just* enough, say so
+    in the journal, and release it as soon as the account can stand on its own.
+    """
+
+    def _loop(self, tmp: Path, *, floor: str, equity: str = "50"):
+        from agentic_trading.runtime import _Loop
+
+        # A 1% cap is the real situation: $0.50 of a $50 account, below the
+        # $1.00 minimum. The default 5% test cap would need no floor at all.
+        config_path = _write_config(
+            tmp,
+            mode="shadow",
+            max_order_pct="0.01",
+            extra=['autonomy = "manual"', f'small_account_max_order_pct = "{floor}"'],
+        )
+        config = load_config(config_path)
+        client = FakeMcpClient(load_tools())
+        broker = Broker(client, load_tools())
+        (tmp / "state").mkdir(parents=True, exist_ok=True)
+        loop = _Loop(config, broker, FixtureStrategy())
+        loop.guard.update_equity(Decimal(equity))
+        return loop, config
+
+    def test_engaging_is_journalled_once_with_both_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, config = self._loop(tmp, floor="0.025")
+            first = loop.apply_size_floor()
+            again = loop.apply_size_floor()
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertTrue(first["engaged"])
+        self.assertTrue(first["sufficient"])
+        self.assertEqual(first["policy_max_order_pct"], "0.01")
+        # 1.02 / 50: the minimum plus the rounding margin, inside the authorised
+        # 2.5% ceiling.
+        self.assertEqual(first["effective_max_order_pct"], "0.0204")
+        self.assertIsNone(again, "an unchanged state must not spam the journal")
+        self.assertEqual(Decimal(loop.guard.max_order_pct), Decimal("0.0204"))
+
+    def test_the_disabled_default_changes_nothing(self) -> None:
+        """Off means off: without authorisation the guard keeps its own cap."""
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, _ = self._loop(tmp, floor="0")
+            before = Decimal(loop.guard.max_order_pct)
+            self.assertIsNone(loop.apply_size_floor())
+        self.assertEqual(Decimal(loop.guard.max_order_pct), before)
+
+    def test_it_releases_the_cap_when_the_account_grows(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, _ = self._loop(tmp, floor="0.025")
+            loop.apply_size_floor()
+            self.assertGreater(Decimal(loop.guard.max_order_pct), Decimal("0.01"))
+            loop.guard.update_equity(Decimal("500"))
+            released = loop.apply_size_floor()
+        assert released is not None
+        self.assertFalse(released["engaged"])
+        self.assertEqual(Decimal(loop.guard.max_order_pct), Decimal("0.01"))
+
+    def test_an_insufficient_ceiling_is_reported_not_hidden(self) -> None:
+        """A ceiling of exactly the need rounds under the minimum at $50."""
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, _ = self._loop(tmp, floor="0.02")
+            event = loop.apply_size_floor()
+        assert event is not None
+        self.assertTrue(event["engaged"])
+        self.assertFalse(event["sufficient"])
+        self.assertIn("raise small_account_max_order_pct", event["reason"])
+
+    def test_the_refused_entry_becomes_a_placeable_order(self) -> None:
+        """End to end: the intent that produced `below_min_notional` is sized."""
+        from agentic_trading.types import OrderIntent, Side
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, _ = self._loop(tmp, floor="0.025")
+            loop.apply_size_floor()
+            intent = OrderIntent(
+                decision_id="floor-1",
+                symbol="BCH-USD",
+                side=Side.BUY,
+                quantity=Decimal("1"),
+                ref_price=Decimal("233.85"),
+                reason="trend_entry",
+                created_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+            )
+            loop.process_intent(intent)
+            records = _records(loop.config)
+            names = [record.get("event") for record in records]
+            rejected = [
+                record
+                for record in records
+                if record.get("event") == "rejected"
+                and record.get("reason") == "below_min_notional"
+            ]
+            resized = [record for record in records if record.get("event") == "resized"]
+        self.assertEqual(rejected, [], "the floor must remove the refusal")
+        self.assertIn("resized", names)
+        self.assertTrue(resized)
+        self.assertGreaterEqual(
+            Decimal(resized[0]["to_quantity"]) * Decimal("233.85"), Decimal("1")
+        )

@@ -349,3 +349,25 @@ class DaemonRefreshTests(unittest.TestCase):
         events = [call.args[0] for call in journal.append.call_args_list]
         self.assertEqual(events[0]["event"], "evidence_refresh_failed")
         self.assertIn("no bars", events[0]["error"])
+
+
+class SizeFrontierTests(unittest.TestCase):
+    """The report must state what sizing up costs, not just what it earns."""
+
+    def test_the_report_carries_a_measured_size_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY", "QQQ"], days=400)
+            report = build_report(
+                config, folds=2, grid=(0.01, 0.02), max_positions=2, per_order_pct=0.01
+            )
+        frontier = report.get("size_frontier")
+        self.assertTrue(frontier, "the console needs the measured cost of sizing up")
+        self.assertEqual([row["per_order_pct"] for row in frontier], [0.01, 0.02])
+        for row in frontier:
+            self.assertIn("max_drawdown_pct", row)
+            self.assertIn("inside_ceiling", row)
+        # Drawdown scales with size, which is the whole reason the frontier exists.
+        self.assertLessEqual(
+            frontier[0]["max_drawdown_pct"], frontier[-1]["max_drawdown_pct"]
+        )

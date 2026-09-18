@@ -72,6 +72,12 @@ class Config:
     min_oos_trades: int = 30
     equity_sizing: bool = True
     min_order_notional: Decimal = Decimal("1.00")
+    # Small-account mode. Below the equity where the per-order cap can clear
+    # ``min_order_notional``, the agent refuses every entry — correct, and
+    # useless on a $50 account. When this ceiling is positive the per-order cap
+    # is raised to just enough to place one order, never above this value, and it
+    # falls back the moment the account is big enough. 0 disables the rule.
+    small_account_max_order_pct: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         if self.mode not in ("shadow", "live"):
@@ -141,6 +147,8 @@ class Config:
             raise ValueError("min_oos_trades must be >= 1")
         if self.min_order_notional <= 0:
             raise ValueError("min_order_notional must be positive")
+        if self.small_account_max_order_pct < 0:
+            raise ValueError("small_account_max_order_pct must be >= 0")
 
 
 def load_config(path: str | Path) -> Config:
@@ -197,4 +205,7 @@ def load_config(path: str | Path) -> Config:
         min_oos_trades=int(raw.get("min_oos_trades", 30)),
         equity_sizing=bool(raw.get("equity_sizing", True)),
         min_order_notional=Decimal(str(raw.get("min_order_notional", "1.00"))),
+        small_account_max_order_pct=Decimal(
+            str(raw.get("small_account_max_order_pct", "0"))
+        ),
     )

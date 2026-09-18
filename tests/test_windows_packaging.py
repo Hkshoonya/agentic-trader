@@ -385,3 +385,31 @@ class TimezoneTests(unittest.TestCase):
 
         resolved = zone("Mars/Olympus_Mons")
         self.assertIsNotNone(resolved)
+
+
+class SmallAccountConfigTests(unittest.TestCase):
+    """The Windows template ships the small-account rule, documented."""
+
+    def test_the_windows_template_enables_it_with_a_ceiling(self) -> None:
+        import tomllib
+
+        with open(PACKAGE / "agentic.windows.toml", "rb") as handle:
+            payload = tomllib.load(handle)
+        self.assertEqual(payload["small_account_max_order_pct"], "0.025")
+        self.assertEqual(payload["min_order_notional"], "1.00")
+
+    def test_the_example_config_leaves_it_off(self) -> None:
+        """A fresh clone must not trade bigger than its evidence by default."""
+        import tomllib
+
+        with open(REPO / "config" / "agentic.example.toml", "rb") as handle:
+            payload = tomllib.load(handle)
+        self.assertEqual(payload["small_account_max_order_pct"], "0")
+
+    def test_the_readme_explains_the_trade_with_numbers(self) -> None:
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("## Trading a small account", readme)
+        self.assertIn("small_account_max_order_pct", readme)
+        # The honest cost, and the real capacity: one entry a day at $50.
+        self.assertIn("23.5%", readme)
+        self.assertIn("one $1.02 entry a day", readme)

@@ -602,14 +602,28 @@ def build_evidence(
             "size, not as evidence of a larger edge.",
         ],
     }
+    frontier: list[dict[str, Any]] = []
     for size in grid:
         candidate = run(per_order_pct=size)
+        frontier.append(
+            {
+                "per_order_pct": size,
+                "trades": candidate.trades,
+                "expectancy_bps": round(candidate.expectancy_bps, 3),
+                "max_drawdown_pct": round(candidate.max_drawdown_pct, 3),
+                "final_equity": round(candidate.final_equity, 4),
+                "inside_ceiling": candidate.max_drawdown_pct <= DRAWDOWN_CEILING_PCT,
+            }
+        )
         if candidate.max_drawdown_pct <= DRAWDOWN_CEILING_PCT:
             report["gate_size"] = {
                 "per_order_pct": size,
                 "inverse_vol": False,
                 **candidate.to_dict(),
             }
+    # The measured cost of sizing up, so "temporarily bigger bets on a small
+    # account" is a stated trade with a number attached, not a vibe.
+    report["size_frontier"] = sorted(frontier, key=lambda row: row["per_order_pct"])
     if report["gate_size"] is None:
         report["gate_size"] = {
             "per_order_pct": None,

@@ -331,6 +331,10 @@ class _Loop:
             self.guard.max_order_pct = min(self.config.max_order_pct, probation_cap)
         else:
             self.guard.max_order_pct = self.config.max_order_pct
+        # The cap the *evidence* justifies, before the small-account floor is
+        # considered. Kept separately so the floor can never ratchet: it is
+        # always derived from this value, not from its own previous output.
+        self.policy_max_order_pct = Decimal(self.guard.max_order_pct)
         # The agent's stored limits may only ever tighten what the operator set.
         from agentic_trading.limits import apply_to_guard, load_limits, reconcile
 
@@ -353,7 +357,140 @@ class _Loop:
             or self.config.session_policy
         )
         self.apply_correlation_policy()
+        self.apply_size_floor()
         self.reconcile_stage_mode()
+
+    def apply_size_floor(self) -> Optional[dict[str, Any]]:
+        """Raise the per-order cap when the account is too small to place one.
+
+        On a $50 account with a 0.92% ceiling the order is $0.46 and the broker
+        minimum is $1.00, so every entry is refused `below_min_notional`. That is
+        the guard being honest, and it is useless if you want to see results: the
+        operator can authorise a higher temporary ceiling
+        (`small_account_max_order_pct`), and this raises the cap to just enough
+        to place one order and no further — then drops it the moment the account
+        clears the minimum on its own.
+
+        Derived, never accumulated: always computed from ``policy_max_order_pct``
+        and the current equity, so it cannot ratchet and it survives restarts.
+        """
+        from agentic_trading import sizer
+
+        policy = Decimal(
+            str(getattr(self, "policy_max_order_pct", self.guard.max_order_pct))
+        )
+        ceiling = Decimal(str(self.config.small_account_max_order_pct))
+        equity = Decimal(str(self.guard.current_equity or 0))
+        if equity <= 0:
+            # Before the first equity refresh there is nothing to divide by, and
+            # guessing a size is worse than waiting one cycle.
+            return None
+
+        margin = Decimal(str(getattr(sizer, "FLOOR_MARGIN", Decimal("0.02"))))
+        minimum = Decimal(str(self.config.min_order_notional))
+
+        if ceiling <= 0:
+            # Disabled means off: restore the ladder's cap and say so only if the
+            # floor had been engaged, so switching it off is visible in the
+            # journal but a disabled rule never chatters.
+            self.guard.max_order_pct = policy
+            if not getattr(self, "_size_floor_active", False):
+                return None
+            self._size_floor_active = False
+            self._size_floor_sufficient = True
+            event = {
+                "event": "small_account_mode",
+                "engaged": False,
+                "sufficient": True,
+                "policy_max_order_pct": str(policy),
+                "effective_max_order_pct": str(policy),
+                "equity": str(equity),
+                "min_order_notional": str(minimum),
+                "small_account_max_order_pct": str(ceiling),
+                "reason": (
+                    "small-account mode is off; the evidence-compliant cap is "
+                    "back in force"
+                ),
+            }
+            self.journal.append(event)
+            return event
+
+        effective = sizer.floor_cap(
+            equity=equity,
+            policy_cap=policy,
+            min_notional=minimum,
+            max_cap=ceiling,
+        )
+        self.guard.max_order_pct = effective
+        engaged = effective > policy
+        # Two different failures look identical from the journal otherwise: a
+        # floor that is engaged and placeable, and one whose authorised ceiling
+        # is still too small for the minimum (a $1.00 order at 2.00% of $50 lands
+        # on exactly $1.00 and rounds a hair under it). Say which one this is.
+        needed = (minimum * (Decimal(1) + margin)) / equity
+        sufficient = bool(effective >= needed)
+        was_active = bool(getattr(self, "_size_floor_active", False))
+        was_sufficient = bool(getattr(self, "_size_floor_sufficient", True))
+        # Only an engagement whose placeability changed is news. An unengaged
+        # floor is not "insufficient" — there is nothing to be insufficient for.
+        if engaged == was_active and (not engaged or sufficient == was_sufficient):
+            return None
+        self._size_floor_active = engaged
+        self._size_floor_sufficient = sufficient if engaged else True
+        event = {
+            "event": "small_account_mode",
+            "engaged": engaged,
+            "sufficient": sufficient,
+            "needed_max_order_pct": str(needed.quantize(Decimal("0.000001"))),
+            "policy_max_order_pct": str(policy),
+            "effective_max_order_pct": str(effective),
+            "equity": str(equity),
+            "min_order_notional": str(minimum),
+            "small_account_max_order_pct": str(ceiling),
+            "reason": (
+                (
+                    "the evidence-compliant order is below the broker minimum, so "
+                    "the cap is raised to place one order (this trades outside the "
+                    "size the walk-forward supports)"
+                    if sufficient
+                    else "even the authorised small-account ceiling cannot place "
+                    "an order at this equity: raise small_account_max_order_pct "
+                    f"to at least {needed.quantize(Decimal('0.0001'))}"
+                )
+                if engaged
+                else "the account can now place an evidence-compliant order"
+            ),
+        }
+        if engaged:
+            # Attach the measured cost of the bigger size, from the same report
+            # the promotion gate reads. "You authorised 2.04%" is half a
+            # sentence; "...and the walk-forward measures 23.5% drawdown there"
+            # is the other half.
+            event["drawdown_at_effective_pct"] = self._evidence_drawdown(effective)
+        self.journal.append(event)
+        return event
+
+    def _evidence_drawdown(self, per_order_pct: Decimal) -> Optional[float]:
+        """Measured max drawdown at (or nearest to) this per-order size."""
+        from agentic_trading.evidence import read_report
+
+        try:
+            report = read_report(self.config) or {}
+        except Exception:  # noqa: BLE001 — a missing report must not block sizing
+            return None
+        rows = [
+            row
+            for row in (report.get("size_frontier") or [])
+            if isinstance(row, dict) and row.get("per_order_pct")
+        ]
+        if not rows:
+            return None
+        wanted = float(per_order_pct)
+        nearest = min(rows, key=lambda row: abs(float(row["per_order_pct"]) - wanted))
+        if abs(float(nearest["per_order_pct"]) - wanted) > max(0.005, wanted * 0.5):
+            return None
+        value = nearest.get("max_drawdown_pct")
+        return None if value is None else float(value)
 
     def reconcile_stage_mode(self) -> Optional[dict[str, Any]]:
         """Make the run mode agree with the stage the evidence earned.
@@ -1461,6 +1598,8 @@ def run_daemon(
         decisions_base = loop.orders_today
         while not loop.should_stop():
             cycle_started = time.monotonic()
+            # Equity moves while the loop runs; the size floor follows it.
+            loop.apply_size_floor()
             if deadline is not None and time.monotonic() >= deadline:
                 break
 

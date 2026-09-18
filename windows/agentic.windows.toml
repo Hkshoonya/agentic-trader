@@ -31,6 +31,12 @@ symbol_whitelist = [
 max_order_pct = "0.01"
 daily_notional_pct = "0.04"
 daily_loss_pct = "0.03"
+# Small-account mode: if the account is too small for a $1.00 order at the 1%
+# ceiling, raise the cap to just enough to place one (never above this), and
+# drop back the moment the account is big enough. 0 = off, which means refusing
+# to trade rather than trading bigger than the evidence supports.
+small_account_max_order_pct = "0.025"
+min_order_notional = "1.00"
 max_open_positions = 4
 max_correlated_positions = 2
 correlation_threshold = 0.7

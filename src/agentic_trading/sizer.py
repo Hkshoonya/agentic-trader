@@ -20,6 +20,37 @@ from agentic_trading.types import OrderIntent, Side
 
 QUANTITY_STEP = Decimal("0.000001")  # broker allows 6 decimal places
 
+# A floor-sized order has to clear the broker's minimum *after* the quantity is
+# rounded down to six decimals and after the price has moved a little between
+# the decision and the fill, so the target carries a small margin. Without it a
+# $1.00 target becomes a $0.9997 order and is refused for being a hair short.
+FLOOR_MARGIN = Decimal("0.02")
+
+
+def floor_cap(
+    *,
+    equity: Decimal,
+    policy_cap: Decimal,
+    min_notional: Decimal,
+    max_cap: Decimal,
+    margin: Decimal = FLOOR_MARGIN,
+) -> Decimal:
+    """The per-order fraction needed to place an order at all.
+
+    Returns ``policy_cap`` when the account is big enough for that cap to clear
+    ``min_notional``. Otherwise it returns the fraction that *does* clear it,
+    never above ``max_cap`` — a ceiling the operator sets separately, because
+    this rule deliberately trades outside the size the evidence supports.
+
+    ``max_cap <= 0`` disables the rule and returns ``policy_cap`` unchanged.
+    """
+    if equity <= 0 or max_cap <= 0:
+        return policy_cap
+    needed = (min_notional * (Decimal(1) + margin)) / equity
+    if needed <= policy_cap:
+        return policy_cap
+    return min(needed, max_cap)
+
 
 def size_intent(
     intent: OrderIntent,

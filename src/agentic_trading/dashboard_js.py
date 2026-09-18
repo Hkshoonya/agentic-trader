@@ -202,14 +202,32 @@ async function refresh() {
   // Call out the case where the account cannot afford the size the evidence
   // allows: the guard refuses every entry, and five identical rejects are a bad
   // way to learn that.
-  const tooSmall = risk.too_small_to_trade
-    ? '<div class="row"><span>account</span><b class="sell">too small to trade</b></div>'
-      + '<div class="sub">a ' + num(Number(risk.min_order_notional || 0))
-      + ' minimum order is ' + num(Number(risk.order_at_ceiling || 0))
-      + ' at the current ' + num(Number(risk.max_order_pct || 0) * 100) + '% ceiling — '
-      + 'entries are refused until equity reaches $'
-      + num(Number(risk.equity_needed || 0)) + '</div>'
-    : '';
+  // Small-account mode: the cap has been raised above what the evidence supports
+  // so that an order can be placed at all. It says so, and it says what that
+  // costs in drawdown, because the operator authorised it but should not have to
+  // remember it.
+  const floor = risk.size_floor_active
+    ? '<div class="row"><span>small-account mode</span><b class="sell">cap raised</b></div>'
+      + '<div class="sub">' + num(Number(risk.max_order_pct || 0) * 100) + '% per order is '
+      + num(Number(risk.order_at_ceiling || 0)) + ', below the '
+      + num(Number(risk.min_order_notional || 0)) + ' minimum, so the cap is raised to '
+      + num(Number(risk.effective_order_pct || 0) * 100) + '% ($'
+      + num(Number(risk.effective_order_notional || 0)) + ' per order)'
+      + (risk.drawdown_at_effective_pct !== null && risk.drawdown_at_effective_pct !== undefined
+        ? ' — the walk-forward measured ' + num(Number(risk.drawdown_at_effective_pct))
+          + '% max drawdown at that size'
+        : '')
+      + '. It drops back to ' + num(Number(risk.max_order_pct || 0) * 100)
+      + '% at $' + num(Number(risk.equity_needed || 0)) + ' equity.</div>'
+    : (risk.too_small_to_trade
+      ? '<div class="row"><span>account</span><b class="sell">too small to trade</b></div>'
+        + '<div class="sub">a ' + num(Number(risk.min_order_notional || 0))
+        + ' minimum order is ' + num(Number(risk.order_at_ceiling || 0))
+        + ' at the current ' + num(Number(risk.max_order_pct || 0) * 100) + '% ceiling — '
+        + 'entries are refused until equity reaches $'
+        + num(Number(risk.equity_needed || 0)) + '</div>'
+      : '');
+  const tooSmall = floor;
   document.getElementById('gate').innerHTML = (a.eligible === undefined)
     ? budget + tooSmall + '<div class="sub">no assessment yet — run: agentic-trading evolve</div>'
     : budget + tooSmall

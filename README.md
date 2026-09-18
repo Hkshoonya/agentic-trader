@@ -102,6 +102,53 @@ Both are session environment, not configuration files, so a copy of this repo on
 someone else's machine starts inert whatever the state files say. A promoted but
 unarmed agent journals `live_gate_blocked` with the order it *would* have sent.
 
+## Trading a small account
+
+There is a third decision, and it is the one a $50 account runs into on day one:
+**the evidence-compliant order can be smaller than the broker's minimum.**
+Robinhood will not take an order below $1.00, and 1% of $50 is $0.46 — so the
+agent refuses every entry, correctly, and does nothing at all.
+
+`small_account_max_order_pct` is the operator's answer to that. Set it above zero
+and, while the account is too small to place an evidence-compliant order, the
+per-order cap is raised to *just* enough to place one order — never above your
+number — and released automatically the moment the account can stand on its own:
+
+```toml
+min_order_notional = "1.00"
+small_account_max_order_pct = "0.025"   # 0 = refuse rather than size up
+```
+
+What that actually does on $50, from the live journal:
+
+```text
+small_account_mode  engaged=true  sufficient=true
+  policy_max_order_pct = 0.01  ->  effective 0.0204
+  $1.00 minimum + rounding margin / $50 = 2.04%
+```
+
+It is a deliberate trade, not a free upgrade: 2.04% per order is above the size
+the walk-forward supports, and the console says what that costs — the measured
+max drawdown at that size comes straight from the evidence report's size
+frontier (`/api/summary` → `risk.drawdown_at_effective_pct`), reproduced here for
+the current sample:
+
+| per order | max drawdown | $50 → | inside the 15% gate |
+|---|---|---|---|
+| 0.50% | 7.7% | $61 | yes |
+| 1.00% | 14.0% | $74 | yes |
+| **2.04%** (small-account mode) | **23.5%** | $105 | **no** |
+| 3.00% | 30.5% | $144 | no |
+
+The daily notional ceiling still applies, and on $50 it binds first: 3.68% of $50
+is $1.84, so **one $1.02 entry a day**, not four. Small-account mode buys you a
+seat at the table; it does not buy you more bets.
+
+With the rule off (`0`, the default in `config/agentic.example.toml`) nothing
+changes: entries are refused with `below_min_notional` until the account grows
+past the point where the evidence-compliant size clears the minimum (~$110 at a
+1% ceiling).
+
 ## The console
 
 <img src="docs/assets/console.png" alt="The read-only console: account equity, promotion gate, market and order table with per-order confidence, candidates, live execution stream, agents on duty, walk-forward evidence" width="900">
