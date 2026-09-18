@@ -65,7 +65,7 @@ tr:hover td{background:#151d28}
 <main>
 <div class="card span3"><h2>Account equity</h2><div class="metric" id="equity">—</div><div class="sub" id="equity-sub">—</div></div>
 <div class="card span3"><h2>Daily notional used</h2><div class="metric" id="notional">—</div><div class="sub" id="notional-sub">—</div></div>
-<div class="card span3"><h2>Accepted / placed / rejected</h2><div class="metric" id="trades">0</div><div class="sub">today</div></div>
+<div class="card span3"><h2>Accepted / placed / rejected</h2><div class="metric" id="trades">0</div><div class="sub">today (UTC — the strategy's day)</div></div>
 <div class="card span3"><h2>Promotion streak</h2><div class="metric" id="streak">0</div><div class="sub" id="streak-sub">assessments to next stage</div><div class="gauge" style="margin-top:8px"><div id="streak-bar"></div></div></div>
 <div class="card span8"><h2>Order flow · notional per decision &amp; cumulative</h2><canvas id="chart"></canvas>
   <div class="legend"><span><i class="dot buy"></i>buy</span><span><i class="dot sell"></i>sell</span><span><i class="line"></i>cumulative notional</span></div></div>

@@ -547,6 +547,32 @@ class DashboardState:
         value = nearest.get("max_drawdown_pct")
         return None if value is None else float(value)
 
+    def decision_counts(self, *, days: int = 3) -> dict[str, int]:
+        """Decision counters for the *strategy's* day, which is UTC.
+
+        The strategy rebalances once per UTC day, so its decision for today is
+        taken at 00:00 UTC — 20:00 the previous evening in New York. Journals are
+        named by local date, which put this morning's whole trading day in
+        yesterday's file and left the counters reading 0/0/0 all day while the
+        table showed rows. Counting both by UTC removes the contradiction.
+        """
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        counts = {"accepted": 0, "placed": 0, "rejected": 0, "failed": 0}
+        for record in self.recent_records(days=days):
+            event = str(record.get("event") or "")
+            if event not in ("accepted", "placed", "rejected", "place_failed"):
+                continue
+            at = str(
+                (record.get("intent") or {}).get("created_at")
+                or record.get("at")
+                or ""
+            )
+            if at[:10] != today_utc:
+                continue
+            key = "failed" if event == "place_failed" else event
+            counts[key] += 1
+        return counts
+
     def pulse(self) -> dict[str, Any]:
         """How long since the agent last did anything.
 
@@ -645,7 +671,7 @@ class DashboardState:
             "armed": bool(gate.get("allow_live", False)),
             "autonomy_enabled": bool(gate.get("allow_autonomy", False)),
             "gate_updated_at": gate.get("updated_at", ""),
-            "event_counts": counts,
+            "event_counts": {**counts, **self.decision_counts()},
             "regimes": regimes,
             "agents": agents.get("agents", []),
             "agents_updated_at": agents.get("updated_at", ""),
@@ -757,7 +783,7 @@ class DashboardState:
         # Three days, not one: a daily-rebalance strategy would otherwise show an
         # empty table every morning, which is indistinguishable from a broken one.
         records = self.recent_records(days=3)
-        today = date.today().isoformat()
+        today_utc = datetime.now(timezone.utc).date().isoformat()
         # The advisor's opinion is journaled as its own record keyed by
         # decision_id, so join it back in: it is the per-order confidence, as
         # opposed to the system-wide evidence grade.
@@ -815,11 +841,13 @@ class DashboardState:
             )
             at = intent.get("created_at") or record.get("at") or ""
             day = str(record.get("_journal_day") or str(at)[:10])
+            utc_day = str(at)[:10] or day
             rows.append(
                 {
                     "at": at,
                     "day": day,
-                    "older": bool(day) and day != today,
+                    "utc_day": utc_day,
+                    "older": bool(utc_day) and utc_day != today_utc,
                     "event": event,
                     "reason": record.get("reason", ""),
                     "symbol": symbol,
@@ -870,6 +898,7 @@ class DashboardState:
                 }
             )
         rows.reverse()
+        # Same rule as decision_counts(): the trading day is the UTC day.
         today_rows = [row for row in rows if not row["older"]]
         shown = rows[:limit]
         return {

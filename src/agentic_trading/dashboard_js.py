@@ -405,7 +405,8 @@ function renderOrders(data) {
   const counts = (data && data.counts) || {};
   document.getElementById('orders-count').textContent =
     (counts.accepted || 0) + ' accepted · ' + (counts.placed || 0) + ' placed · '
-    + (counts.rejected || 0) + ' rejected · ' + (counts.failed || 0) + ' failed today'
+    + (counts.rejected || 0) + ' rejected · ' + (counts.failed || 0)
+    + ' failed today (UTC)'
     + (data.older_rows
       ? ' · table shows ' + (data.rows || []).length + ' decisions over the last '
         + (data.days_shown || 3) + ' days (' + data.older_rows + ' older)'

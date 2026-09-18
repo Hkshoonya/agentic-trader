@@ -163,7 +163,12 @@ class DashboardTests(unittest.TestCase):
                         "symbol": "SPY",
                         "side": "buy",
                         "mode": "shadow",
-                        "intent": {"created_at": "2026-09-16T14:00:00Z"},
+                        # The trading day is the UTC day: a decision taken at
+                        # 00:00 UTC belongs to today even though the journal file
+                        # is named with yesterday's local date.
+                        "intent": {
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        },
                     }
                 )
                 + "\n",
@@ -741,29 +746,44 @@ class OrderTableAccuracyTests(unittest.TestCase):
             row = DashboardState(config).orders_table()["rows"][0]
         self.assertIsNone(row["confidence"]["order"])
 
-    def test_counters_are_today_but_the_table_reaches_back(self) -> None:
-        """Journals are named by local date; timestamps inside are UTC."""
+    def test_counters_follow_the_utc_trading_day_not_the_file_date(self) -> None:
+        """Journals are named by local date; the counters must not be.
+
+        A decision taken at 00:00 UTC is 20:00 the previous evening in New York,
+        so it lands in yesterday's file. Counting by file date left the console
+        reading 0/0/0 all day while the table showed the rows.
+        """
+        from datetime import timezone
+
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
             config = self._config(tmp)
-            yesterday = (date.today() - timedelta(days=1)).isoformat()
-            # A decision made at 20:00 local yesterday is stamped *today* in UTC.
+            now = datetime.now(timezone.utc)
+            today_utc = now.date().isoformat()
+            yesterday_local = (now - timedelta(days=1)).astimezone().date().isoformat()
+            # Today's decision, filed under yesterday's local date.
             self._write(
                 tmp,
-                yesterday,
-                [self._reject(at=f"{date.today().isoformat()}T00:10:00Z", decision_id="d-old")],
+                yesterday_local,
+                [self._reject(at=f"{today_utc}T00:10:00Z", decision_id="d-today")],
             )
+            # An older decision, filed in its own day's file.
             self._write(
                 tmp,
-                date.today().isoformat(),
-                [self._reject(at="2026-09-17T09:44:32Z", decision_id="d-new")],
+                yesterday_local,
+                [
+                    self._reject(at=f"{today_utc}T00:10:00Z", decision_id="d-today"),
+                    self._reject(at="2020-01-01T09:00:00Z", decision_id="d-ancient"),
+                ],
             )
             payload = DashboardState(config).orders_table()
-        self.assertEqual(payload["counts"]["rejected"], 1, "counted as today by mistake")
+            header = DashboardState(config).decision_counts()
+        self.assertEqual(payload["counts"]["rejected"], 1, "only today's UTC decision counts")
+        self.assertEqual(header["rejected"], 1)
         self.assertEqual(len(payload["rows"]), 2)
         self.assertEqual(payload["older_rows"], 1)
         older = next(row for row in payload["rows"] if row["older"])
-        self.assertEqual(older["day"], yesterday)
+        self.assertEqual(older["utc_day"], "2020-01-01")
 
 
 class RebuiltGradeTests(unittest.TestCase):
@@ -1020,3 +1040,78 @@ class SizeFloorTests(unittest.TestCase):
             config = self._config(Path(tmp_name))
             risk = DashboardState(config).summary()["risk"]
         self.assertFalse(risk.get("too_small_to_trade", False))
+
+
+class DecisionDayTests(unittest.TestCase):
+    """The counters must use the strategy's day, not the journal file's date.
+
+    The strategy rebalances once per UTC day, so today's decision is taken at
+    00:00 UTC — 20:00 the previous evening in New York. Journals are named by
+    local date, which filed a whole trading day in yesterday's file and left the
+    console counters reading 0/0/0 while the table showed five rows.
+    """
+
+    def _config(self, tmp: Path):
+        config = DashboardTests()._config(tmp)
+        Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+        Path(config.journal_dir).mkdir(parents=True, exist_ok=True)
+        return config
+
+    def _write(self, tmp: Path, day: str, records: list[dict]) -> None:
+        (tmp / "journal" / f"{day}.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n"
+        )
+
+    def _rejection(self, at: str, symbol: str = "BTC-USD") -> dict:
+        return {
+            "decision_id": f"d-{symbol}-{at}",
+            "event": "rejected",
+            "reason": "below_min_notional",
+            "symbol": symbol,
+            "intent": {"created_at": at, "symbol": symbol, "side": "buy"},
+        }
+
+    def test_a_utc_today_decision_in_yesterdays_file_still_counts(self) -> None:
+        from datetime import timedelta
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            now = datetime.now(timezone.utc)
+            # 00:10 UTC today: late yesterday evening locally.
+            at = now.replace(hour=0, minute=10, second=0, microsecond=0).isoformat()
+            local_yesterday = (now - timedelta(days=1)).astimezone().date().isoformat()
+            self._write(tmp, local_yesterday, [self._rejection(at)])
+            counts = DashboardState(config).decision_counts()
+        self.assertEqual(counts["rejected"], 1, "the trading day is not the file's day")
+
+    def test_yesterdays_utc_decisions_do_not_count(self) -> None:
+        from datetime import timedelta
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+            self._write(tmp, "2020-01-01", [self._rejection(old)])
+            counts = DashboardState(config).decision_counts()
+        self.assertEqual(counts["rejected"], 0)
+
+    def test_summary_and_table_agree(self) -> None:
+        from datetime import timedelta
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            now = datetime.now(timezone.utc)
+            at = now.replace(hour=0, minute=1, second=0, microsecond=0).isoformat()
+            local_yesterday = (now - timedelta(days=1)).astimezone().date().isoformat()
+            self._write(
+                tmp,
+                local_yesterday,
+                [self._rejection(at, "BTC-USD"), self._rejection(at, "ETH-USD")],
+            )
+            state = DashboardState(config)
+            header = state.decision_counts()
+            table = state.orders_table()["counts"]
+        self.assertEqual(header["rejected"], 2)
+        self.assertEqual(table["rejected"], 2)
