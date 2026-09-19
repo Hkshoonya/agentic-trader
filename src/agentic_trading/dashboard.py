@@ -921,8 +921,20 @@ class DashboardState:
                 "reason": limits.get("reason", ""),
                 "updated_at": limits.get("updated_at", ""),
                 "target_max_order_pct": details.get("target_max_order_pct"),
-                "ceiling_max_order_pct": str(self.config.max_order_pct),
-                "ceiling_daily_notional_pct": str(self.config.daily_notional_pct),
+                # The ceiling that is actually in force. With a size schedule
+                # the flat pair in the config file is only a fallback, and
+                # printing it next to a scheduled budget reads as an overrun.
+                "ceiling_max_order_pct": str(
+                    details.get("ceiling_max_order_pct")
+                    or self.config.max_order_pct
+                ),
+                "ceiling_daily_notional_pct": str(
+                    details.get("ceiling_daily_notional_pct")
+                    or self.config.daily_notional_pct
+                ),
+                "schedule_applied": bool(
+                    getattr(self.config, "daily_budget_schedule", ())
+                ),
                 "components": details.get("components") or {},
             },
             "promotion": {
