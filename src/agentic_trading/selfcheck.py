@@ -149,8 +149,21 @@ def check_state_files(config: Any) -> Check:
             try:
                 order_cap = Decimal(str(limits.get("max_order_pct")))
                 daily_cap = Decimal(str(limits.get("daily_notional_pct")))
-                ceiling_order = Decimal(str(config.max_order_pct))
-                ceiling_daily = Decimal(str(config.daily_notional_pct))
+                # With a size schedule in force the ceiling *is* the schedule,
+                # so the bound here is the widest share the schedule authorises —
+                # comparing against the flat fallback pair would report every
+                # scheduled budget as an overrun, and reading the ceiling back
+                # out of the file being checked would prove nothing.
+                schedule = tuple(getattr(config, "daily_budget_schedule", ()) or ())
+                if schedule:
+                    widest = max(Decimal(str(row[1])) for row in schedule)
+                    ceiling_daily = widest
+                    ceiling_order = max(
+                        widest, Decimal(str(config.max_order_hard_pct))
+                    )
+                else:
+                    ceiling_order = Decimal(str(config.max_order_pct))
+                    ceiling_daily = Decimal(str(config.daily_notional_pct))
                 if order_cap > ceiling_order or daily_cap > ceiling_daily:
                     problems.append("stored budget exceeds the operator ceiling")
                 confidence = float(limits.get("confidence", 0.0) or 0.0)
@@ -290,12 +303,23 @@ def check_evidence(config: Any, *, max_age_days: int = 30) -> Check:
             else float(config.max_order_pct)
         )
         ceiling = float(gate.get("per_order_pct") or 0.0)
+        override = bool(getattr(config, "accept_evidence_override", False))
         if ceiling and live > ceiling * 1.001:
-            return FAIL, (
-                f"trading {live:.4f} per order but the evidence only supports "
-                f"{ceiling:.4f} inside the {report.get('drawdown_ceiling_pct')}% "
-                "drawdown ceiling"
+            message = (
+                f"trading {live * 100:.2f}%/order but the evidence only supports "
+                f"{ceiling * 100:.2f}% inside the "
+                f"{report.get('drawdown_ceiling_pct')}% drawdown ceiling"
             )
+            if override:
+                # Authorised by the operator, on the record. Reporting it as a
+                # warning keeps the fact on the console without pretending the
+                # back-check found something broken.
+                detail = f"{message} — the operator accepted this trade-off"
+                gate_dd = gate.get("max_drawdown_pct")
+                if gate_dd is not None:
+                    detail += f" (measured maxDD at the gate size {float(gate_dd):.1f}%)"
+                return WARN, detail
+            return FAIL, message
         gate_dd = gate.get("max_drawdown_pct")
         detail = (
             f"evidence {age_days:.0f}d old; {live * 100:.2f}%/order vs gate "

@@ -58,6 +58,11 @@ class PromotionPolicy:
     required_cycles: int = 3
     demote_drawdown_pct: float = 5.0
     probation_max_order_pct: Decimal = Decimal("0.01")
+    # The operator's explicit permission to trade a size the drawdown evidence
+    # does not support. Off unless the config says otherwise; when on, the size
+    # mismatch is reported as a note on every assessment instead of silently
+    # passing — the gate keeps telling the truth about what it is looking at.
+    accept_evidence_override: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -70,6 +75,10 @@ class Assessment:
     eligible: bool
     score: float
     reasons: list[str] = field(default_factory=list)
+    # Things the operator has deliberately accepted rather than things that are
+    # wrong. They travel with the verdict so the console can show the trade-off
+    # instead of hiding it.
+    notes: list[str] = field(default_factory=list)
     evidence: dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
     confidence_parts: dict[str, float] = field(default_factory=dict)
@@ -79,6 +88,7 @@ class Assessment:
             "eligible": self.eligible,
             "score": round(self.score, 4),
             "reasons": list(self.reasons),
+            "notes": list(self.notes),
             "evidence": dict(self.evidence),
             "confidence": round(self.confidence, 4),
             "confidence_parts": dict(self.confidence_parts),
@@ -150,6 +160,7 @@ def assess_walkforward(
     config = (report.get("configs") or {}).get("production") or {}
     gate = report.get("gate_size") or {}
     reasons: list[str] = []
+    notes: list[str] = []
 
     generated = str(report.get("generated_at") or "")
     age_days: Optional[float] = None
@@ -220,10 +231,19 @@ def assess_walkforward(
             "ceiling on this history"
         )
     elif live_per_order_pct is not None and live_per_order_pct > float(gate_size) * 1.001:
-        reasons.append(
+        override = bool(getattr(policy, "accept_evidence_override", False))
+        message = (
             f"trading {live_per_order_pct * 100:.2f}% per order but the evidence "
             f"only supports {float(gate_size) * 100:.2f}% inside the drawdown ceiling"
         )
+        if override:
+            # The operator may authorise a size the evidence does not: it is
+            # their account, and pretending the number is compliant would be
+            # worse than saying out loud that it is not. Recorded as a warning by
+            # the caller, never as a silent pass.
+            notes.append(message)
+        else:
+            reasons.append(message)
 
     score = expectancy * min(1.0, trades / max(1, policy.min_oos_trades)) - 0.05 * drawdown
     confidence, confidence_parts = grade_confidence(
@@ -274,6 +294,7 @@ def assess_walkforward(
         eligible=not reasons,
         score=score,
         reasons=reasons,
+        notes=notes,
         evidence=evidence,
         confidence=confidence,
         confidence_parts=confidence_parts,
@@ -528,6 +549,9 @@ def policy_from_config(config: Any) -> PromotionPolicy:
     return PromotionPolicy(
         min_oos_trades=int(getattr(config, "min_oos_trades", 30)),
         required_cycles=int(getattr(config, "promotion_cycles_required", 3)),
+        accept_evidence_override=bool(
+            getattr(config, "accept_evidence_override", False)
+        ),
     )
 
 

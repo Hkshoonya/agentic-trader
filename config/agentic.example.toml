@@ -87,6 +87,10 @@ sizing = "flat"
 # trip is 10% of the order and no edge survives it. An entry whose notional
 # cannot keep the measured cost inside this share is refused, not scaled up.
 max_cost_share_of_order = "0.02"
+# A schedule bigger than the drawdown evidence supports needs the operator
+# to say so: with this false the promotion gate refuses to arm the book, and
+# with it true every assessment carries the mismatch as a visible note.
+accept_evidence_override = false
 # --- Symbol scout: let the agent add and drop symbols from data --------------
 # Off by default: the whitelist you wrote is the set of instruments this account
 # is authorised to trade until you say otherwise. With it on, the scout reads

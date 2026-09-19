@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-749%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-752%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -86,7 +86,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 749 tests
+.venv/bin/python -m pytest tests -q                     # 752 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -235,6 +235,26 @@ pay proportionally more of it: the same $0.10 round trip is 2% of a $5 order and
 whose notional cannot keep the measured cost inside the share is refused rather
 than quietly scaled up, because the strategy asked for a size and answering with
 five times as much is a different decision.
+
+### Trading outside the evidence — only when you say so
+
+The schedule above is deliberately bigger than the drawdown evidence supports:
+on $50 it authorises 22% per order, where the measured frontier holds ~3%
+inside its 15% ceiling. The promotion gate notices exactly that and refuses to
+let the book arm itself — which is the gate doing its job, and it would leave
+the operator's own instruction unimplemented.
+
+So the trade-off has to be *stated*. With `accept_evidence_override = false`
+(the default, and what `config/agentic.example.toml` ships) a schedule above the
+frontier fails the gate and the book does not arm. With it set true, the gate
+passes and every assessment carries the mismatch as a note — the console prints
+it beside the budget, and the back-check reports it as a warning rather than a
+failure. The size is never quietly pretending to be evidence-compliant:
+
+```text
+promotion: eligible, note "trading 22.26% per order but the evidence only
+supports 3.00% inside the drawdown ceiling"
+```
 
 ## The evolution agent
 
@@ -549,7 +569,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   749 tests, including the honesty tests for the rig
+tests/                   752 tests, including the honesty tests for the rig
 ```
 
 ## Operations

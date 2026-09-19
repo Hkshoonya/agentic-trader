@@ -469,6 +469,76 @@ class _Loop:
         self.journal.append(event)
         return event
 
+    def refresh_assessment(self) -> Optional[dict[str, Any]]:
+        """Re-read the evidence verdict against the *current* policy.
+
+        The full evaluation is skipped while the bars are unchanged, which is
+        most days — but the verdict is a function of the policy as well as the
+        bars, and the policy is a config file the operator can edit. Changing
+        the size schedule without changing the history used to leave the console
+        arguing with the new budget for a day, because the assessment that
+        judged it was yesterday's. Re-reading it is a JSON parse and some
+        arithmetic, so it costs nothing to do whenever the daemon looks.
+        """
+        from agentic_trading.evidence import read_report
+        from agentic_trading.limits import load_limits
+        from agentic_trading.promotion import (
+            apply_assessment,
+            assess_walkforward,
+            load_state,
+            policy_from_config,
+            save_state,
+        )
+        from agentic_trading.selfimprove import update_limits
+
+        report = read_report(self.config)
+        if not report:
+            return None
+        stored = load_limits(self.config.state_dir)
+        live = float(
+            stored.max_order_pct
+            if stored is not None
+            else self.config.max_order_pct
+        )
+        try:
+            verdict = assess_walkforward(
+                report,
+                policy_from_config(self.config),
+                live_per_order_pct=live,
+            )
+        except Exception as exc:  # noqa: BLE001 — never kill the loop on this
+            self.journal.append(
+                {"event": "assessment_refresh_failed", "error": str(exc)[:200]}
+            )
+            return None
+        state = load_state(self.config.state_dir)
+        previous = {}
+        if isinstance(state.last_assessment, dict):
+            previous = state.last_assessment
+        changed = (
+            bool(previous.get("eligible")) != bool(verdict.eligible)
+            or list(previous.get("reasons") or []) != list(verdict.reasons)
+        )
+        if not changed:
+            return None
+        events = apply_assessment(
+            state, verdict, policy_from_config(self.config), equity=self.guard.current_equity
+        )
+        save_state(self.config.state_dir, state)
+        events.extend(update_limits(self.config, assessment=verdict))
+        for event in events:
+            self.journal.append(event)
+        event = {
+            "event": "assessment_refreshed",
+            "eligible": verdict.eligible,
+            "reasons": verdict.reasons,
+            "notes": verdict.notes,
+            "live_per_order_pct": round(live, 6),
+            "gate_size_pct": verdict.evidence.get("gate_size_pct"),
+        }
+        self.journal.append(event)
+        return event
+
     def apply_size_floor(self) -> Optional[dict[str, Any]]:
         """Raise the per-order cap when the account is too small to place one.
 
@@ -2344,6 +2414,9 @@ def run_daemon(
             # The day's budget follows the account size and the confidence the
             # evidence has earned; re-derive it before anything is sized.
             loop.apply_risk_budget()
+            # A policy the operator edited is a new verdict, even when the bars
+            # are the same ones that produced yesterday's.
+            loop.refresh_assessment()
             # Equity moves while the loop runs; the size floor follows it.
             loop.apply_size_floor()
             # Autonomous execution: arm when every check is green, disarm the

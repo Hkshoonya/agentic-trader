@@ -81,6 +81,15 @@ class Config:
     # than scaled up (see ``execution.required_notional_for_cost``). 0 disables
     # the rule; with no measured round trip it can never fire.
     max_cost_share_of_order: Decimal = Decimal("0.02")
+    # The daily-budget schedule deliberately trades a size the drawdown evidence
+    # does not support: at $50 the schedule is 22% per order where the evidence
+    # supports ~3% inside its 15% drawdown ceiling. That is the operator's
+    # decision to make — it is their account — but it must be *stated*, not
+    # inferred, or the promotion gate would have to be quietly weakened. With
+    # this off, a schedule above the evidence frontier fails the gate and the
+    # book does not arm itself; with it on, the mismatch is reported as a note
+    # on every assessment and shown on the console.
+    accept_evidence_override: bool = False
     # Phase 4 — self-evaluation, promotion, autonomy
     autonomy: str = "manual"  # manual | assisted | auto
     history_path: Path | None = None
@@ -476,4 +485,5 @@ def load_config(path: str | Path) -> Config:
         max_cost_share_of_order=Decimal(
             str(raw.get("max_cost_share_of_order", "0.02"))
         ),
+        accept_evidence_override=bool(raw.get("accept_evidence_override", False)),
     )
