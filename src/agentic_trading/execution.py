@@ -270,11 +270,19 @@ def measure(
     *,
     assumed_per_side_bps: Optional[float] = None,
     window_minutes: int = ATTRIBUTION_WINDOW_MINUTES,
+    existing: Optional[CostReport] = None,
 ) -> CostReport:
-    """Per-side slippage in bps between the decision price and the fill price."""
+    """Per-side slippage in bps between the decision price and the fill price.
+
+    ``existing`` carries forward measurements this function cannot recompute —
+    today, the completed round trips. Rewriting the file without them erased a
+    measured 200 bps round trip on the next pass, which is precisely the number
+    the console is supposed to be showing.
+    """
     report = CostReport(
         assumed_per_side_bps=assumed_per_side_bps,
         updated_at=datetime.now(timezone.utc).isoformat(),
+        round_trips=list(existing.round_trips) if existing else [],
     )
     lookup = {
         _normalise_symbol(symbol): entries for symbol, entries in decisions.items()

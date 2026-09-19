@@ -765,6 +765,7 @@ class DashboardState:
                         "measured_round_trip_bps": costs.get("measured_round_trip_bps"),
                         "per_side_cost_bps": costs.get("per_side_cost_bps"),
                         "measured_ratio": costs.get("ratio"),
+                        "assumed_per_side_bps": costs.get("assumed_per_side_bps"),
                         "round_trips": len(costs.get("round_trips") or []),
                     }.items()
                     if value is not None

@@ -676,18 +676,26 @@ function drawFrontier(data) {
   }
   const costs = (data && data.costs) || {};
   const note = document.getElementById('frontier-note');
-  if (note && costs.break_even_per_side_bps !== undefined) {
-    let text = 'the size breaks even if trading costs stay under '
-      + perHundred(costs.break_even_per_side_bps) + ' traded (the model assumes '
-      + perHundred(costs.assumed_per_side_bps) + ')';
+  if (note) {
+    let text = '';
+    if (costs.break_even_per_side_bps !== undefined) {
+      text = 'the size breaks even if trading costs stay under '
+        + perHundred(costs.break_even_per_side_bps) + ' traded (the model assumes '
+        + perHundred(costs.assumed_per_side_bps) + ')';
+    }
     // A measured round trip beats an assumption, and on a small account it is
     // usually much worse than the assumption — say so next to it.
     const measured = Number(costs.per_side_cost_bps);
     if (isFinite(measured) && measured > 0) {
-      text += ' · a real round trip on this account measured '
-        + perHundred(measured) + ' a side';
+      const assumed = Number(costs.assumed_per_side_bps);
+      text += (text ? ' · ' : '')
+        + 'a real round trip on this account cost ' + perHundred(measured)
+        + ' a side'
+        + (isFinite(assumed) && assumed > 0
+          ? ', against the ' + perHundred(assumed) + ' the model assumes'
+          : '');
     }
-    note.textContent = text;
+    if (text) note.textContent = text;
   }
 }
 

@@ -3165,13 +3165,19 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
     # read) and worth re-checking every pass: the moment a fill lands, the
     # evidence switches from assumed costs to measured ones.
     try:
-        from agentic_trading.execution import decision_prices, measure, save_report
+        from agentic_trading.execution import (
+            decision_prices,
+            load_report,
+            measure,
+            save_report,
+        )
 
         trades = loop.broker.get_trade_history(span="month")
         report = measure(
             trades,
             decision_prices(journal.iter_today()),
             assumed_per_side_bps=2.0,
+            existing=load_report(config.state_dir),
         )
         save_report(config.state_dir, report)
         journal.append(
@@ -3181,6 +3187,8 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                 "measured_per_side_bps": report.measured_per_side_bps,
                 "assumed_per_side_bps": report.assumed_per_side_bps,
                 "usable": report.usable,
+                "measured_round_trip_bps": report.measured_round_trip_bps,
+                "per_side_cost_bps": report.per_side_cost_bps,
                 "note": report.note,
             }
         )
