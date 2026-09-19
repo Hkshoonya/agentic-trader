@@ -626,8 +626,8 @@ def build_evidence(
             "Drawdown is measured on the marked-to-market account, not on "
             "realised exits: a position that is 30% under water shows up "
             "before it is sold.",
-            "gate_size is selected on this sample; treat it as a ceiling on "
-            "size, not as evidence of a larger edge.",
+            "That size is chosen on this sample; treat it as a ceiling on how "
+            "much to trade, not as evidence of a larger edge.",
         ],
     }
     frontier: list[dict[str, Any]] = []

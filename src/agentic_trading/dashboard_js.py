@@ -135,6 +135,8 @@ const REASON_TEXT = {
 
 const REGIME_TEXT = {
   trend: 'trending',
+  trend_up: 'trending up',
+  trend_down: 'trending down',
   chop: 'choppy',
   panic: 'panicking',
   neutral: 'calm',
@@ -267,6 +269,37 @@ function plainEvent(name) {
   return EVENT_TEXT[name] || humanise(name) || 'event';
 }
 
+// A champion search genome is a JSON blob of tuning words. The operator needs
+// the shape of the rule, not the key names it is stored under.
+const GENOME_TEXT = {
+  mode: 'rule',
+  lookback: 'looks back',
+  entry_bps: 'enters at',
+  tp_bps: 'takes profit at',
+  sl_bps: 'stops out at',
+  max_hold_bars: 'holds at most',
+};
+
+function plainGenome(genome) {
+  if (!genome || typeof genome !== 'object') return '—';
+  const parts = [];
+  for (const key of Object.keys(genome)) {
+    const label = GENOME_TEXT[key] || humanise(key);
+    const value = genome[key];
+    if (key === 'entry_bps' || key === 'tp_bps' || key === 'sl_bps') {
+      // Basis points become the dollars-per-$100 an operator already reads.
+      parts.push(label + ' ' + perHundred(value));
+    } else if (key === 'max_hold_bars') {
+      parts.push(label + ' ' + value + ' days');
+    } else if (key === 'lookback') {
+      parts.push(label + ' ' + value + ' days');
+    } else {
+      parts.push(label + ' ' + esc(String(value)));
+    }
+  }
+  return parts.join(' · ');
+}
+
 function plainStatus(status) {
   return AGENT_STATUS_TEXT[status] || humanise(status) || 'unknown';
 }
@@ -304,6 +337,19 @@ function plainReason(reason) {
   let detail = cut >= 0 ? text.slice(cut + 1).trim() : '';
   const phrase = REASON_TEXT[head] || humanise(head);
   if (!detail) return phrase;
+  // A regime read arrives as the model's own sentence:
+  // "jev-latest: panic 0.00, chop 0.06, trend_up 0.93, trend_down 0.01".
+  // The keys are machine words, so they are translated wherever they appear
+  // rather than only when the reason starts with a code this file knows.
+  if (/(trend_up|trend_down|chop|panic)/.test(detail)) {
+    const read = detail.replace(
+      /\b(trend_up|trend_down|chop|panic)\b\s*([\d.]+)?/g,
+      (match, name, value) =>
+        plainRegime(name) + (value === undefined ? '' : ' ' + value)
+    );
+    // The stream already labels the row "market read"; this is the reading.
+    return read;
+  }
   if (head === 'regime_block') {
     const match = detail.match(/^([a-z_]+)\\s+c=([\\d.]+)$/i);
     if (match) {
@@ -889,7 +935,7 @@ async function refresh() {
       + '<div class="row"><span>days for practice / days held back</span><b>'
         + (e.train_bars ?? '—') + ' / ' + (e.test_bars ?? '—') + '</b></div>'
       + '<div class="row"><span>best rule found</span><b class="sub">'
-        + esc(JSON.stringify(e.champion).slice(0, 90)) + '</b></div>'
+        + esc(plainGenome(e.champion)) + '</b></div>'
       + '<div class="sub" style="margin-top:8px">ran ' + esc(e.run_at || 'never') + '</div>';
   }
   // The evolution agent's queue: proposals for the operator to review. It can
