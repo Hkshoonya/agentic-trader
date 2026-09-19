@@ -66,6 +66,13 @@ class Config:
     # retried after this many seconds, at most this many times.
     rebalance_retry_seconds: float = 900.0
     rebalance_max_retries: int = 6
+    # An order that passed every judgement but could not be submitted (the book
+    # was not armed, or the broker review call failed) is held and resubmitted
+    # when the obstacle clears — the models are never re-asked, so this cannot
+    # become a way to shop for a different answer. Dropped after this age, or
+    # after this many attempts.
+    deferred_max_age_seconds: float = 3600.0
+    deferred_max_attempts: int = 3
     # Phase 4 — self-evaluation, promotion, autonomy
     autonomy: str = "manual"  # manual | assisted | auto
     history_path: Path | None = None
@@ -263,6 +270,10 @@ class Config:
             raise ValueError("rebalance_retry_seconds must be positive")
         if self.rebalance_max_retries < 0:
             raise ValueError("rebalance_max_retries must be >= 0")
+        if self.deferred_max_age_seconds < 0:
+            raise ValueError("deferred_max_age_seconds must be >= 0")
+        if self.deferred_max_attempts < 0:
+            raise ValueError("deferred_max_attempts must be >= 0")
         if self.discovery_max_candidates < 0:
             raise ValueError("discovery_max_candidates must be >= 0")
         if float(self.discovery_max_spread_bps) < 0:
@@ -396,4 +407,6 @@ def load_config(path: str | Path) -> Config:
         discovered_symbols=_adopted_symbols(raw.get("state_dir")),
         rebalance_retry_seconds=float(raw.get("rebalance_retry_seconds", 900.0)),
         rebalance_max_retries=int(raw.get("rebalance_max_retries", 6)),
+        deferred_max_age_seconds=float(raw.get("deferred_max_age_seconds", 3600.0)),
+        deferred_max_attempts=int(raw.get("deferred_max_attempts", 3)),
     )

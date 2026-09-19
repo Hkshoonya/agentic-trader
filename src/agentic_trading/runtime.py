@@ -43,7 +43,7 @@ from agentic_trading.session import (
     session_for,
 )
 from agentic_trading.strategies.fixture import FixtureStrategy
-from agentic_trading.types import OrderIntent, Side
+from agentic_trading.types import OrderIntent, Side, new_decision_id
 
 
 class Strategy(Protocol):
@@ -334,6 +334,9 @@ class _Loop:
         self._rebalance_retry_at = 0.0
         self._rebalance_retries = 0
         self._rebalance_retry_day = ""
+        # Orders that passed every judgement but could not be submitted (the
+        # arming switch, or a failed review call). See defer_intent.
+        self.deferred_intents: dict[str, dict[str, Any]] = {}
         # What the runtime last told the strategy it holds, so a reconcile only
         # speaks when the book actually changed.
         self._strategy_book: dict[str, str] = {}
@@ -1197,6 +1200,10 @@ class _Loop:
     def handle_quote(self, quote: dict, *, session: str = "regular") -> None:
         if self.should_stop():
             return
+        # An approved order that could not be submitted outranks a new decision:
+        # submit it first, so the strategy's fresh rebalance cannot take the
+        # budget it was already promised.
+        self.flush_deferred()
         # A retry is pending but not yet due. The strategy holds no "decided
         # today" marker at this point, so the rebalance runs again the moment
         # this window closes rather than being lost for the day.
@@ -1266,7 +1273,22 @@ class _Loop:
         )
         return True
 
-    def process_intent(self, intent: OrderIntent, *, session: str = "regular") -> None:
+    def process_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        session: str = "regular",
+        advised: bool = False,
+    ) -> None:
+        """Take one intent through sizing, judgement, the guard and placement.
+
+        ``advised`` says the advisory layer (Jev's entry read, the regime gate,
+        the LLM's entry veto) has already ruled on this exact decision and its
+        verdicts are on record. It is set only by ``flush_deferred`` when an
+        intent that had *already passed every judgement* is resubmitted after
+        the mechanical obstacle cleared — so re-asking the models cannot become
+        a way to shop for a different answer. The guard is never skipped.
+        """
         if self.journal.has_decision(intent.decision_id):
             return
 
@@ -1379,7 +1401,7 @@ class _Loop:
         # Jev's entry judgment, read from cache: is this entry chasing a move
         # that has already run? Off by default — the judgment is recorded on
         # every order either way, and only vetoes when the operator asks it to.
-        if is_entry and self.entry_advisor is not None:
+        if is_entry and self.entry_advisor is not None and not advised:
             context = self.entry_advisor.view(intent.symbol) or {}
             chase = context.get("chase")
             if (
@@ -1396,7 +1418,7 @@ class _Loop:
 
         # Regime gate: a bad regime may refuse entries, never create them. It
         # reads a cached classification, so this costs nothing on the order path.
-        if is_entry and self.regime_gate is not None:
+        if is_entry and self.regime_gate is not None and not advised:
             blocked = self.regime_gate.blocks(intent.symbol)
             if blocked is not None:
                 self._journal_rejected(
@@ -1410,7 +1432,7 @@ class _Loop:
         # Advisory veto: the model may refuse an entry (reduce risk) and its
         # hold opinion is recorded, but it never overrides a mechanical exit.
         advisor_payload: Optional[dict[str, Any]] = None
-        if self.advisor is not None:
+        if self.advisor is not None and not advised:
             features = self.market_features(intent.symbol)
             decision = self.advisor.review_entry(
                 symbol=intent.symbol,
@@ -1541,6 +1563,9 @@ class _Loop:
                 }
             )
             self.note_error("review_failed", exc)
+            # The judgement is done and the guard said yes; only the broker call
+            # failed. Hold it rather than making the strategy re-decide.
+            self.defer_intent(intent, session=session, why="review_failed")
             return RETRY
         self.journal.append(
             {
@@ -1610,6 +1635,9 @@ class _Loop:
                         "hint": "arm with AGENTIC_ALLOW_LIVE=1 in the daemon environment",
                     }
                 )
+                # Everything passed except the operator's switch. Keep the
+                # decision; if the switch closes later, the order still stands.
+                self.defer_intent(intent, session=session, why="not_armed")
             self.guard.persist(self.config.state_dir)
             # The evidence gate and the broker both said yes; only the operator's
             # arming switch is closed. If they arm it later today, the decision
@@ -1732,6 +1760,103 @@ class _Loop:
         from agentic_trading.arming import is_armed
 
         return is_armed(self.config.state_dir)
+
+    # -- intents that passed everything but could not be submitted ---------
+
+    def defer_intent(self, intent: OrderIntent, *, session: str, why: str) -> None:
+        """Park an intent that cleared every judgement but hit a mechanical wall.
+
+        Two things land here: an order the evidence gate and the broker both
+        approved that the arming switch refused, and one whose broker review
+        call failed on the network. Both are *decisions already taken*, so the
+        book is allowed to act on them when the wall comes down — on
+        2026-09-18 the only entry that survived the daily rebalance was blocked
+        by a switch that flipped 40 seconds later, and the approval was simply
+        lost.
+
+        Re-submission does **not** re-ask the models (see ``advised``): the way
+        to keep a veto meaningful is to never shop for a second opinion.
+        """
+        if intent.decision_id in self.deferred_intents:
+            return
+        self.deferred_intents[intent.decision_id] = {
+            "intent": intent,
+            "session": session,
+            "why": why,
+            "at": time.monotonic(),
+            "attempts": 0,
+        }
+
+    def flush_deferred(self) -> int:
+        """Resubmit deferred intents whose obstacle looks cleared. Returns count.
+
+        Bounded in both directions: an intent older than
+        ``deferred_max_age_seconds`` is dropped with a journal entry rather than
+        submitted against a stale price, and an intent that keeps failing is
+        dropped after ``deferred_max_attempts``.
+        """
+        if not self.deferred_intents:
+            return 0
+        if not self.armed_for_submission():
+            return 0
+        now = time.monotonic()
+        max_age = float(self.config.deferred_max_age_seconds)
+        max_attempts = int(self.config.deferred_max_attempts)
+        flushed = 0
+        for decision_id, entry in list(self.deferred_intents.items()):
+            age = now - float(entry["at"])
+            if age > max_age or int(entry["attempts"]) >= max_attempts:
+                del self.deferred_intents[decision_id]
+                self.journal.append(
+                    {
+                        "decision_id": decision_id,
+                        "event": "deferral_expired",
+                        "symbol": entry["intent"].symbol,
+                        "reason": entry["why"],
+                        "age_seconds": round(age, 1),
+                        "attempts": entry["attempts"],
+                    }
+                )
+                continue
+            entry["attempts"] = int(entry["attempts"]) + 1
+            retry = replace(
+                entry["intent"],
+                decision_id=new_decision_id(),
+                metadata={
+                    **(entry["intent"].metadata or {}),
+                    "retry_of": decision_id,
+                },
+            )
+            outcome = self.process_intent(
+                retry, session=str(entry["session"]), advised=True
+            )
+            # Written *after* the attempt, and keyed on the original decision:
+            # a record carrying the retry's own id would make the idempotency
+            # guard treat the decision as already taken and swallow it.
+            self.journal.append(
+                {
+                    "decision_id": decision_id,
+                    "retry_decision_id": retry.decision_id,
+                    "event": "resubmitted",
+                    "symbol": retry.symbol,
+                    "side": (
+                        retry.side.value
+                        if isinstance(retry.side, Side)
+                        else str(retry.side)
+                    ),
+                    "attempt": entry["attempts"],
+                    "was_blocked_by": entry["why"],
+                    "outcome": "submitted" if outcome != RETRY else "still_blocked",
+                    "note": (
+                        "every judgement on this order stands; only the "
+                        "mechanical obstacle is being retried"
+                    ),
+                }
+            )
+            if outcome != RETRY:
+                del self.deferred_intents[decision_id]
+                flushed += 1
+        return flushed
 
     def note_error(self, event: str, error: Exception) -> None:
         """Count a broker/loop failure and trip the kill switch if it persists."""

@@ -111,6 +111,16 @@ class _StubBroker:
             raise RuntimeError("gateway down")
         return PortfolioSnapshot(open_positions=len(self.held), held=dict(self.held))
 
+    def get_crypto_position_snapshot(self) -> PortfolioSnapshot:
+        """The crypto book is read separately; empty here, and never failing."""
+        return PortfolioSnapshot(open_positions=0, held={})
+
+    def resolve_rhs_account_number(self) -> str:
+        return "RHS0001"
+
+    def review_order(self, request: Any) -> dict:
+        return {"order_checks": []}
+
 
 def _quote() -> dict:
     return {
@@ -242,6 +252,91 @@ class StrategyReconcileTests(unittest.TestCase):
             loop.mode = "shadow"
             self.assertFalse(loop.reconcile_strategy_positions())
             self.assertEqual(broker.reads, 0)
+
+
+class DeferredIntentTests(unittest.TestCase):
+    """An order that cleared every judgement must survive a mechanical obstacle.
+
+    On 2026-09-18 at 00:00 UTC five of the daily rebalance's six entries were
+    refused by the models and the regime gate — real decisions — and the sixth,
+    XLM-USD, passed all of them and was blocked by the arming switch. Forty
+    seconds later the book armed itself, and the approval was gone: the models
+    were not going to be asked again that day. That is what this queue is for.
+    """
+
+    def _loop(self, tmp: Path, *, armed: bool) -> _Loop:
+        loop = _Loop(
+            _config(tmp, symbol_whitelist='["SPY", "XLM-USD"]'),
+            _StubBroker(),
+            _RecordingStrategy(),
+        )
+        loop.mode = "live"
+        loop.stage = "live"
+        # The daemon has read the account before it can place anything; without
+        # this the retry defers again on "equity pending", which is its own test.
+        loop.guard.current_equity = Decimal("50")
+        loop.defer_intent(_intent(), session="afterhours", why="not_armed")
+        if armed:
+            loop.armed_for_submission = lambda: True  # type: ignore[method-assign]
+        else:
+            loop.armed_for_submission = lambda: False  # type: ignore[method-assign]
+        return loop
+
+    def test_a_deferred_order_is_not_submitted_while_the_obstacle_stands(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            loop = self._loop(Path(name), armed=False)
+            self.assertEqual(loop.flush_deferred(), 0)
+            self.assertEqual(len(loop.deferred_intents), 1)
+
+    def test_clearing_the_obstacle_resubmits_and_does_not_re_ask_the_models(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            loop = self._loop(Path(name), armed=True)
+            original = next(iter(loop.deferred_intents))
+            placed: list[OrderIntent] = []
+            loop._place = lambda intent, request: placed.append(intent)  # type: ignore[method-assign]
+            loop.flush_deferred()
+            records = _events(loop)
+            resubmitted = [r for r in records if r.get("event") == "resubmitted"]
+            self.assertEqual(len(resubmitted), 1)
+            self.assertEqual(resubmitted[0]["decision_id"], original)
+            self.assertEqual(resubmitted[0]["outcome"], "submitted")
+            self.assertEqual(len(placed), 1)
+            # A fresh decision id is minted for the retry, with the original
+            # recorded on it, so the journal can join the two.
+            self.assertNotEqual(placed[0].decision_id, original)
+            self.assertEqual(placed[0].metadata.get("retry_of"), original)
+            self.assertEqual(loop.deferred_intents, {})
+
+    def test_a_stale_deferral_expires_rather_than_trading_an_old_price(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            loop = self._loop(Path(name), armed=True)
+            for entry in loop.deferred_intents.values():
+                entry["at"] = entry["at"] - 10_000  # far older than an hour
+            self.assertEqual(loop.flush_deferred(), 0)
+            self.assertEqual(loop.deferred_intents, {})
+            self.assertIn("deferral_expired", _event_names(loop))
+
+    def test_a_deferral_gives_up_after_its_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            loop = self._loop(Path(name), armed=True)
+            loop.armed_for_submission = lambda: True  # type: ignore[method-assign]
+            loop.process_intent = lambda intent, *, session="regular", advised=False: "retry"  # type: ignore[assignment]
+            for _ in range(4):
+                loop.flush_deferred()
+            self.assertEqual(loop.deferred_intents, {})
+            self.assertIn("deferral_expired", _event_names(loop))
+
+
+def _intent() -> OrderIntent:
+    return OrderIntent(
+        decision_id="approved-but-blocked",
+        symbol="XLM-USD",
+        side=Side.BUY,
+        quantity=Decimal("5.294245"),
+        ref_price=Decimal("0.192662"),
+        reason="trend_entry",
+        created_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+    )
 
 
 class UniverseAdoptionTests(unittest.TestCase):
