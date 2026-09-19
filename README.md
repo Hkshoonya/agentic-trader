@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-733%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-747%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -86,7 +86,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 733 tests
+.venv/bin/python -m pytest tests -q                     # 747 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -182,6 +182,59 @@ With the rule off (`0`, the default in `config/agentic.example.toml`) nothing
 changes: entries are refused with `below_min_notional` until the account grows
 past the point where the evidence-compliant size clears the minimum (~$110 at a
 1% ceiling).
+
+### The daily budget follows the account size
+
+One flat daily ceiling cannot suit both a $50 account and a $50,000 one. At 1%
+of $50 — 46 cents a day — the agent would take fifty days to become fully
+invested, which is not a trading system, it is a queue. So the ceiling is a
+schedule keyed on account size, with each tier scaled by evidence confidence:
+
+| account | per day, at no confidence | at full confidence |
+|---|---|---|
+| under $200 | 70% | 90% |
+| above $500 | 35% | 50% |
+| above $1000 | 17.5% | 25% |
+| above $2000 | 14% | 20% |
+
+Between two thresholds the band moves linearly, so crossing $500 does not double
+the risk in a day. The per-order ceiling is the day's share divided across the
+book's open slots — one order can never eat the day — hard-bounded by
+`max_order_hard_pct`. A config with no schedule keeps its flat ceilings, so
+nothing written before this existed changes behaviour. On the live $50 account
+the numbers in force are **$11.13 per order and $44.53 a day**.
+
+```toml
+daily_budget_schedule = [
+  [200, "0.90", "0.70"],
+  [500, "0.50", "0.35"],
+  [1000, "0.25", "0.175"],
+  [2000, "0.20", "0.14"],
+]
+```
+
+### What execution really costs
+
+The evidence report prices the strategy on an *assumed* cost per side. The first
+real round trip on the live account — $5.00 of XLM bought and sold back —
+measured what the venue actually charged: **$5.00 out, $4.90 back, 200 basis
+points for the round trip, 100 a side**, while the quoted spread at the time was
+8 bps. The model had assumed 2 bps a side, so reality was 50× the assumption.
+
+That is why `tools/test_trade.py` exists, and why the number it produces is
+written into `state_dir/execution_costs.json` and shown on the console:
+
+```console
+$ python tools/test_trade.py --config config/agentic.toml --symbol XLM-USD
+$ python tools/test_trade.py --config config/agentic.toml --notional 5 --confirm
+```
+
+The venue's part is closer to a fixed charge than a percentage, so small orders
+pay proportionally more of it: the same $0.10 round trip is 2% of a $5 order and
+10% of a $1 order. `max_cost_share_of_order` turns that into a rule — an entry
+whose notional cannot keep the measured cost inside the share is refused rather
+than quietly scaled up, because the strategy asked for a size and answering with
+five times as much is a different decision.
 
 ## The evolution agent
 
@@ -496,7 +549,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   733 tests, including the honesty tests for the rig
+tests/                   747 tests, including the honesty tests for the rig
 ```
 
 ## Operations

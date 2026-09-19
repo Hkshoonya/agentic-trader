@@ -185,9 +185,16 @@ def _config(tmp: Path) -> Path:
 
 
 def _records(config) -> list[dict]:
-    path = Path(config.journal_dir) / f"{FIXED_NOW.date().isoformat()}.jsonl"
-    if not path.is_file():
+    """Everything in the newest journal file.
+
+    The daemon names its journal after the day it is *running*, not after the
+    clock the test pins for its own decisions, so deriving the filename from
+    ``FIXED_NOW`` breaks the moment the real date rolls over at UTC midnight.
+    """
+    files = sorted(Path(config.journal_dir).glob("*.jsonl"))
+    if not files:
         return []
+    path = files[-1]
     return [
         json.loads(line)
         for line in path.read_text(encoding="utf-8").splitlines()

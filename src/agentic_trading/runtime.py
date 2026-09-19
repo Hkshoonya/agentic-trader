@@ -374,13 +374,16 @@ class _Loop:
         """Probation trades live but with a reduced per-order cap."""
         from agentic_trading.promotion import load_state, policy_from_config
 
+        # Every ceiling below comes from the *risk view*: the flat config pair,
+        # or the pair the size-and-confidence schedule derives for this account.
+        view = self.risk_view()
         state = load_state(self.config.state_dir)
         self.stage = state.stage
         if state.stage == "probation":
             probation_cap = policy_from_config(self.config).probation_max_order_pct
-            self.guard.max_order_pct = min(self.config.max_order_pct, probation_cap)
+            self.guard.max_order_pct = min(view.max_order_pct, probation_cap)
         else:
-            self.guard.max_order_pct = self.config.max_order_pct
+            self.guard.max_order_pct = view.max_order_pct
         # The cap the *evidence* justifies, before the small-account floor is
         # considered. Kept separately so the floor can never ratchet: it is
         # always derived from this value, not from its own previous output.
@@ -388,13 +391,13 @@ class _Loop:
         # The agent's stored limits may only ever tighten what the operator set.
         from agentic_trading.limits import apply_to_guard, load_limits, reconcile
 
-        self.guard.daily_notional_pct = self.config.daily_notional_pct
+        self.guard.daily_notional_pct = view.daily_notional_pct
         # A ceiling lowered in the config must show up on the console now, not
         # at the next evaluation — evaluations are skipped while the bars are
         # unchanged, which is most days.
-        reconcile(self.config)
-        apply_to_guard(self.guard, self.config)
-        stored = load_limits(self.config.state_dir)
+        reconcile(view)
+        apply_to_guard(self.guard, view)
+        stored = load_limits(view.state_dir)
         # Confidence in force right now, so every decision can record the
         # evidence level it was taken under.
         self.evidence_confidence = float(
@@ -409,6 +412,62 @@ class _Loop:
         self.apply_correlation_policy()
         self.apply_size_floor()
         self.reconcile_stage_mode()
+
+    def risk_view(self) -> Config:
+        """The operator's ceilings for *this* account size and confidence.
+
+        ``config/agentic.toml`` can state the daily budget as a schedule keyed
+        on account size (``daily_budget_schedule``) instead of one flat share.
+        When it does, the ceilings are re-derived here every cycle from the
+        equity the broker reports and the confidence the evidence earned: a $50
+        account and a $5,000 account should not be trading the same fraction of
+        themselves, and neither should trade the same fraction at confidence
+        0.2 and 0.95.
+
+        Without a schedule this returns the config unchanged, so every existing
+        deployment keeps the flat ceilings it was written with.
+        """
+        from agentic_trading.limits import budget_ceilings
+
+        if not getattr(self.config, "daily_budget_schedule", ()):
+            return self.config
+        equity = Decimal(str(self.guard.current_equity or 0))
+        if equity <= 0:
+            return self.config  # nothing measured yet; do not guess a budget
+        order, daily = budget_ceilings(
+            self.config, equity=equity, confidence=float(self.evidence_confidence)
+        )
+        return replace(self.config, max_order_pct=order, daily_notional_pct=daily)
+
+    def apply_risk_budget(self) -> Optional[dict[str, Any]]:
+        """Re-price the day's budget, and say so when it moves.
+
+        Called every cycle: equity moves with the market, the confidence ladder
+        moves with the evidence, and the schedule turns both into a ceiling. A
+        change is journaled with the numbers, because a budget that moves
+        silently is a budget nobody can audit.
+        """
+        if not getattr(self.config, "daily_budget_schedule", ()):
+            return None
+        before = (self.guard.max_order_pct, self.guard.daily_notional_pct)
+        self.apply_stage_caps()
+        after = (self.guard.max_order_pct, self.guard.daily_notional_pct)
+        view = self.risk_view()
+        if before == after and Decimal(str(before[1])) == view.daily_notional_pct:
+            return None
+        event = {
+            "event": "budget_recomputed",
+            "equity": str(self.guard.current_equity),
+            "confidence": round(float(self.evidence_confidence), 4),
+            "max_order_pct": str(after[0]),
+            "daily_notional_pct": str(after[1]),
+            "ceiling_max_order_pct": str(view.max_order_pct),
+            "ceiling_daily_notional_pct": str(view.daily_notional_pct),
+            "from_max_order_pct": str(before[0]),
+            "from_daily_notional_pct": str(before[1]),
+        }
+        self.journal.append(event)
+        return event
 
     def apply_size_floor(self) -> Optional[dict[str, Any]]:
         """Raise the per-order cap when the account is too small to place one.
@@ -1345,6 +1404,25 @@ class _Loop:
         if is_entry and self.orders_today >= self.config.max_orders_per_day:
             self._journal_rejected(intent, "max_orders_per_day", Decimal("0"))
             return
+        if is_entry:
+            from agentic_trading.execution import (
+                measured_cost_usd,
+                required_notional_for_cost,
+            )
+
+            share = float(getattr(self.config, "max_cost_share_of_order", 0) or 0)
+            required = required_notional_for_cost(self.config.state_dir, max_share=share)
+            notional = intent.resolved_notional()
+            if required and notional < Decimal(str(required)):
+                cost = measured_cost_usd(self.config.state_dir) or 0.0
+                self._journal_rejected(
+                    intent,
+                    "cost_too_high_for_size: "
+                    f"a ${cost:.2f} round trip on ${notional:.2f} is "
+                    f"{cost / max(float(notional), 1e-9) * 100:.1f}%",
+                    notional,
+                )
+                return
         if (
             is_entry
             and not is_crypto_symbol(intent.symbol)
@@ -2263,6 +2341,9 @@ def run_daemon(
 
         while not loop.should_stop():
             cycle_started = time.monotonic()
+            # The day's budget follows the account size and the confidence the
+            # evidence has earned; re-derive it before anything is sized.
+            loop.apply_risk_budget()
             # Equity moves while the loop runs; the size floor follows it.
             loop.apply_size_floor()
             # Autonomous execution: arm when every check is green, disarm the

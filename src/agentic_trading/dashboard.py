@@ -748,12 +748,28 @@ class DashboardState:
             live = float(limits.get("max_order_pct") or 0.0)
         except (TypeError, ValueError):
             live = 0.0
+        costs = _read_json(self.state_dir / "execution_costs.json") or {}
         return {
             "points": rows,
             "live_pct": live,
             "ceiling_pct": report.get("drawdown_ceiling_pct"),
             "sizing": report.get("sizing", ""),
-            "costs": report.get("costs") or {},
+            "costs": {
+                **(report.get("costs") or {}),
+                # What a *real* round trip cost, when one has been run. The
+                # evidence report prices the strategy on an assumption; this is
+                # the only number that includes what the venue actually kept.
+                **{
+                    key: value
+                    for key, value in {
+                        "measured_round_trip_bps": costs.get("measured_round_trip_bps"),
+                        "per_side_cost_bps": costs.get("per_side_cost_bps"),
+                        "measured_ratio": costs.get("ratio"),
+                        "round_trips": len(costs.get("round_trips") or []),
+                    }.items()
+                    if value is not None
+                },
+            },
             "generated_at": report.get("generated_at", ""),
         }
 

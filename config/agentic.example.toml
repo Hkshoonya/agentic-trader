@@ -58,6 +58,35 @@ small_account_max_order_pct = "0"
 # the strategy's inverse-volatility weight (1.0 = a 20%-vol asset), which on this
 # universe earns the same bps per trade with roughly a third of the drawdown.
 sizing = "flat"
+# --- The daily budget follows the account size ------------------------------
+# [ up_to_equity, share_at_full_confidence, share_at_zero_confidence ]
+#
+# A $50 account spread over four positions is $12 a position; at a flat 1% daily
+# ceiling it would take fifty days to become fully invested. So a small account
+# is concentrated, and the concentration falls as the account grows. The second
+# number is the day's share when the evidence confidence is 1.0, the third is the
+# share at confidence 0, and the system interpolates between them — the budget is
+# a function of account size *and* how much the evidence has actually earned.
+# Left commented out here so a new config keeps the flat ceilings above.
+#
+# What it costs, stated plainly: at 22% per order a four-position book can lose
+# ~9% of the account on a 10% market move, against the 15% drawdown ceiling the
+# evidence report is graded on.
+# daily_budget_schedule = [
+#   [200, "0.90", "0.70"],   # under $200: 70% .. 90% of the account per day
+#   [500, "0.50", "0.35"],   # above $500: 35% .. 50%
+#   [1000, "0.25", "0.175"], # above $1000: 17.5% .. 25%
+#   [2000, "0.20", "0.14"],  # above $2000: 14% .. 20%
+# ]
+# One order may never take more than this share of the account, whatever the
+# schedule and the confidence say, and never more than a quarter of the day.
+# max_order_hard_pct = "0.25"
+# The most of an order a *measured* round trip may cost. A real $5 XLM round trip
+# on this account cost $0.10 (200 bps) while the quoted spread was 8 bps, so the
+# venue's part is closer to a fixed charge than a percentage — at $1 the same
+# trip is 10% of the order and no edge survives it. An entry whose notional
+# cannot keep the measured cost inside this share is refused, not scaled up.
+max_cost_share_of_order = "0.02"
 # --- Symbol scout: let the agent add and drop symbols from data --------------
 # Off by default: the whitelist you wrote is the set of instruments this account
 # is authorised to trade until you say otherwise. With it on, the scout reads

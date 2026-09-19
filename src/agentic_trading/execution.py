@@ -36,6 +36,11 @@ class CostReport:
     measured_per_side_bps: Optional[float] = None
     assumed_per_side_bps: Optional[float] = None
     samples: list[dict[str, Any]] = field(default_factory=list)
+    # Completed buy-then-sell round trips, measured from the broker's own
+    # executed notionals. Slippage against a decision price cannot see the
+    # spread the broker charges *inside* the fill, and a real round trip is the
+    # only thing that prices the whole trip from cash out to cash back in.
+    round_trips: list[dict[str, Any]] = field(default_factory=list)
     updated_at: str = ""
     note: str = ""
 
@@ -49,9 +54,41 @@ class CostReport:
 
     @property
     def ratio(self) -> Optional[float]:
-        if not self.assumed_per_side_bps or self.measured_per_side_bps is None:
+        """Measured cost against the model's assumption. ``None`` without both.
+
+        Prefers the all-in per-side cost from a real round trip over slippage
+        against a decision price: slippage cannot see what the venue keeps, and
+        on a small account that is the number that decides whether an edge
+        survives at all.
+        """
+        measured = self.per_side_cost_bps
+        if not self.assumed_per_side_bps or measured is None:
             return None
-        return self.measured_per_side_bps / self.assumed_per_side_bps
+        return measured / self.assumed_per_side_bps
+
+    @property
+    def measured_round_trip_bps(self) -> Optional[float]:
+        """Median all-in round-trip cost across completed test trades."""
+        values = [
+            float(row["round_trip_bps"])
+            for row in self.round_trips
+            if isinstance(row.get("round_trip_bps"), (int, float))
+        ]
+        if not values:
+            return None
+        values.sort()
+        middle = len(values) // 2
+        if len(values) % 2:
+            return values[middle]
+        return (values[middle - 1] + values[middle]) / 2
+
+    @property
+    def per_side_cost_bps(self) -> Optional[float]:
+        """What one side really costs: measured round trip first, then slippage."""
+        trip = self.measured_round_trip_bps
+        if trip is not None:
+            return trip / 2
+        return self.measured_per_side_bps
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,10 +101,107 @@ class CostReport:
             "assumed_per_side_bps": self.assumed_per_side_bps,
             "ratio": round(self.ratio, 3) if self.ratio is not None else None,
             "usable": self.usable,
+            "round_trips": self.round_trips[-10:],
+            "measured_round_trip_bps": (
+                round(self.measured_round_trip_bps, 3)
+                if self.measured_round_trip_bps is not None
+                else None
+            ),
+            "per_side_cost_bps": (
+                round(self.per_side_cost_bps, 3)
+                if self.per_side_cost_bps is not None
+                else None
+            ),
             "updated_at": self.updated_at,
             "note": self.note,
             "samples": self.samples[-20:],
         }
+
+
+def record_round_trip(
+    state_dir: Path | str,
+    *,
+    symbol: str,
+    buy_notional: float,
+    sell_notional: float,
+    quantity: float = 0.0,
+    buy_order_id: str = "",
+    sell_order_id: str = "",
+    at: Optional[str] = None,
+) -> CostReport:
+    """Record one completed buy-then-sell trip, priced by the broker's cash.
+
+    ``buy_notional`` and ``sell_notional`` are what the broker says it moved —
+    not what the quote suggested. On a $50 account the difference is the whole
+    story: a $5 XLM round trip cost $0.10 (200 bps) while the quoted spread was
+    8 bps, because the effective price sits inside the fill, in the rounding,
+    and in whatever the venue keeps.
+    """
+    report = load_report(state_dir) or CostReport()
+    if buy_notional <= 0:
+        return report
+    # Positive means "this cost money", the same sign convention ``measure``
+    # uses for slippage, so a reader never has to remember which way is worse.
+    cost = buy_notional - sell_notional
+    report.round_trips.append(
+        {
+            "symbol": symbol,
+            "quantity": round(quantity, 8),
+            "buy_notional": round(buy_notional, 4),
+            "sell_notional": round(sell_notional, 4),
+            "cost_usd": round(cost, 4),
+            "round_trip_bps": round(cost / buy_notional * 10_000, 2),
+            "buy_order_id": buy_order_id,
+            "sell_order_id": sell_order_id,
+            "at": at or datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    report.updated_at = datetime.now(timezone.utc).isoformat()
+    report.note = (
+        f"{len(report.round_trips)} measured round trip(s); "
+        f"median {report.measured_round_trip_bps:.1f} bps all-in"
+    )
+    save_report(state_dir, report)
+    return report
+
+
+def measured_cost_usd(state_dir: Path | str) -> Optional[float]:
+    """Median dollars a completed round trip cost, or ``None`` if never measured."""
+    report = load_report(state_dir)
+    if report is None or not report.round_trips:
+        return None
+    values = [
+        float(row["cost_usd"])
+        for row in report.round_trips
+        if isinstance(row.get("cost_usd"), (int, float))
+    ]
+    if not values:
+        return None
+    values.sort()
+    middle = len(values) // 2
+    median = (
+        values[middle]
+        if len(values) % 2
+        else (values[middle - 1] + values[middle]) / 2
+    )
+    return max(0.0, median)
+
+
+def required_notional_for_cost(
+    state_dir: Path | str, *, max_share: float
+) -> Optional[float]:
+    """The smallest order whose measured round-trip cost stays inside ``max_share``.
+
+    A round trip on this account cost $0.10 whether the order was $5 or $50 —
+    the venue's part is closer to a fixed charge than a percentage — so a $1
+    order pays 10% to enter and leave, and no edge survives that. The rule
+    deliberately refuses rather than scaling the order up: the strategy asked
+    for a size, and answering with five times as much is a different decision.
+    """
+    cost = measured_cost_usd(state_dir)
+    if cost is None or max_share <= 0:
+        return None
+    return cost / max_share
 
 
 def parse_trade_history(payload: Any) -> list[dict[str, Any]]:
@@ -218,6 +352,12 @@ def load_report(state_dir: Path | str) -> Optional[CostReport]:
             if raw.get("measured_per_side_bps") is not None
             else None
         ),
+        samples=[
+            row for row in (raw.get("samples") or []) if isinstance(row, dict)
+        ],
+        round_trips=[
+            row for row in (raw.get("round_trips") or []) if isinstance(row, dict)
+        ],
         assumed_per_side_bps=(
             float(raw["assumed_per_side_bps"])
             if raw.get("assumed_per_side_bps") is not None

@@ -116,6 +116,86 @@ def _target_for_confidence(ceiling: Decimal, confidence: float) -> Decimal:
     return _clamp(ceiling * scale, ceiling, MIN_ORDER_PCT)
 
 
+def _row_bounds(config: Any, row: Any) -> tuple[Decimal, Decimal]:
+    """A schedule row's ``(share at full confidence, share at zero)``."""
+    ceiling = Decimal(str(row[1]))
+    floor = Decimal(str(row[2])) if len(row) > 2 else Decimal("0")
+    if floor <= 0:
+        default = Decimal(str(getattr(config, "daily_budget_confidence_floor", "0.70")))
+        floor = ceiling * default
+    return ceiling, min(floor, ceiling)
+
+
+def scheduled_daily_bounds(config: Any, equity: float) -> tuple[Decimal, Decimal]:
+    """The share band this account size sits in, ``(at full, at zero)`` confidence.
+
+    The schedule is a list of ``(up_to_equity, share, floor?)`` rows, smallest
+    first. A row applies until the next row's threshold, and the last row covers
+    everything above it. Between two rows both ends of the band move linearly,
+    so growing the account does not step the budget off a cliff on the day it
+    crosses a line. An empty schedule falls back to the flat
+    ``daily_notional_pct`` — with no band, because a flat ceiling is not a range.
+    """
+    rows = tuple(getattr(config, "daily_budget_schedule", ()) or ())
+    flat = Decimal(str(getattr(config, "daily_notional_pct", "0") or "0"))
+    if not rows:
+        return flat, flat
+    size = Decimal(str(max(0.0, float(equity))))
+    previous_limit = Decimal("0")
+    previous_ceiling, previous_floor = _row_bounds(config, rows[0])
+    for row in rows:
+        limit = Decimal(str(row[0]))
+        ceiling, floor = _row_bounds(config, row)
+        if size <= limit:
+            if limit <= previous_limit:
+                return ceiling, floor
+            span = limit - previous_limit
+            progress = (size - previous_limit) / span if span > 0 else Decimal("1")
+            return (
+                previous_ceiling + (ceiling - previous_ceiling) * progress,
+                previous_floor + (floor - previous_floor) * progress,
+            )
+        previous_limit, previous_ceiling, previous_floor = limit, ceiling, floor
+    return previous_ceiling, previous_floor
+
+
+def scheduled_daily_share(config: Any, equity: float, confidence: float = 1.0) -> Decimal:
+    """The day's share of the account at this size and confidence."""
+    ceiling, floor = scheduled_daily_bounds(config, equity)
+    trust = Decimal(str(round(max(0.0, min(1.0, float(confidence))), 6)))
+    return floor + (ceiling - floor) * trust
+
+
+def budget_ceilings(
+    config: Any,
+    *,
+    equity: Any,
+    confidence: float,
+) -> tuple[Decimal, Decimal]:
+    """The (per-order, per-day) ceilings this account size and confidence earn.
+
+    The schedule sets the day's share; confidence scales it from
+    ``daily_budget_confidence_floor`` of that share up to the whole of it, so a
+    tier is something the evidence has to earn rather than a default the system
+    holds. The per-order ceiling is the day's share divided across the book's
+    open slots — one order can never eat the day — and is hard-bounded by
+    ``max_order_hard_pct``.
+    """
+    if not getattr(config, "daily_budget_schedule", ()):
+        # No schedule: the operator's flat pair is already the answer, and
+        # inventing a per-order ceiling here would quietly change the risk of
+        # every config written before this feature existed.
+        return (
+            Decimal(str(getattr(config, "max_order_pct", "0") or "0")),
+            Decimal(str(getattr(config, "daily_notional_pct", "0") or "0")),
+        )
+    daily = scheduled_daily_share(config, float(equity), confidence)
+    slots = max(1, int(getattr(config, "max_open_positions", 1) or 1))
+    hard = Decimal(str(getattr(config, "max_order_hard_pct", "0.25")))
+    order = min(hard, daily / Decimal(slots))
+    return (max(order, MIN_ORDER_PCT), max(daily, MIN_DAILY_PCT))
+
+
 def propose(
     config: Any,
     *,
@@ -315,12 +395,31 @@ def reconcile(config: Any) -> Optional[Limits]:
         return None
     ceiling_order = Decimal(str(config.max_order_pct))
     ceiling_daily = Decimal(str(config.daily_notional_pct))
-    order = _clamp(Decimal(stored.max_order_pct), ceiling_order, MIN_ORDER_PCT)
-    daily = _clamp(Decimal(stored.daily_notional_pct), ceiling_daily, MIN_DAILY_PCT)
+    # A schedule is the operator re-pricing the budget for this account size, so
+    # the stored budget follows it rather than clamping below it — otherwise a
+    # $50 account would keep the 4% day it was given when the config was written
+    # for a flat ceiling. A budget that was cut for a *reason* (the evidence
+    # failed, or the kill switch fired) is never re-priced up: that cut is the
+    # ladder doing its job, and the schedule does not undo it.
+    scheduled = bool(getattr(config, "daily_budget_schedule", ()))
+    de_risked = str(stored.reason) in (
+        "evidence_not_passed_de_risk",
+        "reset",
+        "kill_switch",
+    )
+    if scheduled and not de_risked:
+        order, daily = ceiling_order, ceiling_daily
+    else:
+        order = _clamp(Decimal(stored.max_order_pct), ceiling_order, MIN_ORDER_PCT)
+        daily = _clamp(Decimal(stored.daily_notional_pct), ceiling_daily, MIN_DAILY_PCT)
     unchanged = order == Decimal(stored.max_order_pct) and daily == Decimal(
         stored.daily_notional_pct
     )
-    reason = "ceiling_reconciled" if unchanged else "ceiling_lowered"
+    reason = (
+        "ceiling_reconciled"
+        if unchanged
+        else ("schedule_applied" if scheduled and not de_risked else "ceiling_lowered")
+    )
     confidence = float(stored.confidence or 0.0)
     details = dict(stored.details or {})
     if not unchanged:

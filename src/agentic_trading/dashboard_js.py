@@ -43,7 +43,7 @@ let offset = 0; const seen = new Set();
 // the screen passes through these maps, so nobody has to learn what
 // "below_min_notional" or "cycle_stats" means to read their own trading agent.
 const EVENT_TEXT = {
-  accepted: 'order accepted',
+  accepted: 'passed every check',
   placed: 'sent to broker',
   rejected: 'refused',
   place_failed: 'broker refused it',
@@ -677,9 +677,17 @@ function drawFrontier(data) {
   const costs = (data && data.costs) || {};
   const note = document.getElementById('frontier-note');
   if (note && costs.break_even_per_side_bps !== undefined) {
-    note.textContent = 'the size breaks even if trading costs stay under '
+    let text = 'the size breaks even if trading costs stay under '
       + perHundred(costs.break_even_per_side_bps) + ' traded (the model assumes '
       + perHundred(costs.assumed_per_side_bps) + ')';
+    // A measured round trip beats an assumption, and on a small account it is
+    // usually much worse than the assumption — say so next to it.
+    const measured = Number(costs.per_side_cost_bps);
+    if (isFinite(measured) && measured > 0) {
+      text += ' · a real round trip on this account measured '
+        + perHundred(measured) + ' a side';
+    }
+    note.textContent = text;
   }
 }
 
@@ -851,8 +859,22 @@ async function refresh() {
       * Number((summary.risk || {}).daily_notional_pct || 0.20))
     + ' · trading ' + (POLICY_TEXT[summary.session_policy] || humanise(summary.session_policy));
   const counts = summary.event_counts || {};
+  const checked = counts.accepted || 0;
+  const sent = counts.placed || 0;
   document.getElementById('trades').textContent =
-    (counts.accepted || 0) + ' / ' + (counts.placed || 0) + ' / ' + (counts.rejected || 0);
+    checked + ' / ' + sent + ' / ' + (counts.rejected || 0);
+  // "Accepted" means the agent's own checks passed, not that a broker saw it.
+  // On a $50 account every order so far has been accepted and none sent, and
+  // the card has to say so in words or it reads like trading that never
+  // happened — which is exactly what the operator reported.
+  const tradesSub = document.getElementById('trades-sub');
+  if (tradesSub) {
+    tradesSub.textContent = (checked > sent)
+      ? 'checked / sent to broker / refused — ' + (checked - sent)
+        + ' passed every check but were never sent'
+      : 'checked / sent to broker / refused';
+    tradesSub.style.color = (checked > sent) ? '#ffcc66' : '';
+  }
   const streak = summary.promotion.streak, need = summary.promotion.required_cycles || 1;
   document.getElementById('streak').textContent = streak + ' / ' + need;
   document.getElementById('streak-bar').style.width = Math.min(100, (streak / need) * 100) + '%';
@@ -1213,9 +1235,9 @@ function renderOrders(data) {
   const body = document.querySelector('#orders tbody');
   const counts = (data && data.counts) || {};
   document.getElementById('orders-count').textContent =
-    (counts.accepted || 0) + ' accepted · ' + (counts.placed || 0) + ' placed · '
-    + (counts.rejected || 0) + ' rejected · ' + (counts.failed || 0)
-    + ' failed today (UTC)'
+    (counts.accepted || 0) + ' passed every check · ' + (counts.placed || 0)
+    + ' actually sent to the broker · ' + (counts.rejected || 0) + ' refused · '
+    + (counts.failed || 0) + ' failed at the broker today (UTC)'
     + (data.older_rows
       ? ' · table shows ' + (data.rows || []).length + ' decisions over the last '
         + (data.days_shown || 3) + ' days (' + data.older_rows + ' older)'

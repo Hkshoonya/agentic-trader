@@ -73,6 +73,14 @@ class Config:
     # after this many attempts.
     deferred_max_age_seconds: float = 3600.0
     deferred_max_attempts: int = 3
+    # The most of an order a measured round trip may cost. A real $5 XLM round
+    # trip cost $0.10 — 200 bps — while the quoted spread was 8 bps, so the
+    # venue's part is much closer to a fixed charge than a percentage: at $1 the
+    # same trip is 10% of the order and no edge survives it. An entry whose
+    # notional cannot keep the measured cost inside this share is refused rather
+    # than scaled up (see ``execution.required_notional_for_cost``). 0 disables
+    # the rule; with no measured round trip it can never fire.
+    max_cost_share_of_order: Decimal = Decimal("0.02")
     # Phase 4 — self-evaluation, promotion, autonomy
     autonomy: str = "manual"  # manual | assisted | auto
     history_path: Path | None = None
@@ -99,6 +107,26 @@ class Config:
     # sizing earns the same bps per trade with a third of the drawdown
     # (2.04%/order: 23.9% -> 9.0% max drawdown).
     sizing: str = "flat"
+    # The operator's daily-budget schedule, as
+    # ``[[up_to_equity, share_at_full_confidence, share_at_zero_confidence], ...]``
+    # (the third number is optional and defaults to ``daily_budget_confidence_floor``
+    # of the share). A small account has to be concentrated to do anything at
+    # all — $50 spread over four positions is $12 a position, and at a 1%
+    # ceiling it would take fifty days to become fully invested. Above a few
+    # thousand the same concentration stops being a necessity and becomes a
+    # liability, so the share falls with account size. The last row covers
+    # everything above its threshold. Empty means "use daily_notional_pct flat",
+    # which is what every config written before this one does.
+    daily_budget_schedule: tuple[tuple[float, Decimal, Decimal], ...] = ()
+    # Where a row sits at zero confidence when it does not say so itself: the
+    # budget is scaled between this fraction of the row and the row itself as
+    # confidence moves from 0 to 1, so a tier is a ceiling the system has to
+    # earn rather than a number it holds by default.
+    daily_budget_confidence_floor: Decimal = Decimal("0.70")
+    # Hard ceiling on a single order, whatever the schedule and the confidence
+    # say. The scheduled per-order ceiling is at most this, and at most
+    # ``daily share / max_open_positions`` so one order cannot eat the day.
+    max_order_hard_pct: Decimal = Decimal("0.25")
     # How often the evolution agent may propose changes to the system. It writes
     # proposals for review and can apply nothing; 0 disables it.
     evolution_agent_interval_hours: float = 24.0
@@ -274,6 +302,8 @@ class Config:
             raise ValueError("deferred_max_age_seconds must be >= 0")
         if self.deferred_max_attempts < 0:
             raise ValueError("deferred_max_attempts must be >= 0")
+        if self.max_cost_share_of_order < 0:
+            raise ValueError("max_cost_share_of_order must be >= 0")
         if self.discovery_max_candidates < 0:
             raise ValueError("discovery_max_candidates must be >= 0")
         if float(self.discovery_max_spread_bps) < 0:
@@ -282,6 +312,35 @@ class Config:
             raise ValueError("discovery_max_correlation must be in (0, 1]")
         if self.discovery_min_hold_hours < 0:
             raise ValueError("discovery_min_hold_hours must be >= 0")
+
+
+def _schedule(raw: Any) -> tuple[tuple[float, Decimal, Decimal], ...]:
+    """Parse ``[[up_to_equity, share, floor?], ...]`` into ordered thresholds.
+
+    An unreadable row is dropped rather than guessed at: a malformed risk
+    schedule must not become a different risk schedule.
+    """
+    if not isinstance(raw, list):
+        return ()
+    rows: list[tuple[float, Decimal, Decimal]] = []
+    for row in raw:
+        if not isinstance(row, (list, tuple)) or len(row) not in (2, 3):
+            continue
+        try:
+            threshold = float(row[0])
+            share = Decimal(str(row[1]))
+            floor = (
+                Decimal(str(row[2])) if len(row) == 3 else Decimal("0")
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            continue
+        if threshold < 0 or not 0 < share <= 1:
+            continue
+        if floor < 0 or floor > share:
+            floor = Decimal("0")
+        rows.append((threshold, share, floor))
+    rows.sort(key=lambda item: item[0])
+    return tuple(rows)
 
 
 def _adopted_symbols(state_dir: Any) -> frozenset[str]:
@@ -367,6 +426,11 @@ def load_config(path: str | Path) -> Config:
             str(raw.get("small_account_max_order_pct", "0"))
         ),
         sizing=str(raw.get("sizing", "flat")),
+        daily_budget_schedule=_schedule(raw.get("daily_budget_schedule")),
+        daily_budget_confidence_floor=Decimal(
+            str(raw.get("daily_budget_confidence_floor", "0.70"))
+        ),
+        max_order_hard_pct=Decimal(str(raw.get("max_order_hard_pct", "0.25"))),
         evolution_agent_interval_hours=float(
             raw.get("evolution_agent_interval_hours", 24.0)
         ),
@@ -409,4 +473,7 @@ def load_config(path: str | Path) -> Config:
         rebalance_max_retries=int(raw.get("rebalance_max_retries", 6)),
         deferred_max_age_seconds=float(raw.get("deferred_max_age_seconds", 3600.0)),
         deferred_max_attempts=int(raw.get("deferred_max_attempts", 3)),
+        max_cost_share_of_order=Decimal(
+            str(raw.get("max_cost_share_of_order", "0.02"))
+        ),
     )
