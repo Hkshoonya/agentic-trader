@@ -85,7 +85,7 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist/AgenticTrader/* -DestinationPath dist/AgenticTrader-windows-x64.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: AgenticTrader-windows-x64
           path: dist/AgenticTrader-windows-x64.zip
