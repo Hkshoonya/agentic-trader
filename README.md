@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-719%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-729%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -86,7 +86,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 719 tests
+.venv/bin/python -m pytest tests -q                     # 729 tests
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -100,7 +100,7 @@ Nothing else decides how much the agent may do on its own.
 
 | Switch | Default | What it allows | Where |
 |---|---|---|---|
-| Autonomy | **off** | the agent may promote/demote its own stage as evidence changes | `AGENTIC_ALLOW_AUTONOMY=1` |
+| Autonomy | **off** | the agent may promote/demote its own stage as evidence changes, and the scout may add/drop the symbols it picks | `AGENTIC_ALLOW_AUTONOMY=1` |
 | Arm | **off** | real orders may be submitted to the broker | `AGENTIC_ALLOW_LIVE=1` (Windows app: type `ARM`) |
 
 Both are session environment, not configuration files, so a copy of this repo on
@@ -290,6 +290,12 @@ The rules that make it safe to leave running:
 - **Everything it does is journaled** with the numbers that caused it: the vote,
   the dollar volume, the spread, the correlation, and a plain-language sentence
   per candidate.
+- **A config file is policy; the session switch is permission.** Adopting a
+  symbol widens what the book may hold to instruments you never named, so the
+  scout also needs `AGENTIC_ALLOW_AUTONOMY=1` in the daemon's environment — the
+  same switch that lets the agent promote itself. With `discovery_enabled = true`
+  and the switch closed, the daemon journals `discovery_held` and the book stays
+  on your list.
 - **It can only widen what may be considered.** The risk guard's per-order,
   daily and position caps still bind exactly as before, and the evidence gate is
   re-priced on the universe that actually trades — so adding a symbol adds
@@ -451,6 +457,13 @@ blocking each name, the promotion gate's unmet requirements, the walk-forward
 evidence the current size is justified by, and a pulse badge that says
 `AGENT SILENT 47m` if the daemon ever stops sending events.
 
+Every figure is presented with its plain-language meaning: the promotion gate
+says *cleared the gate — not yet* and *chance it is luck*, the evidence panel
+says what an order size actually earned per $100 traded in the past, and a
+refusal reads *too small for the broker minimum order* rather than
+`below_min_notional`. The journal keeps the exact codes for auditing; the
+console is written for the person deciding whether to arm it.
+
 ## How it decides
 
 ```mermaid
@@ -475,6 +488,7 @@ model, or the dashboard creates one.
 ```
 src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   runtime.py             the loop, the journal, self-evaluation, self-promotion
+  discovery.py           the symbol scout: grades the market's lists, adopts picks
   walkforward.py         the evidence rig: one fixed rule, out-of-sample folds
   evidence.py            turns that into a report the console and gate read
   confidence.py          per-order confidence, reporting only
@@ -482,7 +496,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   719 tests, including the honesty tests for the rig
+tests/                   729 tests, including the honesty tests for the rig
 ```
 
 ## Operations
@@ -492,6 +506,7 @@ systemctl --user status agentic-trading             # or: agentic-trading status
 agentic-trading selfcheck --config config/agentic.toml   # six back-checks
 agentic-trading walkforward --config config/agentic.toml # re-price the rule
 agentic-trading evolve --config config/agentic.toml      # search + assess
+agentic-trading discover --config config/agentic.toml    # what the scout would do
 ```
 
 The daemon rebuilds its own evidence report when it is older than
@@ -744,6 +759,29 @@ not exceed it, and the sell must be verifiable — otherwise it is refused as
 `would_short`, `oversell` or `positions_read_failed`. A symbol you removed from
 the whitelist is still sellable while the position is open, and crypto keeps its
 exit around the clock even when `session_policy` has the equity market closed.
+
+### The exit keeps working until it fills
+
+An entry spends risk budget on a signal the daily bars produced, so it is
+decided once a day. An exit *removes* risk, and the position it closes is one
+the rule has already decided to leave — so it is re-emitted on every cycle
+until a fill is reported, priced at the freshest bid the strategy has seen.
+The runtime suppresses a repeat while a sell for that symbol is already
+working, and journals one `exit_skipped` line per working exit so the silence
+is explained rather than guessed at. A sell the broker refuses once, or a
+limit that does not trade, no longer waits for tomorrow's rebalance.
+
+Live fills reach the strategy too. Its position book is seeded at start-up and
+then reconciled against the broker whenever the account's holdings change — on
+the equity refresh cadence, and once more immediately after a placement —
+because in live mode nothing else tells the strategy what it owns. Before that
+reconciliation existed, a live position could not be exited at all until the
+daemon was restarted, and every daily rebalance re-bought what the account
+already held.
+
+The crypto book and the equity book keep separate day markers: crypto decides
+at the UTC day roll, and an equity rebalance happens only during the regular
+session, where a fractional order can be both placed and exited.
 
 ### Crypto (24/7) — a separate broker namespace
 

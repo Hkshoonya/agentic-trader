@@ -25,6 +25,21 @@ symbol_whitelist = [
   "BTC-USD", "ETH-USD", "SOL-USD", "LTC-USD", "LINK-USD", "BCH-USD",
 ]
 
+# Symbol scout: the whitelist above is the floor, and the scout may add up to
+# four names the market is moving on when the tape supports them (a confirmed
+# trend, enough daily volume to exit, a payable spread, no duplicate of a bet
+# already held). It never removes a symbol you listed and never drops one the
+# account still holds. Adoption needs the session's autonomy switch as well —
+# a config file is policy, picking symbols you never named is permission — so
+# unticking "Let the agent promote itself" also freezes the watch list.
+discovery_enabled = true
+discovery_interval_hours = 6.0
+discovery_max_symbols = 4
+discovery_min_bars = 260
+discovery_min_dollar_volume = "5000000"
+discovery_max_spread_bps = "25"
+discovery_max_correlation = "0.85"
+
 # Per-order ceiling comes from the walk-forward evidence, not from appetite:
 # 1% per order is the largest flat size whose marked-to-market drawdown stays
 # inside the 15% gate on 11 years of this universe.

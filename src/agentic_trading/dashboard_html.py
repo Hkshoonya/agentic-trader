@@ -69,6 +69,22 @@ tr:hover td{background:#151d28}
 .flash{animation:flash .7s ease}
 @keyframes flash{from{background:#17263a}to{background:transparent}}
 @media(max-width:900px){.span3,.span4,.span5,.span7,.span8,.span12{grid-column:span 12}}
+@media(max-width:700px){
+  /* On a phone the 12-column order table cannot show every field without
+     shrinking each to one letter. Drop the fields that are detail rather than
+     identity — the journal keeps them, and the reason column explains the row. */
+  #orders th:nth-child(3),#orders td:nth-child(3),
+  #orders th:nth-child(6),#orders td:nth-child(6),
+  #orders th:nth-child(7),#orders td:nth-child(7),
+  #orders th:nth-child(9),#orders td:nth-child(9),
+  #orders th:nth-child(10),#orders td:nth-child(10),
+  #orders th:nth-child(11),#orders td:nth-child(11){display:none}
+  #candidates th:nth-child(3),#candidates td:nth-child(3),
+  #candidates th:nth-child(5),#candidates td:nth-child(5){display:none}
+  #universe th:nth-child(3),#universe td:nth-child(3),
+  #universe th:nth-child(4),#universe td:nth-child(4){display:none}
+  .tablewrap{max-height:none}
+}
 .armbtn{background:#3a1f24;color:#ff5f6d;border:0;padding:8px 12px;font:600 13px -apple-system,'Segoe UI',Roboto,sans-serif;cursor:pointer;border-radius:6px}.armbtn:hover{background:#4a262c}
 </style></head>
 <body>
@@ -93,7 +109,7 @@ tr:hover td{background:#151d28}
 <div class="card span4"><h2>Promotion gate</h2><div id="gate"></div></div>
 <div class="card span12"><h2>Market &amp; order table</h2>
   <div class="tablewrap"><table id="orders">
-    <thead><tr><th>time</th><th>status</th><th>confidence</th><th>symbol</th><th>side</th><th>type</th><th>session</th><th>size</th><th>notional</th><th>last</th><th>alerts</th><th>reason</th></tr></thead>
+    <thead><tr><th>time</th><th>status</th><th>what the checks said</th><th>symbol</th><th>side</th><th>type</th><th>session</th><th>size</th><th>value</th><th>price now</th><th>alerts</th><th>why</th></tr></thead>
     <tbody><tr><td colspan="12" class="sub">no decisions yet</td></tr></tbody>
   </table></div>
   <div class="sub" id="orders-count"></div>
@@ -101,14 +117,14 @@ tr:hover td{background:#151d28}
 </div>
 <div class="card span12"><h2>Candidates · what the rule wants right now</h2>
   <div class="tablewrap"><table id="candidates">
-    <thead><tr><th>symbol</th><th>trend vote</th><th>vol (annualised)</th><th>in book</th><th>blocked by</th><th>reason</th></tr></thead>
+    <thead><tr><th>symbol</th><th>how the price is moving</th><th>how wildly it moves</th><th>in the book</th><th>held back by</th><th>why</th></tr></thead>
     <tbody><tr><td colspan="6" class="sub">computing…</td></tr></tbody>
   </table></div>
   <div class="sub" id="candidates-note"></div>
 </div>
 <div class="card span12"><h2>Symbol scout · what it found, what it added, what it dropped</h2>
   <div class="tablewrap"><table id="universe">
-    <thead><tr><th>symbol</th><th>trend vote</th><th>traded per day</th><th>spread</th><th>decision</th><th>why</th></tr></thead>
+    <thead><tr><th>symbol</th><th>how the price is moving</th><th>traded per day</th><th>cost to trade</th><th>decision</th><th>why</th></tr></thead>
     <tbody><tr><td colspan="6" class="sub">no scan yet</td></tr></tbody>
   </table></div>
   <div class="sub" id="universe-note"></div>

@@ -10,12 +10,14 @@ strategy and quote feed without a restart.
 from __future__ import annotations
 
 import json
+import os
 import random
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 from agentic_trading import discovery
 from agentic_trading.broker import Broker
@@ -209,16 +211,17 @@ class DiscoveryRuntimeTests(unittest.TestCase):
             client = _ScoutClient(tools, bar_dir=bars)
             broker = Broker(client, tools)
 
-            run_daemon(
-                config,
-                broker=broker,
-                strategy=_QuietStrategy(),
-                feed=_Feed(),
-                duration_seconds=3.0,
-                clock=lambda: FIXED_NOW,
-                session_clock=lambda: "regular",
-                sleep=lambda seconds: None,
-            )
+            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_AUTONOMY": "1"}):
+                run_daemon(
+                    config,
+                    broker=broker,
+                    strategy=_QuietStrategy(),
+                    feed=_Feed(),
+                    duration_seconds=3.0,
+                    clock=lambda: FIXED_NOW,
+                    session_clock=lambda: "regular",
+                    sleep=lambda seconds: None,
+                )
 
             adopted = discovery.load_universe(config.state_dir).adopted
             self.assertEqual(adopted, ("NVDA",))
@@ -269,6 +272,44 @@ class DiscoveryRuntimeTests(unittest.TestCase):
 
             self.assertEqual(discovery.load_universe(config.state_dir).adopted, ())
             self.assertEqual(client.calls_named("get_popular_watchlists"), [])
+
+    def test_the_session_switch_is_required_even_when_the_config_allows_it(self) -> None:
+        """A config file is policy; the environment switch is permission.
+
+        Discovery widens what the book may hold to symbols the operator never
+        named, so it needs the same per-session consent as every other
+        self-directed change — and says so when it is held back.
+        """
+        tools = json.loads(
+            (FIXTURES / "tools_snapshot.json").read_text(encoding="utf-8")
+        )["tools"] + [{"name": name} for name in DISCOVERY_TOOLS]
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            bars = tmp / "bars"
+            _write_bars(bars, "SPY", _walk(1, drift=0.004))
+            _write_bars(bars, "NVDA", _walk(2, drift=0.006))
+            config = load_config(_config(tmp))
+            client = _ScoutClient(tools, bar_dir=bars)
+            broker = Broker(client, tools)
+            env = {k: v for k, v in os.environ.items() if k != "AGENTIC_ALLOW_AUTONOMY"}
+
+            with mock.patch.dict(os.environ, env, clear=True):
+                run_daemon(
+                    config,
+                    broker=broker,
+                    strategy=_QuietStrategy(),
+                    feed=_Feed(),
+                    duration_seconds=1.0,
+                    clock=lambda: FIXED_NOW,
+                    session_clock=lambda: "regular",
+                    sleep=lambda seconds: None,
+                )
+
+            self.assertEqual(discovery.load_universe(config.state_dir).adopted, ())
+            events = [record.get("event") for record in _records(config)]
+            self.assertIn("discovery_held", events)
+            self.assertNotIn("discovery", events)
 
 
 if __name__ == "__main__":

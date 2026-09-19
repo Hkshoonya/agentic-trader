@@ -293,6 +293,10 @@ class _Loop:
         self.strategy_factory = strategy_factory
         # Set by a worker, read by the daemon loop, which owns the quote feed.
         self.universe_dirty = False
+        # A scout report the loop thread has not applied yet. Adoption swaps the
+        # strategy and the guard's whitelist, so it belongs to the thread that
+        # processes quotes — never to the worker that produced the report.
+        self.pending_universe: Optional[list[str]] = None
         self.stop_event = stop_event
         self.force_shadow = force_shadow
         self.mode = "shadow" if force_shadow else effective_mode(config)
@@ -2354,15 +2358,24 @@ def run_daemon(
                             "notes": (report.get("notes") or [])[:3],
                         }
                     )
-                    # Adoption is applied by the loop's own thread: it owns the
-                    # quote feed, the strategy rebuild and the guard's whitelist.
-                    _loop.adopt_universe(report.get("adopted") or [])
+                    # Adoption is queued for the loop's own thread: it owns the
+                    # quote feed, the strategy rebuild and the guard's whitelist,
+                    # and a strategy that is still being built must never be
+                    # handed a quote.
+                    _loop.pending_universe = [
+                        str(symbol).upper()
+                        for symbol in (report.get("adopted") or [])
+                    ]
 
                 loop.discovery_thread = threading.Thread(  # type: ignore[attr-defined]
                     target=_discover, daemon=True, name="symbol-scout"
                 )
                 loop.discovery_thread.start()
                 workers.append(loop.discovery_thread)
+
+            if loop.pending_universe is not None:
+                pending, loop.pending_universe = loop.pending_universe, None
+                loop.adopt_universe(pending)
 
             if loop.universe_dirty:
                 # The feed was built from the old symbol list; the new symbols

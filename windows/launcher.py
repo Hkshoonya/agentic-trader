@@ -316,7 +316,7 @@ class Launcher:
         switches.pack(fill="x", padx=16, pady=(0, 8))
         self.autonomy_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            switches, text="Let the agent promote itself (autonomy)",
+            switches, text="Let the agent act on its own (promote itself, pick symbols)",
             variable=self.autonomy_var, command=self._set_autonomy,
             bg=BG, fg=FG, selectcolor=PANEL, activebackground=BG,
             activeforeground=FG, font=("Segoe UI", 10),
@@ -580,25 +580,35 @@ class Launcher:
         )
         agent_state = "running" if self.supervisor.agent_running() else "stopped"
         dash_state = "running" if self.supervisor.dashboard_running() else "stopped"
-        streak = f"{status['streak']}/{status['required_cycles']}"
+        # Plain sentences, because this window is the client's whole view of a
+        # system that moves money. The bps, confidence and stage codes stay in
+        # the journal and the console, where an audit belongs.
+        try:
+            equity = float(status["equity"])
+            per_order = equity * float(status["max_order_pct"])
+            per_day = equity * float(status["daily_notional_pct"])
+            budget = (
+                f"most it may spend: ${per_order:.2f} per order, ${per_day:.2f} today"
+            )
+        except (TypeError, ValueError):
+            budget = "spending limits: not read yet"
+        streak = f"{status['streak']} of {status['required_cycles']}"
         lines = [
             f"agent {agent_state}   dashboard {dash_state}   "
             f"http://127.0.0.1:{self.port}/",
-            f"equity ${status['equity']} (baseline ${status['baseline_equity']})   "
-            f"budget {float(status['max_order_pct']) * 100:.2f}%/order "
-            f"{float(status['daily_notional_pct']) * 100:.2f}%/day   "
-            f"confidence {status['confidence']}",
-            f"promotion streak {streak}   eligible this assessment: "
-            f"{'yes' if status['eligible'] else 'not yet'}   "
-            f"kill switch {'TRIPPED' if status['kill_switch'] else 'clear'}",
-            f"self-check: {status['health_detail']}",
+            f"balance ${status['equity']}   {budget}",
+            f"evidence: {streak} checks passed in a row   "
+            f"ready for real money: {'yes' if status['eligible'] else 'not yet'}   "
+            f"safety stop: {'TRIPPED' if status['kill_switch'] else 'not triggered'}",
+            f"health: {status['health_detail']}",
         ]
         if status.get("evidence_trades"):
             age = status.get("evidence_age_days")
+            per_hundred = float(status["evidence_expectancy_bps"] or 0) / 100
             lines.append(
-                f"walk-forward evidence: {status['evidence_trades']} trades, "
-                f"{float(status['evidence_expectancy_bps'] or 0):.0f} bps"
-                + (f", {age:.1f} days old" if age is not None else "")
+                f"practice results: {status['evidence_trades']} past orders, about "
+                f"${per_hundred:.2f} earned per $100 traded"
+                + (f", {age:.0f} days old" if age is not None else "")
             )
         self.status_text.configure(text="\n".join(lines))
 

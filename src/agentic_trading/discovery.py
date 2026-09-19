@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -68,6 +69,24 @@ from agentic_trading.history_sync import (
 from agentic_trading.orders import is_crypto_symbol
 
 UNIVERSE_FILE = "universe.json"
+
+# A symbol arriving from a broker list, a watchlist or a config pool becomes a
+# file name (``<SYMBOL>_day.jsonl``) and part of a Coinbase URL, so it is only
+# usable if it is a plain ticker. ``../../ETC/PASSWD`` or ``BTC?x=1`` would
+# otherwise escape the bar directory or inject a query string. Everything that
+# ingests a symbol runs it through this first.
+_SAFE_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,14}$")
+
+
+def safe_symbol(value: Any) -> str:
+    """A ticker, or an empty string. Rejects anything that is not one.
+
+    The check is deliberately narrow — letters, digits, dot and dash, 1..15
+    characters, starting with a letter or digit. Symbols are used to build file
+    names and URLs, and a broker payload is not a trusted source for either.
+    """
+    text = str(value or "").strip().upper()
+    return text if _SAFE_SYMBOL.match(text) else ""
 # Candidate history lives here rather than in the traded book's bar directory:
 # screening forty candidates should not leave forty new files in the shipped
 # data set. Only what the scout actually adopts is promoted into the book.
@@ -201,14 +220,14 @@ class Universe:
             return Universe()
         adopted: list[str] = []
         for value in payload.get("adopted") or []:
-            symbol = str(value).strip().upper()
+            symbol = safe_symbol(value)
             if symbol and symbol not in adopted:
                 adopted.append(symbol)
         raw_members = payload.get("members")
         members = {
-            str(symbol).upper(): dict(entry)
+            safe_symbol(symbol): dict(entry)
             for symbol, entry in (raw_members or {}).items()
-            if isinstance(entry, dict)
+            if isinstance(entry, dict) and safe_symbol(symbol)
         } if isinstance(raw_members, dict) else {}
         changes = payload.get("changes")
         return Universe(
@@ -314,7 +333,7 @@ def _list_index(broker: Any) -> dict[str, str]:
 
 def _normalise_item_symbol(item: dict[str, Any]) -> str:
     """Watchlist items spell crypto as the bare code (``BTC``)."""
-    raw = str(item.get("symbol") or "").strip().upper()
+    raw = safe_symbol(item.get("symbol"))
     if not raw:
         return ""
     kind = str(item.get("object_type") or "").strip().lower()
@@ -386,7 +405,7 @@ def crypto_candidates(broker: Any) -> tuple[list[Candidate], list[str]]:
         return [], [f"could not read the crypto pair list: {str(exc)[:80]}"]
     out: list[Candidate] = []
     for entry in pairs:
-        symbol = str(entry.get("symbol") or "").strip().upper()
+        symbol = safe_symbol(entry.get("symbol"))
         if not symbol:
             continue
         base = symbol.split("-")[0].split("/")[0].strip().upper()
@@ -405,7 +424,16 @@ def crypto_candidates(broker: Any) -> tuple[list[Candidate], list[str]]:
 
 
 def bars_path(bar_dir: Path | str, symbol: str) -> Path:
-    return Path(bar_dir) / f"{bar_stem(symbol)}_day.jsonl"
+    """The bar file for a symbol — refusing anything that is not a ticker.
+
+    Ingest points already filter, but state files and journal records are also
+    inputs, so the path builder is the last place that must not join a name
+    like ``../..`` onto a directory.
+    """
+    clean = safe_symbol(symbol)
+    if not clean:
+        raise ValueError(f"refusing to build a bar path from {symbol!r}")
+    return Path(bar_dir) / f"{bar_stem(clean)}_day.jsonl"
 
 
 def candidate_cache_dir(config: Any) -> Path:
@@ -425,16 +453,19 @@ def promote_history(
     """
     promoted: list[str] = []
     for symbol in symbols:
-        source = bars_path(cache_dir, symbol)
+        clean = safe_symbol(symbol)
+        if not clean:
+            continue  # a state file is an input too, and must not name a path
+        source = bars_path(cache_dir, clean)
         if not source.is_file():
             continue
         records = read_records(source)
         if not records:
             continue
-        target = bars_path(bar_dir, symbol)
+        target = bars_path(bar_dir, clean)
         merged, _added = merge_records(read_records(target), records)
         write_records(target, merged)
-        promoted.append(str(symbol).upper())
+        promoted.append(clean)
     return promoted
 
 
@@ -790,7 +821,10 @@ def _iter_dicts(payload: Any, depth: int = 0) -> list[dict[str, Any]]:
 def _held_series(bar_dir: Path | str, symbols: Iterable[str]) -> dict[str, list[Bar]]:
     series: dict[str, list[Bar]] = {}
     for symbol in symbols:
-        path = bars_path(bar_dir, symbol)
+        try:
+            path = bars_path(bar_dir, symbol)
+        except ValueError:
+            continue  # an unreadable name in the book cannot be priced
         if not path.is_file():
             continue
         try:
@@ -864,7 +898,7 @@ def rebalance(
         ordered.append(candidate)
     # The operator's own pool, for symbols the curated lists have not reached.
     for symbol in getattr(config, "discovery_candidates", ()) or ():
-        symbol = str(symbol).strip().upper()
+        symbol = safe_symbol(symbol)
         if symbol and symbol not in configured and symbol not in seen:
             seen.add(symbol)
             ordered.append(Candidate(symbol=symbol, sources=("operator pool",)))

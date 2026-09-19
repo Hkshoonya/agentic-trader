@@ -257,6 +257,40 @@ class SymbolScoutTests(unittest.TestCase):
         # A scout that cannot see the market says so; it does not guess.
         self.assertTrue(report["notes"])
 
+    def test_a_symbol_that_is_not_a_ticker_is_ignored(self) -> None:
+        """A broker payload must not be able to name a path or a URL.
+
+        Watchlist items become file names (``<SYMBOL>_day.jsonl``) and Coinbase
+        URLs, so a symbol like ``../../ETC/PASSWD`` is a write primitive, not a
+        ticker. It is skipped at ingest.
+        """
+        broker = _StubBroker(
+            lists={"Trending stocks": ["../../ETC/PASSWD", "NVDA?x=1"]},
+            bar_dir=self.bars,
+        )
+
+        report = discovery.rebalance(self._config(), broker, held=())
+
+        self.assertEqual(report["added"], [])
+        self.assertEqual(report["adopted"], [])
+        # The traversal target was never created next to the bar directory.
+        self.assertFalse((self.tmp / "ETC").exists())
+        self.assertFalse((self.tmp.parent / "ETC").exists())
+
+    def test_the_path_builder_refuses_a_name_that_is_not_a_ticker(self) -> None:
+        with self.assertRaises(ValueError):
+            discovery.bars_path(self.bars, "../../ETC/PASSWD")
+        with self.assertRaises(ValueError):
+            discovery.bars_path(self.bars, "BTC?x=1")
+
+    def test_the_crypto_fetch_refuses_a_name_that_is_not_a_ticker(self) -> None:
+        from agentic_trading.history_sync import fetch_crypto_records
+
+        # Raised before any HTTP call: httpx is imported but never reached.
+        for hostile in ("../../ETC/PASSWD", "BTC?x=1", "BTC&x=1", ""):
+            with self.assertRaises(ValueError):
+                fetch_crypto_records(hostile)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ This module closes that loop:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -262,7 +263,14 @@ def fetch_crypto_records(
     """
     import httpx
 
-    product = symbol if "-" in symbol else f"{symbol[:-3]}-USD"
+    # The product goes into a URL path, so it is validated before it is joined
+    # in: a symbol is a ticker, never a path fragment or a query string.
+    text = str(symbol or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,14}", text):
+        raise ValueError(f"refusing to fetch crypto candles for {symbol!r}")
+    product = text if "-" in text else f"{text[:-3]}-USD"
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,15}", product):
+        raise ValueError(f"refusing to fetch crypto candles for {symbol!r}")
     params: dict[str, Any] = {"granularity": 86_400}
     if start is not None:
         params["start"] = start.astimezone(timezone.utc).isoformat()

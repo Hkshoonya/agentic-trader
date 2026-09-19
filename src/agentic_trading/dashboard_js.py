@@ -2,6 +2,40 @@
 
 SCRIPT = """
 const num = (v, d=2) => (v === null || v === undefined || v === '') ? '—' : Number(v).toFixed(d);
+
+// Dynamic values — symbols, reasons, error strings, model notes — reach the
+// page through innerHTML, and some of them originate in a broker payload.
+// Escape them, so a hostile value is text on the screen and never markup.
+const esc = (v) => String(v === null || v === undefined ? '' : v)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+// A basis point is $0.01 per $100 traded. An operator reads dollars, not bps.
+const perHundred = (bps) => {
+  const value = Number(bps);
+  if (bps === null || bps === undefined || bps === '' || !isFinite(value)) return '—';
+  return (value >= 0 ? '+' : '−') + '$' + Math.abs(value / 100).toFixed(2) + ' per $100';
+};
+
+// "p = 0.113" is a statistic; "about 1 in 9" is the same fact in odds.
+const plainLuck = (p) => {
+  const value = Number(p);
+  if (p === null || p === undefined || p === '' || !isFinite(value)) return '—';
+  if (value <= 0) return 'no chance in the sample';
+  if (value <= 0.002) return 'less than 1 in 500';
+  return 'about 1 in ' + Math.max(2, Math.round(1 / value));
+};
+
+// The gate's own score, as a word. The number is still in the journal.
+const plainScore = (score) => {
+  const value = Number(score);
+  if (score === null || score === undefined || score === '' || !isFinite(value)) return '—';
+  if (value >= 0.75) return 'strong';
+  if (value >= 0.5) return 'fair';
+  if (value >= 0.25) return 'weak';
+  return 'not convinced';
+};
+
 let offset = 0; const seen = new Set();
 
 // The journal speaks in codes because codes can be counted, replayed and
@@ -167,7 +201,9 @@ function plainCandidateReason(text) {
   const t = String(text || '');
   let match = t.match(/^vote ([\\d.-]+) \\((\\d+)\\/(\\d+) horizons up\\)$/);
   if (match) {
-    return match[2] + ' of ' + match[3] + ' timeframes rising (score ' + match[1] + ')';
+    return match[2] === match[3]
+      ? 'price is up on every timeframe'
+      : 'price is up on ' + match[2] + ' of ' + match[3] + ' timeframes';
   }
   match = t.match(/^trend vote ([\\d.-]+) < ([\\d.-]+) \\((\\d+)\\/(\\d+) horizons up\\)$/);
   if (match) {
@@ -217,7 +253,14 @@ function plainCheckDetail(text) {
 
 function humanise(text) {
   return String(text === null || text === undefined ? '' : text)
-    .replace(/_/g, ' ').replace(/\\s+/g, ' ').trim();
+    .replace(/_/g, ' ').replace(/\\s+/g, ' ').trim()
+    // A sentence the console has no specific translation for still should not
+    // make the reader learn the evidence rig's vocabulary mid-sentence.
+    .replace(/\\bout-of-sample\\b/gi, 'held-back')
+    .replace(/\\bin-sample\\b/gi, 'practice')
+    .replace(/\\bwalk-forward\\b/gi, 'held-back')
+    .replace(/\\bdrawdown\\b/gi, 'worst dip')
+    .replace(/\\bbootstrap p\\b/gi, 'chance it is luck');
 }
 
 function plainEvent(name) {
@@ -300,8 +343,8 @@ function plainGateReason(reason) {
   if (match) return 'only ' + match[1] + ' trades in the held-back test (needs ' + match[2] + ')';
   match = text.match(/(?:out-of-sample|walk-forward) expectancy ([-\\d.]+)bps < required ([-\\d.]+)bps after costs/);
   if (match) {
-    return 'the held-back test earned ' + match[1] + ' bps per trade; it needs ' +
-      match[2] + ' bps to clear costs';
+    return 'the held-back test earned ' + perHundred(match[1]) +
+      ' traded; it needs ' + perHundred(match[2]) + ' traded to clear costs';
   }
   match = text.match(/edge does not survive the search: p=([\\d.]+) > [\\d.]+ \\(0\\.05 \\/ (\\d+) hypotheses tested\\)/);
   if (match) {
@@ -356,7 +399,7 @@ function renderEvent(r) {
   const div = document.createElement('div');
   div.className = 'ev flash';
   div.innerHTML = '<span class="sub">' + when + '</span><span><span class="kind ' + cls + '">'
-    + kind + '</span> ' + detail + amount + '</span>';
+    + esc(kind) + '</span> ' + esc(detail) + amount + '</span>';
   stream.prepend(div);
   while (stream.childElementCount > 200) stream.removeChild(stream.lastChild);
 }
@@ -440,19 +483,21 @@ function renderCandidates(data) {
   const note = document.getElementById('candidates-note');
   if (!rows.length) {
     body.innerHTML = '<tr><td colspan="6" class="sub">'
-      + ((data && data.error) || 'no bar history for the whitelist') + '</td></tr>';
+      + esc((data && data.error) || 'no bar history for the whitelist') + '</td></tr>';
     return;
   }
   body.innerHTML = rows.map(r => {
     const blocked = (r.blocked_by || []).map(plainBlocker).join('; ');
     const vote = Number(r.vote || 0);
     const cls = r.selected && !blocked ? 'buy' : (blocked ? 'sell' : 'sub');
-    return '<tr><td>' + r.symbol + (r.held ? ' <span class="sub">held</span>' : '') + '</td>'
-      + '<td>' + vote.toFixed(2) + '</td>'
+    return '<tr><td>' + esc(r.symbol) + (r.held ? ' <span class="sub">held</span>' : '') + '</td>'
+      + '<td>' + (vote >= 0.99 ? 'up on every timeframe'
+        : 'up on ' + Math.round(vote * 4) + ' of 4 timeframes') + '</td>'
       + '<td>' + num(r.vol_pct, 1) + '%</td>'
-      + '<td class="' + cls + '">' + (r.selected ? (blocked ? 'yes · held back' : 'yes') : 'no') + '</td>'
-      + '<td class="sell">' + (blocked || '—') + '</td>'
-      + '<td class="sub reason">' + plainCandidateReason(r.reason)
+      + '<td class="' + cls + '">'
+      + (r.selected ? (blocked ? 'held' : 'yes') : 'no') + '</td>'
+      + '<td class="sell">' + esc(blocked || '—') + '</td>'
+      + '<td class="sub reason">' + esc(plainCandidateReason(r.reason))
         + (r.regime ? ' · market read ' + plainRegime(r.regime) : '') + '</td></tr>';
   }).join('');
   if (note) {
@@ -586,8 +631,9 @@ function drawFrontier(data) {
   const costs = (data && data.costs) || {};
   const note = document.getElementById('frontier-note');
   if (note && costs.break_even_per_side_bps !== undefined) {
-    note.textContent = 'break-even cost ' + num(Number(costs.break_even_per_side_bps))
-      + ' bps/side vs ' + num(Number(costs.assumed_per_side_bps)) + ' assumed';
+    note.textContent = 'the size breaks even if trading costs stay under '
+      + perHundred(costs.break_even_per_side_bps) + ' traded (the model assumes '
+      + perHundred(costs.assumed_per_side_bps) + ')';
   }
 }
 
@@ -636,24 +682,24 @@ function renderArm(summary) {
   // proper checking": every item named, with its own verdict, before anything
   // reaches the broker.
   const checklist = (arm.checks || []).map(c =>
-    '<div class="sub">' + (c.ok ? '✓' : '✗') + ' ' + c.name + ' — '
-      + plainCheckDetail(c.detail) + '</div>'
+    '<div class="sub">' + (c.ok ? '✓' : '✗') + ' ' + esc(c.name) + ' — '
+      + esc(plainCheckDetail(c.detail)) + '</div>'
   ).join('');
   if (arm.auto_arm) {
     box.innerHTML = '<b class="' + (arm.passed ? 'buy' : 'sell') + '">AUTONOMOUS '
       + (arm.passed ? '· will arm on the next cycle' : '· held back') + '</b>'
-      + '<div class="sub">' + (arm.reason || '') + '</div>' + checklist;
+      + '<div class="sub">' + esc(arm.reason || '') + '</div>' + checklist;
     return;
   }
   if (!arm.available) {
     // Not eligible: say why, and show nothing to click. A greyed-out button
     // invites a fight with the UI; the reason is the honest answer.
-    box.innerHTML = '<span class="sub">not yet armed — ' + (arm.reason || '') + '</span>'
+    box.innerHTML = '<span class="sub">not yet armed — ' + esc(arm.reason || '') + '</span>'
       + checklist;
     return;
   }
   box.innerHTML = '<button class="armbtn" onclick="setArmed(true)">Arm live trading</button>'
-    + '<span class="sub" style="margin-left:8px">' + (arm.reason || '') + '</span>'
+    + '<span class="sub" style="margin-left:8px">' + esc(arm.reason || '') + '</span>'
     + checklist;
 }
 
@@ -777,9 +823,9 @@ async function refresh() {
     + '<div class="row"><span>budget / day</span><b>'
       + num(Number(risk.daily_notional_pct || 0) * 100) + '% (ceiling '
       + num(Number(risk.ceiling_daily_notional_pct || 0) * 100) + '%)</b></div>'
-    + '<div class="row"><span>confidence</span><b>' + num(risk.confidence, 3)
+    + '<div class="row"><span>evidence strength</span><b>' + plainScore(risk.confidence)
       + (risk.reason
-        ? ' · ' + (CONFIDENCE_TEXT[risk.reason] || humanise(risk.reason))
+        ? ' · ' + esc(CONFIDENCE_TEXT[risk.reason] || humanise(risk.reason))
         : '') + '</b></div>'
     + (risk.target_max_order_pct
       ? '<div class="sub">next target '
@@ -821,11 +867,11 @@ async function refresh() {
     ? budget + tooSmall + '<div class="sub">no assessment yet — run: agentic-trading evolve</div>'
     : budget + tooSmall
       + '<div class="row"><span>cleared the gate</span><b>' + (a.eligible ? 'yes' : 'not yet') + '</b></div>'
-      + '<div class="row"><span>score</span><b>' + num(a.score, 3) + '</b></div>'
-      + '<div class="row"><span>trades in the held-back test</span><b>' + (ev.oos_trades ?? '—') + '</b></div>'
-      + '<div class="row"><span>average per trade</span><b>' + num(ev.oos_expectancy_bps) + ' bps</b></div>'
+      + '<div class="row"><span>how convinced the checks are</span><b>' + plainScore(a.score) + '</b></div>'
+      + '<div class="row"><span>orders checked on unseen dates</span><b>' + (ev.oos_trades ?? '—') + '</b></div>'
+      + '<div class="row"><span>what each trade made</span><b>' + perHundred(ev.oos_expectancy_bps) + ' traded</b></div>'
       + '<div class="row"><span>held-back periods that made money</span><b>' + (ev.folds_positive ?? '—') + '/' + (ev.folds_total ?? '—') + '</b></div>'
-      + '<div class="row"><span>chance it is luck (p)</span><b>' + num(ev.oos_bootstrap_p_value, 3) + '</b></div>'
+      + '<div class="row"><span>chance it is luck</span><b>' + plainLuck(ev.oos_bootstrap_p_value) + '</b></div>'
       + (reasons.length
         ? '<div class="sub" style="margin-top:8px">'
           + reasons.map(r => '• ' + plainGateReason(r)).join('<br>') + '</div>'
@@ -834,14 +880,17 @@ async function refresh() {
   if (summary.evolution) {
     const e = summary.evolution;
     document.getElementById('evolution').innerHTML =
-      '<div class="row"><span>genomes evaluated</span><b>' + (e.evaluated ?? '—') + '</b></div>'
-      + '<div class="row"><span>universe</span><b>'
-        + ((e.symbols || []).length ? (e.symbols || []).join(',') : 'all bar files')
+      '<div class="row"><span>rules tried</span><b>' + (e.evaluated ?? '—') + '</b></div>'
+      + '<div class="row"><span>symbols tested</span><b>'
+        + ((e.symbols || []).length
+            ? esc((e.symbols || []).join(','))
+            : 'every symbol with price history')
         + '</b></div>'
-      + '<div class="row"><span>train / test bars</span><b>' + (e.train_bars ?? '—') + ' / ' + (e.test_bars ?? '—') + '</b></div>'
-      + '<div class="row"><span>seed</span><b>' + (e.seed ?? '—') + '</b></div>'
-      + '<div class="row"><span>champion</span><b>' + JSON.stringify(e.champion).slice(0, 90) + '</b></div>'
-      + '<div class="sub" style="margin-top:8px">ran ' + (e.run_at || 'never') + '</div>';
+      + '<div class="row"><span>days for practice / days held back</span><b>'
+        + (e.train_bars ?? '—') + ' / ' + (e.test_bars ?? '—') + '</b></div>'
+      + '<div class="row"><span>best rule found</span><b class="sub">'
+        + esc(JSON.stringify(e.champion).slice(0, 90)) + '</b></div>'
+      + '<div class="sub" style="margin-top:8px">ran ' + esc(e.run_at || 'never') + '</div>';
   }
   // The evolution agent's queue: proposals for the operator to review. It can
   // write these and nothing else — no limit, no gate and no order changes.
@@ -858,9 +907,11 @@ async function refresh() {
         + (proposals.updated_at ? new Date(proposals.updated_at).toLocaleString() : '—')
         + '</div>'
         + proposals.proposals.slice().reverse().map(p =>
-          '<div class="row"><span>' + humanise(p.category) + ' · ' + humanise(p.title) + '</span><b class="sub">'
-          + num(Number(p.confidence || 0), 2) + ' · ' + p.status + '</b></div>'
-          + '<div class="sub" style="margin:-2px 0 6px">' + humanise(p.evidence || '') + '</div>'
+          '<div class="row"><span>' + esc(humanise(p.category)) + ' · '
+          + esc(humanise(p.title)) + '</span><b class="sub">'
+          + plainScore(p.confidence) + ' · ' + esc(humanise(p.status)) + '</b></div>'
+          + '<div class="sub" style="margin:-2px 0 6px">'
+          + esc(humanise(p.evidence || '')) + '</div>'
         ).join('');
     }
   }
@@ -875,8 +926,9 @@ async function refresh() {
     const rows = symbols.sort().map(sym => {
       const r = regimes[sym] || {};
       const blocked = r.blocks_entries ? 'sell' : 'buy';
-      return '<div class="row"><span>' + sym + '</span><b class="' + blocked + '">'
-        + plainRegime(r.regime) + ' ' + num(r.confidence, 2)
+      return '<div class="row"><span>' + esc(sym) + '</span><b class="' + blocked + '">'
+        + esc(plainRegime(r.regime)) + ' · '
+        + num(Number(r.confidence || 0) * 100, 0) + '% sure'
         + (r.blocks_entries ? ' · blocking new entries' : '') + '</b></div>';
     }).join('');
     document.getElementById('regimes').innerHTML =
@@ -940,16 +992,20 @@ function renderUniverse(summary) {
         ? '$' + (volume / 1e6).toFixed(1) + 'M'
         : (volume > 0 ? '$' + Math.round(volume / 1e3) + 'k' : '—');
       const spread = (r.spread_bps === null || r.spread_bps === undefined)
-        ? '—' : num(Number(r.spread_bps), 1) + ' bps';
+        ? '—' : perHundred(r.spread_bps) + ' to trade';
       const verdict = r.admitted
         ? '<span class="buy">added to the watch list</span>'
         : '<span class="sub">left out</span>';
-      return '<tr><td class="nowrap">' + r.symbol + '</td>'
-        + '<td>' + num(Number(r.vote || 0) * 100, 0) + '%</td>'
+      const vote = Number(r.vote || 0);
+      const voteText = vote >= 0.99 ? 'up on every timeframe'
+        : vote > 0 ? 'up on ' + Math.round(vote * 4) + ' of 4 timeframes'
+        : 'no timeframe rising';
+      return '<tr><td class="nowrap">' + esc(r.symbol) + '</td>'
+        + '<td>' + voteText + '</td>'
         + '<td class="nowrap">' + volumeText + '</td>'
         + '<td class="nowrap">' + spread + '</td>'
         + '<td class="nowrap">' + verdict + '</td>'
-        + '<td class="sub reason">' + (r.reason || '') + '</td></tr>';
+        + '<td class="sub reason">' + esc(r.reason || '') + '</td></tr>';
     }).join('');
   }
   if (note) {
@@ -982,32 +1038,37 @@ function renderEvidence(summary) {
     return;
   }
   const line = (name, s) => {
-    if (!s) return '';
-    return '<div class="row"><span>' + name + '</span><b>'
-      + num(Number(s.per_order_pct || 0) * 100) + '% / order · '
-      + (s.trades ?? '—') + ' trades · ' + num(s.expectancy_bps) + ' bps · DD '
-      + num(s.max_drawdown_pct) + '% · $' + num(s.final_equity) + ' · p '
-      + num(s.bootstrap_p_value, 4)
-      + (s.eligible ? ' · inside gate' : '') + '</b></div>';
+    // A size the report never measured has nothing to say; an empty row of
+    // zeros and dashes reads like a result, which is worse than no row.
+    if (!s || s.trades === null || s.trades === undefined) return '';
+    return '<div class="row"><span>' + esc(name) + '</span><b>'
+      + num(Number(s.per_order_pct || 0) * 100) + '% of the account per order · '
+      + (s.trades ?? '—') + ' past orders</b></div>'
+      + '<div class="sub" style="margin:-2px 0 6px">'
+      + perHundred(s.expectancy_bps) + ' traded · worst dip '
+      + num(s.max_drawdown_pct) + '% · ended at $' + num(s.final_equity)
+      + ' · chance it was luck: ' + plainLuck(s.bootstrap_p_value)
+      + (s.eligible ? ' · inside the 15% dip limit' : '') + '</div>';
   };
   const age = e.generated_at
     ? Math.round((Date.now() - new Date(e.generated_at)) / 86400000) : null;
   box.innerHTML =
-    line('volatility-target rule', e.inverse_vol)
-    + line('largest size inside the drawdown gate', e.gate_size)
-    + line('size in force', e.production)
+    line('the size the rule suggests', e.inverse_vol)
+    + line('the biggest size inside the 15% dip limit', e.gate_size)
+    + line('the size running now', e.production)
     + '<div class="sub" style="margin-top:6px">'
-      + (e.symbols || []).length + ' symbols · ' + (e.bars ?? '—') + ' bars · '
-      + (e.folds ?? '—') + ' walk-forward folds · drawdown ceiling '
+      + (e.symbols || []).length + ' symbols · ' + (e.bars ?? '—') + ' days of prices · '
+      + (e.folds ?? '—') + ' separate periods tested · worst dip allowed '
       + num(e.drawdown_ceiling_pct) + '%'
       + (age === null ? '' : ' · report ' + age + 'd old')
       + (e.auto_refresh_days
-        ? ' · the daemon rebuilds it when older than ' + e.auto_refresh_days + 'd'
+        ? ' · the daemon rebuilds it after ' + e.auto_refresh_days + ' days'
           + (e.refreshed_by_daemon ? ' (last rebuild was automatic)' : '')
         : '')
-      + (e.gate_reason ? ' · ' + e.gate_reason : '')
+      + (e.gate_reason ? ' · ' + esc(plainGateReason(e.gate_reason)) : '')
     + '</div>'
-    + (e.notes || []).map(note => '<div class="sub">note: ' + note + '</div>').join('');
+    + (e.notes || []).map(note => '<div class="sub">note: '
+        + esc(plainGateReason(note)) + '</div>').join('');
 }
 
 
@@ -1043,7 +1104,8 @@ function renderAgents(summary) {
         bits.push(d.symbols + ' symbols synced');
       }
       if (a.name === 'research' && d.trades !== undefined) {
-        bits.push(d.trades + ' trades · ' + num(Number(d.expectancy_bps || 0)) + ' bps');
+        bits.push(d.trades + ' trades tested · '
+          + perHundred(d.expectancy_bps) + ' traded');
       }
       if (a.name === 'strategy' && d.fresh_quotes !== undefined) {
         bits.push(d.fresh_quotes + ' fresh quotes/cycle');
@@ -1061,24 +1123,24 @@ function renderAgents(summary) {
         bits.push(a.consecutive_failures + ' failures');
       }
       const err = (health.last_error || '').slice(0, 80);
-      return '<div class="row"><span>' + a.name + '</span><b class="' + cls + '">'
+      return '<div class="row"><span>' + esc(a.name) + '</span><b class="' + cls + '">'
         + plainStatus(status) + '</b></div><div class="sub" style="margin:-2px 0 6px">'
-        + bits.join(' · ') + (err ? ' · ' + err : '') + '</div>';
+        + esc(bits.join(' · ')) + (err ? ' · ' + esc(err) : '') + '</div>';
     }).join('')
       // The model helpers are not the fleet: they advise, they do not run.
       + (agents.some(a => a.name === 'advisor' || a.name === 'regime')
         ? '<div class="sub" style="margin-top:6px">supporting</div>' + agents
           .filter(a => a.name === 'advisor' || a.name === 'regime')
-          .map(a => '<div class="row"><span>' + a.name + '</span><b class="sub">'
-            + (a.status || '') + (a.model ? ' · ' + a.model : '') + '</b></div>')
+          .map(a => '<div class="row"><span>' + esc(a.name) + '</span><b class="sub">'
+            + esc(a.status || '') + (a.model ? ' · ' + esc(a.model) : '') + '</b></div>')
           .join('')
         : '');
   }
   const alerts = summary.alerts || [];
   document.getElementById('alerts').innerHTML = alerts.length
     ? '<h2 style="margin-top:10px">Recent alerts sent</h2>' + alerts.slice().reverse()
-        .map(a => '<div class="row"><span>' + (a.title || a.key) + '</span><b class="sub">'
-          + ((a.channels || []).join('+') || 'no channel') + '</b></div>').join('')
+        .map(a => '<div class="row"><span>' + esc(a.title || a.key) + '</span><b class="sub">'
+          + esc((a.channels || []).join('+') || 'no channel') + '</b></div>').join('')
     : '';
   // Back-check results: is the backend, the data and the analysis path sound?
   const health = summary.health || {};
@@ -1095,7 +1157,8 @@ function renderAgents(summary) {
       + '<div class="row"><span>' + (health.healthy ? 'all systems' : 'attention')
       + '</span><b class="' + cls + '">' + detail + '</b></div>'
       + '<div class="sub">checked ' + new Date(health.checked_at).toLocaleTimeString() + '</div>'
-      + problems.map(p => '<div class="sub">• <b>' + p.name + '</b> ' + p.detail + '</div>').join('');
+      + problems.map(p => '<div class="sub">• <b>' + esc(p.name) + '</b> '
+          + esc(p.detail) + '</div>').join('');
   }
 }
 
@@ -1128,7 +1191,14 @@ function renderOrders(data) {
         : '—');
     const alerts = r.alerts && Object.keys(r.alerts).length
       ? Object.keys(r.alerts).join(', ') : 'none';
-    const side = r.side ? '<span class="' + (r.side === 'buy' ? 'buy' : 'sell') + '">' + r.side + '</span>' : '—';
+    const side = r.side
+      ? '<span class="' + (r.side === 'buy' ? 'buy' : 'sell') + '">' + esc(r.side) + '</span>'
+      : '—';
+    // The pill's class comes from the record, so only the events the stylesheet
+    // knows are allowed to name it.
+    const eventName = String(r.event || '');
+    const eventClass = ['accepted', 'placed', 'rejected', 'place_failed', 'place_refused']
+      .includes(eventName) ? eventName : 'rejected';
     // Rows can come from the last three journals, so an older row must show its
     // date — a bare 5:44 AM would read as this morning's decision.
     const at = r.at ? (r.older
@@ -1152,31 +1222,38 @@ function renderOrders(data) {
     // from. Saying so beats an empty cell that reads like a zero.
     const noGrade = !c.order && ev !== null;
     const hasVerdict = !!oc.verdict;
+    // The grade as a phrase, not a number on screen: "looked good" / "borderline"
+    // / "looked weak". The 0..1 score and the model's confidence stay in the
+    // tooltip, which is where an audit belongs.
+    const verdictText = {buy: 'looked good', marginal: 'borderline', weak: 'looked weak',
+                         rejected: 'was refused'};
+    const grade = hasVerdict ? (verdictText[oc.verdict] || humanise(oc.verdict)) : '';
+    const tooltip = [
+      os === null ? '' : 'order grade ' + os.toFixed(2),
+      ai === null ? '' : 'AI confidence ' + ai.toFixed(2),
+      ev === null ? '' : 'evidence grade ' + ev.toFixed(2),
+      note,
+    ].filter(Boolean).join(' · ');
     const confidence = (ai === null && ev === null && os === null && !hasVerdict)
       ? '<span class="sub">—</span>'
-      : '<span class="conf"' + (note ? ' title="' + note.replace(/"/g, '&quot;') + '"' : '') + '>'
+      : '<span class="conf"' + (tooltip ? ' title="' + esc(tooltip) + '"' : '') + '>'
         + (!hasVerdict ? ''
-          : '<span class="' + verdictClass + '">' + oc.verdict
-            + (os === null ? '' : ' ' + os.toFixed(2))
+          : '<span class="' + verdictClass + '">' + esc(grade)
             // A rebuilt grade is not the reading the model was shown; say so on
             // the row rather than letting the two be compared as equals.
-            + (oc.source === 'bars_asof' ? ' <span class="sub">as-of</span>' : '')
+            + (oc.source === 'bars_asof' ? ' <span class="sub">rebuilt later</span>' : '')
             + '</span>')
-        + (os !== null && ai !== null ? '<br>' : '')
-        + (ai === null ? ''
-          : '<span class="' + (c.advisor_action === 'veto' ? 'sell' : 'buy') + '">ai '
-            + ai.toFixed(2) + '</span>')
-        + ((os !== null || ai !== null) && ev !== null ? '<br>' : '')
-        + (ev === null ? '' : '<span class="sub">ev ' + ev.toFixed(2) + '</span>')
-        + (note ? '<br><span class="sub">' + (note.length > 64 ? note.slice(0, 64) + '…' : note) + '</span>' : '')
-        + (noGrade ? '<br><span class="sub">order grade: no snapshot</span>' : '')
+        + (c.advisor_action === 'veto' ? '<br><span class="sell">AI said no</span>'
+          : (ai !== null && ai < 0.5 ? '<br><span class="sub">AI was unsure</span>' : ''))
+        + (noGrade ? '<br><span class="sub">no snapshot to grade</span>' : '')
+        + (note ? '<br><span class="sub">' + esc(note.length > 64 ? note.slice(0, 64) + '…' : note) + '</span>' : '')
         + '</span>';
     return '<tr><td>' + at + '</td>'
-      + '<td><span class="pill ' + r.event + '">' + plainEvent(r.event) + '</span></td>'
+      + '<td><span class="pill ' + eventClass + '">' + esc(plainEvent(r.event)) + '</span></td>'
       + '<td>' + confidence + '</td>'
-      + '<td class="nowrap">' + (r.symbol || '—') + '</td>'
+      + '<td class="nowrap">' + esc(r.symbol || '—') + '</td>'
       + '<td>' + side + '</td>'
-      + '<td class="nowrap">' + (ORDER_TYPE_TEXT[r.type] || r.type || '—') + '</td>'
+      + '<td class="nowrap">' + esc(ORDER_TYPE_TEXT[r.type] || r.type || '—') + '</td>'
       + '<td class="nowrap">' + plainSession(r.session) + '</td>'
       // Only show a size and notional for an order that was actually sized:
       // a refusal before sizing has neither, and a blank is more honest than a
@@ -1187,8 +1264,8 @@ function renderOrders(data) {
         ? '$' + num(r.last_price)
           + (r.last_price_source === 'decision' ? ' <span class="sub">dec</span>' : '')
         : '—') + '</td>'
-      + '<td>' + alerts + '</td>'
-      + '<td class="sub reason">' + plainReason(r.reason) + '</td></tr>';
+      + '<td>' + esc(alerts) + '</td>'
+      + '<td class="sub reason">' + esc(plainReason(r.reason)) + '</td></tr>';
   }).join('');
 }
 

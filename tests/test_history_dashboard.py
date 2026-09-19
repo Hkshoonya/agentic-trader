@@ -471,10 +471,15 @@ class CadenceTests(unittest.TestCase):
             tmp = Path(tmp_name)
             config = self._config(tmp)
             Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+            # UTC, not local: the strategy keys its daily decision on the UTC day
+            # roll (crypto trades around the clock), and between 20:00 and
+            # midnight ET the local date is still yesterday.
             (Path(config.state_dir) / f"strategy_{config.strategy}.json").write_text(
                 _json.dumps(
                     {
-                        "last_decision_date": date.today().isoformat(),
+                        "last_decision_date": (
+                            f"crypto:{datetime.now(timezone.utc).date().isoformat()}"
+                        ),
                         "quantities": {"BTCUSD": "0.000016"},
                     }
                 )

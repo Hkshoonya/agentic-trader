@@ -69,6 +69,11 @@ class HealthReport:
     checks: list[Check] = field(default_factory=list)
     started_at: str = ""
     finished_at: str = ""
+    # Which process produced this report. The live loop only trusts a back-check
+    # its own daemon wrote: on 2026-09-18 a report left behind by another
+    # process disarmed the armed book ten minutes before its daily rebalance,
+    # and the order it had already cleared was blocked.
+    pid: int = 0
 
     @property
     def failures(self) -> list[Check]:
@@ -85,6 +90,7 @@ class HealthReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "healthy": self.healthy,
+            "pid": self.pid or os.getpid(),
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "ok": sum(1 for check in self.checks if check.status == OK),

@@ -448,6 +448,13 @@ class DashboardState:
         state_file = self.state_dir / f"strategy_{self.config.strategy}.json"
         state = _read_json(state_file) or {}
         last_date = str(state.get("last_decision_date") or "")
+        # The strategy keeps one decision per *book*, keyed "<book>:<date>"
+        # ("crypto:2026-09-19", "equity:2026-09-19"), because crypto decides at
+        # the UTC day roll and equities decide while their own session is open.
+        # The console only needs the date, and a state file written before the
+        # split holds a bare date, so both spellings are read here.
+        last_day = last_date.rsplit(":", 1)[-1]
+        holds_equity_book = "-" not in last_date and ":" in last_date and last_date.startswith("equity")
         quantities = state.get("quantities") if isinstance(state, dict) else {}
         held = [
             symbol
@@ -458,7 +465,10 @@ class DashboardState:
         next_at = datetime.combine(
             now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc
         )
-        if last_date < now.date().isoformat():
+        if holds_equity_book:
+            # The equity book waits for the next opening bell, not for midnight.
+            next_at = now
+        elif last_day < now.date().isoformat():
             next_at = now  # the next quote of this session triggers it
         last_at = ""
         for record in reversed(self.read_records(limit=4000)):
@@ -472,7 +482,7 @@ class DashboardState:
             "schedule": "once per UTC day (first quote after 00:00 UTC)",
             "last_decision_date": last_date,
             "last_decision_at": last_at,
-            "rebalanced_today": last_date == now.date().isoformat(),
+            "rebalanced_today": last_day == now.date().isoformat(),
             "next_decision_at": next_at.isoformat(),
             "next_decision_local": next_at.astimezone().strftime("%Y-%m-%d %H:%M %Z"),
             "held": held,

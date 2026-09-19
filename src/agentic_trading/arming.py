@@ -21,6 +21,7 @@ The rules, in one place:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -221,13 +222,26 @@ def preflight(state_dir: Path | str) -> list[Check]:
 
     health = read("health.json")
     checked_age = _age_days(health.get("finished_at"))
+    # A back-check is only evidence about *this* process if this process wrote
+    # it. Any other run — a CLI self-check, a test, a second workspace pointed at
+    # the same state directory — can leave a report here, and on 2026-09-18 one
+    # did: it disarmed the armed book ten minutes before its daily rebalance.
+    # A report with no pid predates this check and is judged on age alone.
+    writer = health.get("pid")
+    ours = writer is None or int(writer or 0) == os.getpid()
     checks.append(
         Check(
             "back-check",
-            bool(health.get("healthy")) and checked_age is not None and checked_age <= 1.0,
+            bool(health.get("healthy"))
+            and checked_age is not None
+            and checked_age <= 1.0
+            and ours,
             "not run yet"
             if checked_age is None
-            else f"healthy={bool(health.get('healthy'))}, {checked_age * 24:.1f}h old",
+            else (
+                f"healthy={bool(health.get('healthy'))}, {checked_age * 24:.1f}h old"
+                + ("" if ours else " — written by another process")
+            ),
         )
     )
     return checks

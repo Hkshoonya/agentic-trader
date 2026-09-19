@@ -25,8 +25,10 @@ max_quote_age_seconds = 60.0
 # auto     = the bot may promote/demote itself, and ONLY when
 #            AGENTIC_ALLOW_AUTONOMY=1 is exported for that session
 autonomy = "manual"
-# Bars for evolution/backtesting: agentic-trading fetch-history (or import-history)
-# history_path = "data/bars/SPY_day.jsonl"
+# Bars for evolution, evidence and the trend rule: a directory of
+# `<SYMBOL>_day.jsonl` files, written by fetch-history / import-history or by the
+# daemon's own history refresh. The repo ships daily bars so this works offline.
+history_path = "data/bars"
 evolution_interval_minutes = 60   # 0 disables periodic evolution
 evolution_population = 24
 evolution_generations = 6
@@ -63,7 +65,9 @@ sizing = "flat"
 # tradable crypto, altcoins) plus `discovery_lists`/`discovery_candidates` below,
 # grades every name with the same rule the book trades, and adopts its own picks.
 # It can never remove a symbol you configured, and never drops one the book still
-# holds. Try it first with: agentic-trading discover --config ... --dry-run
+# holds. Adoption also needs the session's autonomy switch (AGENTIC_ALLOW_AUTONOMY=1):
+# a config file is policy, letting the agent choose symbols you never named is
+# permission. Try it first with: agentic-trading discover --config ... --dry-run
 discovery_enabled = false
 # How often the daemon re-scans. Bars change daily at most.
 discovery_interval_hours = 6.0
