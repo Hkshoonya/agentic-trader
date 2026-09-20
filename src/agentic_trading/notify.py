@@ -105,7 +105,8 @@ def alert_for(record: dict[str, Any]) -> Optional[Alert]:
             body=(
                 f"{record.get('symbol', '?')} {record.get('side', '?')} "
                 f"{_money(record.get('notional'))} passed every check and was "
-                f"not submitted — AGENTIC_ALLOW_LIVE is off."
+                "not submitted — the machine capability and eligible workspace "
+                f"arm latch are both required ({record.get('reason', 'disarmed')})."
             ),
             urgency=urgency,
         )

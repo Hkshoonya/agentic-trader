@@ -91,13 +91,14 @@ class RiskGuardTests(unittest.TestCase):
         d2 = self.guard.evaluate(intent(decision_id="d2"), PortfolioSnapshot(0, {}))
         self.assertTrue(d2.allowed)
 
-    def test_kill_switch_blocks_close(self):
+    def test_kill_switch_allows_verified_close(self):
         snap = PortfolioSnapshot(open_positions=1, held={"SPY": Decimal("1")})
         self.guard.trip_kill_switch("loss")
         close = self.guard.evaluate(
             intent(side=Side.SELL, notional="40", decision_id="c"), snap
         )
-        self.assertFalse(close.allowed)
+        self.assertTrue(close.allowed)
+        self.assertTrue(close.would_place)
 
     def test_shadow_marks_would_place_not_place(self):
         d = self.guard.evaluate(intent(), PortfolioSnapshot(0, {}))
@@ -288,6 +289,47 @@ class RiskGuardTests(unittest.TestCase):
                     intent(notional="50", decision_id="n3"), PortfolioSnapshot(0, {})
                 ).allowed
             )
+
+    def test_load_counts_unique_buy_reservations_not_retries_or_exits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = DecisionJournal(Path(tmp) / "journal")
+            base = {
+                "event": "accepted",
+                "would_place": True,
+                "notional": "40",
+                "side": "buy",
+                "intent": {"symbol": "SPY", "side": "buy", "notional_usd": "40"},
+            }
+            journal.append({**base, "decision_id": "root"})
+            journal.append(
+                {
+                    **base,
+                    "decision_id": "retry",
+                    "reservation_of": "root",
+                }
+            )
+            journal.append(
+                {
+                    **base,
+                    "decision_id": "exit",
+                    "side": "sell",
+                    "intent": {"symbol": "SPY", "side": "sell", "notional_usd": "40"},
+                }
+            )
+            guard = RiskGuard(
+                mode="shadow",
+                whitelist=frozenset({"SPY"}),
+                max_order_pct=Decimal("0.20"),
+                daily_notional_pct=Decimal("0.20"),
+                daily_loss_pct=Decimal("0.03"),
+                max_open_positions=2,
+                baseline_equity=Decimal("1000"),
+                current_equity=Decimal("1000"),
+            )
+
+            guard.load(Path(tmp) / "state", journal=journal)
+
+            self.assertEqual(guard._daily_notional, Decimal("40"))
 
 
 class ShadowBookTests(unittest.TestCase):

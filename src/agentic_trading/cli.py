@@ -803,7 +803,7 @@ def cmd_promote(config_path: str, stage: str) -> int:
 def cmd_dashboard(
     config_path: str, *, host: str, port: int, open_browser: bool
 ) -> int:
-    """Serve the read-only animated console (Ctrl+C to stop)."""
+    """Serve the loopback operator console (Ctrl+C to stop)."""
     from agentic_trading.dashboard import serve
 
     config = load_config(config_path)
@@ -814,7 +814,7 @@ def cmd_dashboard(
         open_browser=open_browser,
         config_path=config_path,
     )
-    print(f"dashboard: http://{host}:{port}/  (read-only, Ctrl+C to stop)")
+    print(f"dashboard: http://{host}:{port}/  (local operator console, Ctrl+C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1058,7 +1058,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     llm_p.add_argument("--config", required=False)
 
     dash_p = sub.add_parser(
-        "dashboard", help="Serve the animated read-only operator console"
+        "dashboard", help="Serve the loopback-only animated operator console"
     )
     dash_p.add_argument("--config", required=True)
     dash_p.add_argument("--host", default="127.0.0.1")

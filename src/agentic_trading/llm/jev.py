@@ -28,7 +28,7 @@ from typing import Any, Iterable, Optional
 
 import httpx
 
-from agentic_trading.llm.market import MarketFeatures, context_lines
+from agentic_trading.llm.market import MarketFeatures
 from agentic_trading.llm.regime import REGIMES, RegimeGate, RegimeView
 
 DEFAULT_BASE_URL = "https://api.typesafe.ai"

@@ -43,7 +43,15 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(quote["observed_at"], OBSERVED.isoformat())
 
     def test_symbol_keyed_mapping_payload(self) -> None:
-        payload = {"quotes": {"spy": {"bid": "1.00", "ask": "1.02"}}}
+        payload = {
+            "quotes": {
+                "spy": {
+                    "bid": "1.00",
+                    "ask": "1.02",
+                    "updated_at": "2026-09-16T13:59:59Z",
+                }
+            }
+        }
         quotes = normalize_quotes_payload(
             payload, symbols=["SPY"], observed_at=OBSERVED
         )
@@ -92,12 +100,37 @@ class NormalizeTests(unittest.TestCase):
                 "symbol": "SPY",
                 "bid": {"amount": "10.01"},
                 "ask": {"amount": "10.03"},
+                "quote_at": "2026-09-16T13:59:59Z",
             }
         ]
         quotes = normalize_quotes_payload(
             payload, symbols=["SPY"], observed_at=OBSERVED
         )
         self.assertEqual(quotes[0]["bid"], Decimal("10.01"))
+
+    def test_missing_source_timestamp_is_dropped(self) -> None:
+        quotes = normalize_quotes_payload(
+            [{"symbol": "SPY", "bid": "10.01", "ask": "10.03"}],
+            symbols=["SPY"],
+            observed_at=OBSERVED,
+        )
+        self.assertEqual(quotes, [])
+
+    def test_the_older_venue_side_sets_quote_age(self) -> None:
+        quotes = normalize_quotes_payload(
+            [
+                {
+                    "symbol": "SPY",
+                    "bid": "10.01",
+                    "ask": "10.03",
+                    "venue_bid_time": "2026-09-16T13:58:00Z",
+                    "venue_ask_time": "2026-09-16T13:59:59Z",
+                }
+            ],
+            symbols=["SPY"],
+            observed_at=OBSERVED,
+        )
+        self.assertEqual(quotes[0]["quote_at"], "2026-09-16T13:58:00+00:00")
 
 
 class FileQuoteFeedTests(unittest.TestCase):
@@ -211,7 +244,12 @@ class McpQuoteFeedTests(unittest.TestCase):
                 self.requests.append(list(symbols))
                 return {
                     "quotes": [
-                        {"symbol": "SPY", "bid_price": "1.00", "ask_price": "1.02"}
+                        {
+                            "symbol": "SPY",
+                            "bid_price": "1.00",
+                            "ask_price": "1.02",
+                            "quote_time": "2026-09-16T13:59:59Z",
+                        }
                     ]
                 }
 

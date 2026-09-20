@@ -379,14 +379,26 @@ def load_report(state_dir: Path | str) -> Optional[CostReport]:
 def cost_model_for(state_dir: Path | str, base: Any = None) -> Any:
     """The cost model the evidence should use: measured when trustworthy.
 
-    Falls back to the default assumption, so a strategy is never graded on a
-    single lucky (or broken) fill.
+    A completed round trip is direct cash evidence and takes precedence. Its
+    median dollar loss is modeled as a fixed fee split across entry and exit;
+    percentage slippage samples need the larger fill floor before replacing the
+    default. A profitable/noisy trip never makes the model free.
     """
     from agentic_trading.backtest import CostModel
 
     model = base or CostModel()
     report = load_report(state_dir)
-    if report is None or not report.usable:
+    if report is None:
+        return model
+    fixed_round_trip = measured_cost_usd(state_dir)
+    if fixed_round_trip is not None and fixed_round_trip > 0:
+        kind = type(model.fee_per_order)
+        return CostModel(
+            spread_bps=type(model.spread_bps)("0"),
+            slippage_bps=type(model.slippage_bps)("0"),
+            fee_per_order=kind(str(round(fixed_round_trip / 2, 6))),
+        )
+    if not report.usable:
         return model
     measured = float(report.measured_per_side_bps)
     # Clamp loosely: whatever we measured, the model should not be able to claim

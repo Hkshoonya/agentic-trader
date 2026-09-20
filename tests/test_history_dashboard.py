@@ -10,6 +10,7 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 from agentic_trading.config import load_config
 from agentic_trading.dashboard import DashboardState, serve
@@ -58,7 +59,15 @@ class BarParsingTests(unittest.TestCase):
 
     def test_parses_list_with_epoch_timestamps(self) -> None:
         bars = parse_bars_payload(
-            [{"timestamp": 1748871000, "open": "1", "high": "2", "low": "0.5", "close": "1.5"}],
+            [
+                {
+                    "timestamp": 1748871000,
+                    "open": "1",
+                    "high": "2",
+                    "low": "0.5",
+                    "close": "1.5",
+                }
+            ],
             symbol="SPY",
         )
         self.assertEqual(len(bars), 1)
@@ -193,16 +202,15 @@ class DashboardTests(unittest.TestCase):
             config_path = tmp / "agentic.toml"
             self._config(tmp)
 
-            state = DashboardState(
-                load_config(config_path), config_path=config_path
-            )
+            state = DashboardState(load_config(config_path), config_path=config_path)
             self.assertEqual(state.summary()["symbols"], ["SPY"])
             self.assertEqual(state.summary()["session_policy"], "regular")
 
             text = config_path.read_text(encoding="utf-8")
             config_path.write_text(
-                text.replace('symbol_whitelist = ["SPY"]', 'symbol_whitelist = ["BTC-USD"]')
-                .replace('strategy = "fixture"', 'strategy = "trend_crypto"')
+                text.replace(
+                    'symbol_whitelist = ["SPY"]', 'symbol_whitelist = ["BTC-USD"]'
+                ).replace('strategy = "fixture"', 'strategy = "trend_crypto"')
                 + 'session_policy = "any"\n'
                 + 'strategy = "trend_crypto"\n',
                 encoding="utf-8",
@@ -402,7 +410,6 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIsNone(rows[0]["confidence"]["order"])
 
-
     def test_http_surface_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
@@ -422,7 +429,9 @@ class DashboardTests(unittest.TestCase):
                 self.assertIn("promotion", summary)
                 self.assertIn("session", summary)
 
-                with urllib.request.urlopen(f"{base}/api/journal?offset=0", timeout=5) as r:
+                with urllib.request.urlopen(
+                    f"{base}/api/journal?offset=0", timeout=5
+                ) as r:
                     feed = json.loads(r.read().decode("utf-8"))
                 self.assertEqual(feed["records"], [])
 
@@ -581,7 +590,9 @@ class CandidateTests(unittest.TestCase):
             first = state.candidates()
             second = state.candidates()
         self.assertEqual(first["generated_at"], second["generated_at"])
-        self.assertEqual(state._candidate_summary()["generated_at"], first["generated_at"])
+        self.assertEqual(
+            state._candidate_summary()["generated_at"], first["generated_at"]
+        )
 
     def test_a_held_symbol_is_flagged(self) -> None:
         import json as _json
@@ -591,7 +602,9 @@ class CandidateTests(unittest.TestCase):
             config = self._config_with_bars(tmp)
             Path(config.state_dir).mkdir(parents=True, exist_ok=True)
             (Path(config.state_dir) / f"strategy_{config.strategy}.json").write_text(
-                _json.dumps({"last_decision_date": "2020-01-01", "quantities": {"SPY": "1"}})
+                _json.dumps(
+                    {"last_decision_date": "2020-01-01", "quantities": {"SPY": "1"}}
+                )
             )
             payload = DashboardState(config).candidates()
         spy = next(row for row in payload["rows"] if row["symbol"] == "SPY")
@@ -606,7 +619,9 @@ class CandidateTests(unittest.TestCase):
             thread.start()
             base = f"http://127.0.0.1:{server.server_address[1]}"
             try:
-                with urllib.request.urlopen(f"{base}/api/candidates", timeout=5) as resp:
+                with urllib.request.urlopen(
+                    f"{base}/api/candidates", timeout=5
+                ) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
             finally:
                 server.shutdown()
@@ -648,7 +663,9 @@ class OrderTableAccuracyTests(unittest.TestCase):
             "spread_bps": None,
         }
 
-    def _reject(self, *, at: str, symbol: str = "BTC-USD", decision_id: str = "d") -> dict:
+    def _reject(
+        self, *, at: str, symbol: str = "BTC-USD", decision_id: str = "d"
+    ) -> dict:
         return {
             "decision_id": decision_id,
             "event": "rejected",
@@ -685,7 +702,9 @@ class OrderTableAccuracyTests(unittest.TestCase):
             config = self._config(tmp)
             record = self._reject(at="2026-09-17T09:44:32Z")
             record["event"] = "accepted"
-            record["review"] = {"data": {"quote_data": {"last_trade_price": "76500.00"}}}
+            record["review"] = {
+                "data": {"quote_data": {"last_trade_price": "76500.00"}}
+            }
             record["order_request"] = {"type": "market"}
             record["session"] = "regular"  # the runtime records it top-level
             self._write(tmp, date.today().isoformat(), [record])
@@ -786,7 +805,9 @@ class OrderTableAccuracyTests(unittest.TestCase):
             )
             payload = DashboardState(config).orders_table()
             header = DashboardState(config).decision_counts()
-        self.assertEqual(payload["counts"]["rejected"], 1, "only today's UTC decision counts")
+        self.assertEqual(
+            payload["counts"]["rejected"], 1, "only today's UTC decision counts"
+        )
         self.assertEqual(header["rejected"], 1)
         self.assertEqual(len(payload["rows"]), 2)
         self.assertEqual(payload["older_rows"], 1)
@@ -953,7 +974,10 @@ class PulseTests(unittest.TestCase):
             journal.parent.mkdir(parents=True, exist_ok=True)
             journal.write_text(
                 _json.dumps(
-                    {"event": "cycle_stats", "at": datetime.now(timezone.utc).isoformat()}
+                    {
+                        "event": "cycle_stats",
+                        "at": datetime.now(timezone.utc).isoformat(),
+                    }
                 )
                 + "\n"
             )
@@ -1142,18 +1166,43 @@ class ArmingTests(unittest.TestCase):
 
     def _eligible(self, tmp: Path) -> None:
         import json as _json
+        import os as _os
 
+        generated = datetime.now(timezone.utc).isoformat()
         (tmp / "state" / "promotion.json").write_text(
             _json.dumps(
                 {
                     "stage": "live",
                     "streak": 0,
-                    "last_assessment": {"eligible": True},
+                    "last_assessment": {
+                        "eligible": True,
+                        "evidence": {"report_generated_at": generated},
+                    },
                 }
             )
         )
         (tmp / "state" / "strategy_evidence.json").write_text(
-            _json.dumps({"generated_at": datetime.now(timezone.utc).isoformat()})
+            _json.dumps({"schema_version": 4, "generated_at": generated})
+        )
+        (tmp / "state" / "risk_guard.json").write_text(
+            _json.dumps({"kill_switch": False, "current_equity": "100"})
+        )
+        (tmp / "state" / "effective_limits.json").write_text(
+            _json.dumps(
+                {
+                    "max_order_pct": "0.01",
+                    "details": {"ceiling_max_order_pct": "0.01"},
+                }
+            )
+        )
+        (tmp / "state" / "health.json").write_text(
+            _json.dumps(
+                {
+                    "healthy": True,
+                    "finished_at": generated,
+                    "pid": _os.getpid(),
+                }
+            )
         )
 
     def test_a_shadow_agent_cannot_be_armed(self) -> None:
@@ -1186,6 +1235,32 @@ class ArmingTests(unittest.TestCase):
         self.assertTrue(result.get("refused"))
         self.assertIn("days old", result["reason"])
 
+    def test_a_fresh_legacy_or_unassessed_report_cannot_be_armed(self) -> None:
+        import json as _json
+
+        from agentic_trading.arming import arm
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._config(tmp)
+            self._eligible(tmp)
+            report_path = tmp / "state" / "strategy_evidence.json"
+            current = _json.loads(report_path.read_text(encoding="utf-8"))
+            report_path.write_text(
+                _json.dumps({"generated_at": current["generated_at"]}),
+                encoding="utf-8",
+            )
+            legacy = arm(tmp / "state")
+
+            current["generated_at"] = datetime.now(timezone.utc).isoformat()
+            report_path.write_text(_json.dumps(current), encoding="utf-8")
+            unassessed = arm(tmp / "state")
+
+        self.assertTrue(legacy.get("refused"))
+        self.assertIn("obsolete", legacy["reason"])
+        self.assertTrue(unassessed.get("refused"))
+        self.assertIn("not been assessed", unassessed["reason"])
+
     def test_an_eligible_agent_can_be_armed_and_disarmed(self) -> None:
         from agentic_trading.arming import arm, arm_status, disarm
 
@@ -1203,6 +1278,141 @@ class ArmingTests(unittest.TestCase):
         self.assertFalse(after["armed"])
         # The workspace records the change, so a restart does not lose it.
         self.assertIsNotNone(after["since"])
+
+    def test_console_trusts_the_live_daemons_backcheck(self) -> None:
+        import json as _json
+
+        from agentic_trading import arming
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._config(tmp)
+            self._eligible(tmp)
+            daemon_pid = 424242
+            now = datetime.now(timezone.utc).isoformat()
+            (tmp / "state" / "health.json").write_text(
+                _json.dumps({"healthy": True, "finished_at": now, "pid": daemon_pid}),
+                encoding="utf-8",
+            )
+            (tmp / "state" / "agents.json").write_text(
+                _json.dumps({"pid": daemon_pid, "updated_at": now, "agents": []}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(arming, "_pid_is_alive", return_value=True):
+                verdict = arming.evaluate(tmp / "state")
+                result = arming.arm(tmp / "state")
+
+        self.assertTrue(verdict["passed"])
+        self.assertTrue(result["armed"])
+        backcheck = next(
+            check for check in verdict["checks"] if check["name"] == "back-check"
+        )
+        self.assertIn("current daemon process", backcheck["detail"])
+
+    def test_console_rejects_a_stale_or_dead_daemon_backcheck(self) -> None:
+        import json as _json
+
+        from agentic_trading import arming
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            self._config(tmp)
+            self._eligible(tmp)
+            daemon_pid = 424242
+            now = datetime.now(timezone.utc).isoformat()
+            stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+            (tmp / "state" / "health.json").write_text(
+                _json.dumps({"healthy": True, "finished_at": now, "pid": daemon_pid}),
+                encoding="utf-8",
+            )
+            agents = tmp / "state" / "agents.json"
+            agents.write_text(
+                _json.dumps({"pid": daemon_pid, "updated_at": stale, "agents": []}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(arming, "_pid_is_alive", return_value=True):
+                stale_verdict = arming.evaluate(tmp / "state")
+
+            agents.write_text(
+                _json.dumps({"pid": daemon_pid, "updated_at": now, "agents": []}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(arming, "_pid_is_alive", return_value=False):
+                dead_verdict = arming.evaluate(tmp / "state")
+                refused = arming.arm(tmp / "state")
+
+        self.assertIn("back-check", stale_verdict["failed"])
+        self.assertIn("back-check", dead_verdict["failed"])
+        self.assertTrue(refused["refused"])
+        self.assertIn("back-check", refused["reason"])
+
+    def test_known_cost_missing_from_evidence_refuses_arming(self) -> None:
+        from agentic_trading.arming import arm
+        from agentic_trading.execution import record_round_trip
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            self._eligible(tmp)
+            record_round_trip(
+                config.state_dir,
+                symbol="SPY",
+                buy_notional=5.00,
+                sell_notional=4.90,
+            )
+
+            result = arm(config.state_dir)
+
+        self.assertTrue(result.get("refused"))
+        self.assertIn("execution measured $0.10", result["reason"])
+
+    def test_auto_arm_uses_the_same_current_cost_gate(self) -> None:
+        import json as _json
+        import os as _os
+
+        from agentic_trading.arming import evaluate, maybe_auto_arm, read_arm
+        from agentic_trading.execution import record_round_trip
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = self._config(tmp)
+            self._eligible(tmp)
+            (tmp / "state" / "risk_guard.json").write_text(
+                _json.dumps({"kill_switch": False, "current_equity": "100"}),
+                encoding="utf-8",
+            )
+            (tmp / "state" / "effective_limits.json").write_text(
+                _json.dumps(
+                    {
+                        "max_order_pct": "0.01",
+                        "details": {"ceiling_max_order_pct": "0.01"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (tmp / "state" / "health.json").write_text(
+                _json.dumps(
+                    {
+                        "healthy": True,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "pid": _os.getpid(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            record_round_trip(
+                config.state_dir,
+                symbol="SPY",
+                buy_notional=5.00,
+                sell_notional=4.90,
+            )
+
+            verdict = evaluate(config.state_dir)
+            event = maybe_auto_arm(config.state_dir, enabled=True)
+
+            self.assertIn("current arming eligibility", verdict["failed"])
+            self.assertIsNone(event)
+            self.assertIsNone(read_arm(config.state_dir))
 
     def test_http_requires_loopback_a_confirmation_and_the_right_method(self) -> None:
         import json as _json
@@ -1223,6 +1433,15 @@ class ArmingTests(unittest.TestCase):
                     base + path,
                     data=_json.dumps(body).encode(),
                     headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                return urllib.request.urlopen(request, timeout=5)
+
+            def raw_post(path: str, body: bytes, headers: dict[str, str]):
+                request = urllib.request.Request(
+                    base + path,
+                    data=body,
+                    headers=headers,
                     method="POST",
                 )
                 return urllib.request.urlopen(request, timeout=5)
@@ -1249,9 +1468,53 @@ class ArmingTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as read_arm:
                     urllib.request.urlopen(base + "/api/arm", timeout=5)
                 self.assertEqual(read_arm.exception.code, 404)
+                # A malicious page can send a "simple" text/plain request to
+                # localhost without a CORS preflight; the control endpoint must
+                # reject it before parsing the typed confirmation.
+                with self.assertRaises(urllib.error.HTTPError) as plain:
+                    raw_post(
+                        "/api/arm",
+                        b'{"confirm":"ARM"}',
+                        {"Content-Type": "text/plain"},
+                    )
+                self.assertEqual(plain.exception.code, 415)
+                with self.assertRaises(urllib.error.HTTPError) as cross_origin:
+                    raw_post(
+                        "/api/arm",
+                        b'{"confirm":"ARM"}',
+                        {
+                            "Content-Type": "application/json",
+                            "Origin": "https://evil.example",
+                        },
+                    )
+                self.assertEqual(cross_origin.exception.code, 403)
+                with urllib.request.urlopen(base + "/api/health", timeout=5) as health:
+                    self.assertEqual(health.headers["X-Frame-Options"], "DENY")
+                    self.assertIn(
+                        "frame-ancestors 'none'",
+                        health.headers["Content-Security-Policy"],
+                    )
+                import http.client
+
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_address[1], timeout=5
+                )
+                connection.request(
+                    "GET", "/api/summary", headers={"Host": "evil.example"}
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 403)
+                response.read()
+                connection.close()
             finally:
                 server.shutdown()
                 server.server_close()
+
+    def test_dashboard_refuses_a_non_loopback_bind(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = self._config(Path(name))
+            with self.assertRaisesRegex(ValueError, "must be loopback"):
+                serve(config, host="0.0.0.0", port=0)
 
 
 class NotionalDisplayTests(unittest.TestCase):

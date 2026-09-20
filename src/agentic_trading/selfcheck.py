@@ -30,13 +30,13 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agentic_trading import jsonio
-from agentic_trading.history_sync import check_records, quality_for
+from agentic_trading.history_sync import quality_for
 from agentic_trading.orders import is_crypto_symbol
 
 OK = "ok"
@@ -278,6 +278,7 @@ def check_evidence(config: Any, *, max_age_days: int = 30) -> Check:
 
     def run() -> tuple[str, str]:
         from agentic_trading.evidence import read_report
+        from agentic_trading.execution import measured_cost_usd
         from agentic_trading.limits import load_limits
 
         report = read_report(config)
@@ -294,6 +295,20 @@ def check_evidence(config: Any, *, max_age_days: int = 30) -> Check:
             return WARN, (
                 f"evidence report is {age_days:.0f} days old "
                 f"(refresh: agentic-trading walkforward)"
+            )
+        measured_round_trip = measured_cost_usd(config.state_dir)
+        modeled_fee = float(
+            ((report.get("costs") or {}).get("assumed_fee_per_order_usd") or 0.0)
+        )
+        if (
+            measured_round_trip is not None
+            and measured_round_trip > 0
+            and modeled_fee * 2 + 1e-9 < measured_round_trip
+        ):
+            return FAIL, (
+                f"evidence models ${modeled_fee * 2:.2f} fixed cost per round trip "
+                f"but execution measured ${measured_round_trip:.2f}; refresh with "
+                "agentic-trading walkforward before arming"
             )
         gate = report.get("gate_size") or {}
         stored = load_limits(config.state_dir)
@@ -402,7 +417,8 @@ def check_plumbing(config: Any, *, port: Optional[int] = None) -> Check:
 
         resolved_port = port or int(os.environ.get("AGENTIC_DASHBOARD_PORT", "8787"))
         try:
-            with urllib.request.urlopen(
+            # Fixed loopback host plus an integer port; no caller-controlled URL.
+            with urllib.request.urlopen(  # nosec B310
                 f"http://127.0.0.1:{resolved_port}/api/health", timeout=3
             ) as response:
                 if response.status == 200:

@@ -1,18 +1,18 @@
 """Arming: the one write the console is allowed to make.
 
-Order submission has always required `AGENTIC_ALLOW_LIVE=1` in the process
-environment, and that switch is deliberately not a config file — a workspace
-copied to another machine cannot arm itself. That property is worth keeping, so
-the console does not replace it: it writes a *request* file in this workspace,
-and the runtime treats "environment switch OR local arm file" as armed.
+Order submission requires a capability in the process environment and an
+eligible arm file in this workspace. The capability is deliberately not a
+config file, so a copied workspace cannot arm another machine; the arm file is
+revalidated on use, so the environment cannot bypass evidence by itself.
 
-A fresh install has neither, so it still starts inert.
+A fresh install has neither, so it starts inert.
 
 The rules, in one place:
 
 1. Arming is an explicit human act: a POST with `{"confirm": "ARM"}`.
-2. It is refused unless the system has earned it — the promotion gate says
-   eligible, the stage is at least probation, and the evidence report is fresh.
+2. It is refused unless every pre-flight check passes — current eligible
+   evidence and stage, clear kill switch, readable account, budget inside the
+   operator ceiling, and a healthy back-check from the running daemon.
 3. It is refused unless the request came from loopback, because the console is
    bound to loopback but that is not the same as checking.
 4. Every change is journalled and timestamped, and disarming is always allowed.
@@ -32,6 +32,11 @@ CONFIRM_PHRASE = "ARM"
 
 # How stale the evidence may be and still justify arming.
 MAX_EVIDENCE_AGE_DAYS = 30.0
+# The dashboard is a separate process from the daemon. It may trust a health
+# report written by that daemon only while the daemon's own heartbeat names the
+# same live PID. This is deliberately much shorter than the one-day health
+# result age: a stopped process must not leave an armable console behind.
+MAX_DAEMON_HEARTBEAT_AGE_DAYS = 5.0 / (24 * 60)
 
 
 def arm_path(state_dir: Path | str) -> Path:
@@ -51,7 +56,20 @@ def read_arm(state_dir: Path | str) -> Optional[dict[str, Any]]:
 
 def is_armed(state_dir: Path | str) -> bool:
     payload = read_arm(state_dir)
-    return bool(payload and payload.get("armed"))
+    if not (payload and payload.get("armed")):
+        return False
+    # An arm file is a latch, not a permanent bypass. If the evidence becomes
+    # stale, measured costs invalidate it, or the kill switch trips after the
+    # file was written, submission must stop even before a console/auto-arm
+    # process has had time to rewrite the file.
+    allowed, _reason = _eligible_to_arm(state_dir)
+    if not allowed:
+        return False
+    # The latch is only effective while *every* pre-flight check remains green.
+    # In particular, an operator-written latch may stay on disk across a daemon
+    # restart, but it cannot be used until that daemon has produced a fresh,
+    # attributable back-check and published a current risk budget.
+    return bool(evaluate(state_dir)["passed"])
 
 
 def _eligible_to_arm(state_dir: Path | str) -> tuple[bool, str]:
@@ -81,6 +99,40 @@ def _eligible_to_arm(state_dir: Path | str) -> tuple[bool, str]:
     age_days = (datetime.now(timezone.utc) - seen).total_seconds() / 86_400
     if age_days > MAX_EVIDENCE_AGE_DAYS:
         return False, f"the evidence report is {age_days:.0f} days old"
+    # A process upgrade can make an old report insufficient even while its
+    # timestamp is fresh. The current schema includes account-level block
+    # significance, doubled-cost stress, and exact fixed-dollar floor/daily-cap
+    # parity; an older artifact must be rebuilt, not armed.
+    from agentic_trading.evidence import EVIDENCE_SCHEMA_VERSION
+
+    try:
+        schema = int(evidence.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        schema = 0
+    if schema < EVIDENCE_SCHEMA_VERSION:
+        return False, "the walk-forward report uses an obsolete evidence schema"
+    assessed = last.get("evidence") if isinstance(last, dict) else {}
+    assessed = assessed if isinstance(assessed, dict) else {}
+    if str(assessed.get("report_generated_at") or "") != stamp:
+        return False, "the current walk-forward report has not been assessed"
+    from agentic_trading.execution import measured_cost_usd
+
+    measured_round_trip = measured_cost_usd(state_dir)
+    modeled_fee = float(
+        ((evidence.get("costs") or {}).get("assumed_fee_per_order_usd") or 0.0)
+    )
+    if (
+        measured_round_trip is not None
+        and measured_round_trip > 0
+        and modeled_fee * 2 + 1e-9 < measured_round_trip
+    ):
+        return False, (
+            f"the evidence models ${modeled_fee * 2:.2f} per round trip but "
+            f"execution measured ${measured_round_trip:.2f}"
+        )
+    guard = read("risk_guard.json")
+    if guard.get("kill_switch"):
+        return False, f"the kill switch is active: {guard.get('kill_reason') or 'unknown'}"
     return True, "the agent has cleared its evidence gate and the report is current"
 
 
@@ -89,6 +141,9 @@ def arm(state_dir: Path | str, *, source: str = "console") -> dict[str, Any]:
     allowed, reason = _eligible_to_arm(state_dir)
     if not allowed:
         return {"armed": False, "refused": True, "reason": reason}
+    verdict = evaluate(state_dir)
+    if not verdict["passed"]:
+        return {"armed": False, "refused": True, "reason": verdict["reason"]}
     payload = {
         "armed": True,
         "at": datetime.now(timezone.utc).isoformat(),
@@ -122,9 +177,13 @@ def _write(state_dir: Path | str, payload: dict[str, Any]) -> None:
 def arm_status(state_dir: Path | str) -> dict[str, Any]:
     """For the console: may it be armed, is it armed, and why not."""
     allowed, reason = _eligible_to_arm(state_dir)
+    if allowed:
+        verdict = evaluate(state_dir)
+        allowed = bool(verdict["passed"])
+        reason = str(verdict["reason"])
     payload = read_arm(state_dir) or {}
     return {
-        "armed": bool(payload.get("armed")),
+        "armed": bool(payload.get("armed")) and allowed,
         "available": allowed,
         "reason": reason,
         "since": payload.get("at", ""),
@@ -177,6 +236,15 @@ def preflight(state_dir: Path | str) -> list[Check]:
         Check("stage", stage in ("probation", "live"), f"stage is {stage}")
     )
 
+    # Keep automatic arming on exactly the same gate as manual arming and the
+    # runtime's per-order check. The stored promotion verdict can predate a new
+    # execution-cost measurement; trusting it alone allowed auto-arm to write
+    # an armed latch even though ``is_armed`` correctly refused to use it.
+    currently_eligible, eligibility_reason = _eligible_to_arm(state_dir)
+    checks.append(
+        Check("current arming eligibility", currently_eligible, eligibility_reason)
+    )
+
     evidence = read("strategy_evidence.json")
     age = _age_days(evidence.get("generated_at"))
     checks.append(
@@ -222,29 +290,80 @@ def preflight(state_dir: Path | str) -> list[Check]:
 
     health = read("health.json")
     checked_age = _age_days(health.get("finished_at"))
-    # A back-check is only evidence about *this* process if this process wrote
-    # it. Any other run — a CLI self-check, a test, a second workspace pointed at
-    # the same state directory — can leave a report here, and on 2026-09-18 one
-    # did: it disarmed the armed book ten minutes before its daily rebalance.
-    # A report with no pid predates this check and is judged on age alone.
-    writer = health.get("pid")
-    ours = writer is None or int(writer or 0) == os.getpid()
+    # A back-check is evidence about this deployment only if the current daemon
+    # wrote it. The daemon can compare the PID directly; the separate dashboard
+    # proves the same fact through the daemon's fresh agents heartbeat. A CLI
+    # self-check, stale process, test, or second workspace therefore cannot make
+    # the account armable merely by leaving a healthy-looking JSON file behind.
+    trusted_writer, writer_detail = _trusted_health_writer(base, health)
     checks.append(
         Check(
             "back-check",
             bool(health.get("healthy"))
             and checked_age is not None
             and checked_age <= 1.0
-            and ours,
+            and trusted_writer,
             "not run yet"
             if checked_age is None
             else (
                 f"healthy={bool(health.get('healthy'))}, {checked_age * 24:.1f}h old"
-                + ("" if ours else " — written by another process")
+                + (f" — {writer_detail}" if writer_detail else "")
             ),
         )
     )
     return checks
+
+
+def _trusted_health_writer(
+    state_dir: Path, health: dict[str, Any]
+) -> tuple[bool, str]:
+    """Prove that ``health.json`` came from this process or the live daemon."""
+    try:
+        writer = int(health.get("pid") or 0)
+    except (TypeError, ValueError):
+        writer = 0
+    if writer <= 0:
+        return False, "missing producer identity"
+    if writer == os.getpid():
+        return True, f"current process {writer}"
+
+    try:
+        agents_payload = json.loads(
+            (state_dir / "agents.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return False, "producer is not the current daemon"
+    if not isinstance(agents_payload, dict):
+        return False, "producer is not the current daemon"
+    try:
+        daemon_pid = int(agents_payload.get("pid") or 0)
+    except (TypeError, ValueError):
+        daemon_pid = 0
+    heartbeat_age = _age_days(agents_payload.get("updated_at"))
+    if daemon_pid != writer:
+        return False, "producer differs from the daemon heartbeat"
+    if (
+        heartbeat_age is None
+        or heartbeat_age < 0
+        or heartbeat_age > MAX_DAEMON_HEARTBEAT_AGE_DAYS
+    ):
+        return False, "daemon heartbeat is stale"
+    if not _pid_is_alive(writer):
+        return False, "daemon process is no longer running"
+    return True, f"current daemon process {writer}"
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Portable best-effort liveness check; permission denial still means alive."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _age_days(stamp: Any) -> Optional[float]:

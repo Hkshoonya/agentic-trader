@@ -95,7 +95,7 @@
     <rect x="474" y="196" width="292" height="64" rx="10" fill="#1b1418" stroke="#3a1f24" stroke-width="1.5"/>
     <circle class="blink armed-off" cx="498" cy="228" r="5"/>
     <text x="514" y="224" class="label">Order submission</text>
-    <text x="514" y="244" class="sub">DISARMED · needs AGENTIC_ALLOW_LIVE=1</text>
+    <text x="514" y="244" class="sub">DISARMED · capability + eligible latch required</text>
   </g>
   <path class="flow" d="M620 156 V196" stroke-dasharray="4 4"/>
 

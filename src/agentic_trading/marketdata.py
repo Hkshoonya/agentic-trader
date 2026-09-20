@@ -26,18 +26,6 @@ _ENTRY_LIST_KEYS = ("quotes", "results", "items", "data", "equity_quotes")
 _SYMBOL_KEYS = ("symbol", "ticker", "instrument_symbol", "symbols")
 _BID_KEYS = ("bid_price", "bid", "bidPrice")
 _ASK_KEYS = ("ask_price", "ask", "askPrice")
-_TIME_KEYS = (
-    "quote_time",
-    "quote_at",
-    "updated_at",
-    "timestamp",
-    "time",
-    "venue_bid_time",
-    "venue_ask_time",
-    "venue_last_trade_time",
-)
-
-
 class QuoteShapeError(RuntimeError):
     """The quote payload did not match any known shape (fail closed)."""
 
@@ -77,7 +65,12 @@ def normalize_quotes_payload(
         ask = _decimal_of(entry, _ASK_KEYS)
         if bid is None or ask is None or bid <= 0 or ask < bid:
             continue
-        quoted_at = _time_of(entry, default=observed_at)
+        quoted_at = _time_of(entry)
+        # Arrival time is not a substitute for market time. A broker can return
+        # yesterday's closing quote in a response received right now; without a
+        # source timestamp the runtime cannot prove the price is current.
+        if quoted_at is None:
+            continue
         quotes.append(
             {
                 "symbol": symbol,
@@ -123,7 +116,7 @@ def _extract_entries(
                     return nested
     if _depth < 3:
         # Live payloads nest the list one level down: {"data": {"results": [...]}}
-        for key, value in payload.items():
+        for value in payload.values():
             if isinstance(value, dict):
                 nested = _extract_entries(value, _depth=_depth + 1)
                 if nested:
@@ -176,15 +169,49 @@ def _decimal_of(entry: dict, keys: tuple[str, ...]) -> Optional[Decimal]:
     return None
 
 
-def _time_of(entry: dict, *, default: datetime) -> datetime:
-    for key in _TIME_KEYS:
+def _time_of(entry: dict) -> Optional[datetime]:
+    # When the two sides carry separate venue times, the older side determines
+    # the age of the executable two-sided quote. Using the newer side could pair
+    # a fresh bid with a stale ask (or vice versa) and call the market current.
+    bid_time = next(
+        (
+            parsed
+            for key in ("venue_bid_time", "bid_time")
+            if (parsed := _parse_time(entry.get(key))) is not None
+        ),
+        None,
+    )
+    ask_time = next(
+        (
+            parsed
+            for key in ("venue_ask_time", "ask_time")
+            if (parsed := _parse_time(entry.get(key))) is not None
+        ),
+        None,
+    )
+    venue_times = [stamp for stamp in (bid_time, ask_time) if stamp is not None]
+    if bid_time is not None and ask_time is not None:
+        return min(bid_time, ask_time)
+
+    for key in (
+        "quote_time",
+        "quote_at",
+        "updated_at",
+        "timestamp",
+        "time",
+    ):
         if key not in entry:
             continue
         raw = entry[key]
         parsed = _parse_time(raw)
         if parsed is not None:
             return parsed
-    return default
+    # Some payloads expose only one side's venue time. It is weaker than a
+    # paired timestamp but still source time; accept it rather than inventing
+    # one from the response clock.
+    if venue_times:
+        return venue_times[0]
+    return _parse_time(entry.get("venue_last_trade_time"))
 
 
 def _parse_time(raw: Any) -> Optional[datetime]:

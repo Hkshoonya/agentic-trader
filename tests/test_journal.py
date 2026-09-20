@@ -1,5 +1,7 @@
 # tests/test_journal.py
+import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 
@@ -7,6 +9,17 @@ from agentic_trading.journal import DecisionJournal
 
 
 class JournalTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are not portable to Windows")
+    def test_new_journal_directory_and_file_are_owner_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "private" / "journal"
+            j = DecisionJournal(directory)
+            j.append({"event": "accepted"})
+            file = next(directory.iterdir())
+
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+
     def test_every_record_is_timestamped(self):
         """Without this you cannot measure how often the model was consulted."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,3 +49,26 @@ class JournalTests(unittest.TestCase):
             self.assertFalse(j.has_decision("nope"))
             lines = list(j.iter_today())
             self.assertEqual(len(lines), 1)
+
+    def test_sensitive_broker_fields_are_redacted_recursively(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            j = DecisionJournal(Path(tmp))
+            j.append(
+                {
+                    "event": "accepted",
+                    "order_request": {
+                        "account_number": "REAL-ACCOUNT",
+                        "symbol": "SPY",
+                    },
+                    "response": {
+                        "rhs_account_number": "12345678",
+                        "access_token": "secret-token",
+                    },
+                }
+            )
+            record = list(j.iter_today())[0]
+
+        self.assertEqual(record["order_request"]["account_number"], "[redacted]")
+        self.assertEqual(record["response"]["rhs_account_number"], "[redacted]")
+        self.assertEqual(record["response"]["access_token"], "[redacted]")
+        self.assertEqual(record["order_request"]["symbol"], "SPY")

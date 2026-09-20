@@ -53,6 +53,14 @@ class PromotionPolicy:
     min_oos_trades: int = 30
     min_oos_expectancy_bps: float = 1.0
     min_folds_positive_fraction: float = 0.6
+    # "Profitable recently" cannot mean one lucky close. The most recent
+    # consecutive folds must each contain a usable sample and make money at the
+    # account level, including under the execution-cost stress scenario.
+    min_recent_positive_folds: int = 2
+    min_recent_fold_trades: int = 10
+    min_cost_stress_multiplier: float = 2.0
+    min_forward_trades: int = 0
+    min_forward_days: float = 0.0
     max_oos_drawdown_pct: float = 15.0
     max_bootstrap_p_value: float = 0.05
     required_cycles: int = 3
@@ -126,9 +134,7 @@ def grade_confidence(
         ),
         "stability": _unit(profit_factor / _PROFIT_FACTOR_TARGET),
     }
-    confidence = sum(
-        _CONFIDENCE_WEIGHTS[name] * value for name, value in parts.items()
-    )
+    confidence = sum(_CONFIDENCE_WEIGHTS[name] * value for name, value in parts.items())
     return round(confidence, 6), {
         name: round(value, 4) for name, value in parts.items()
     }
@@ -160,6 +166,7 @@ def assess_walkforward(
     config = (report.get("configs") or {}).get("production") or {}
     gate = report.get("gate_size") or {}
     reasons: list[str] = []
+    forward_reasons: list[str] = []
     notes: list[str] = []
 
     generated = str(report.get("generated_at") or "")
@@ -169,7 +176,9 @@ def assess_walkforward(
             stamp = datetime.fromisoformat(generated)
             if stamp.tzinfo is None:
                 stamp = stamp.replace(tzinfo=timezone.utc)
-            age_days = ((now or datetime.now(timezone.utc)) - stamp).total_seconds() / 86_400
+            age_days = (
+                (now or datetime.now(timezone.utc)) - stamp
+            ).total_seconds() / 86_400
         except ValueError:
             age_days = None
     if age_days is None:
@@ -182,14 +191,61 @@ def assess_walkforward(
 
     trades = int(config.get("trades") or 0)
     expectancy = float(config.get("expectancy_bps") or 0.0)
+    account_return_raw = config.get("return_pct")
+    account_return = None if account_return_raw is None else float(account_return_raw)
     drawdown = float(config.get("max_drawdown_pct") or 0.0)
     p_value = float(config.get("bootstrap_p_value") or 1.0)
     profit_factor = float(config.get("profit_factor") or 0.0)
     folds = list(config.get("folds") or [])
-    folds_positive = sum(1 for fold in folds if float(fold.get("expectancy_bps") or 0) > 0)
+
+    def fold_profit(fold: Mapping[str, Any]) -> float:
+        # Account return is the result that matters. Mean return per trade can
+        # be positive while a fold loses money when a few large positions or
+        # costs dominate. Legacy reports lack return_pct, so retain their old
+        # interpretation until they are refreshed.
+        field = "return_pct" if "return_pct" in fold else "expectancy_bps"
+        return float(fold.get(field) or 0.0)
+
+    folds_positive = sum(1 for fold in folds if fold_profit(fold) > 0)
     folds_total = len(folds)
     positive_fraction = (folds_positive / folds_total) if folds_total else 0.0
+    latest_fold_return = fold_profit(folds[-1]) if folds else None
+    latest_has_account_return = bool(folds and "return_pct" in folds[-1])
+    recent_fold_count = max(0, int(policy.min_recent_positive_folds))
+    recent_folds = folds[-recent_fold_count:] if recent_fold_count else []
     per_order_pct = float(config.get("per_order_pct") or 0.0)
+    forward = (
+        report.get("forward") if isinstance(report.get("forward"), Mapping) else {}
+    )
+    forward_trades = int(forward.get("completed_trades") or 0)
+    forward_days = float(forward.get("observed_days") or 0.0)
+    forward_pnl = float(forward.get("realized_pnl") or 0.0)
+    forward_required = bool(policy.min_forward_trades or policy.min_forward_days)
+    cost_check = (
+        report.get("cost_check")
+        if isinstance(report.get("cost_check"), Mapping)
+        else None
+    )
+    capital_check = (
+        report.get("capital_check")
+        if isinstance(report.get("capital_check"), Mapping)
+        else None
+    )
+    sizing_check = (
+        report.get("sizing_check")
+        if isinstance(report.get("sizing_check"), Mapping)
+        else None
+    )
+    model_check = (
+        report.get("model_check")
+        if isinstance(report.get("model_check"), Mapping)
+        else None
+    )
+    stress = (
+        report.get("cost_stress")
+        if isinstance(report.get("cost_stress"), Mapping)
+        else None
+    )
 
     if trades < policy.min_oos_trades:
         reasons.append(
@@ -200,6 +256,12 @@ def assess_walkforward(
             f"walk-forward expectancy {expectancy:.2f}bps "
             f"< required {policy.min_oos_expectancy_bps:.2f}bps after costs"
         )
+    if account_return is None:
+        reasons.append("walk-forward report has no account-level return")
+    elif account_return <= 0:
+        reasons.append(
+            f"walk-forward account return is not positive ({account_return:.3f}%)"
+        )
     if folds_total and positive_fraction < policy.min_folds_positive_fraction:
         reasons.append(
             f"only {folds_positive}/{folds_total} walk-forward folds profitable "
@@ -207,6 +269,49 @@ def assess_walkforward(
         )
     if not folds_total:
         reasons.append("no walk-forward folds were evaluated")
+    elif latest_fold_return is not None and latest_fold_return <= 0:
+        metric = (
+            f"account return {latest_fold_return:.3f}%"
+            if latest_has_account_return
+            else f"expectancy {latest_fold_return:.3f}bps"
+        )
+        reasons.append(
+            f"latest walk-forward fold has non-positive {metric} "
+            "(promotion requires current, not only historical, profitability)"
+        )
+    if recent_fold_count:
+        if folds_total < recent_fold_count:
+            reasons.append(
+                f"only {folds_total} walk-forward folds exist "
+                f"(need {recent_fold_count} recent folds)"
+            )
+        else:
+            missing_returns = sum(
+                1 for fold in recent_folds if "return_pct" not in fold
+            )
+            thin = sum(
+                1
+                for fold in recent_folds
+                if int(fold.get("trades") or 0) < policy.min_recent_fold_trades
+            )
+            losing = sum(
+                1 for fold in recent_folds if float(fold.get("return_pct") or 0.0) <= 0
+            )
+            if missing_returns:
+                reasons.append(
+                    f"{missing_returns}/{recent_fold_count} recent walk-forward "
+                    "folds lack account-return evidence"
+                )
+            if thin:
+                reasons.append(
+                    f"{thin}/{recent_fold_count} recent walk-forward folds have "
+                    f"fewer than {policy.min_recent_fold_trades} trades"
+                )
+            if losing:
+                reasons.append(
+                    f"{losing}/{recent_fold_count} recent walk-forward folds "
+                    "have non-positive account returns"
+                )
     if drawdown > policy.max_oos_drawdown_pct:
         reasons.append(
             f"walk-forward drawdown {drawdown:.1f}% "
@@ -223,6 +328,99 @@ def assess_walkforward(
         reasons.append(
             f"profit factor {profit_factor:.2f} < 1.0 despite positive expectancy"
         )
+    stress_multiplier = 0.0
+    stress_expectancy = 0.0
+    stress_return: Optional[float] = None
+    stress_drawdown = 0.0
+    stress_latest_return: Optional[float] = None
+    if stress is None:
+        reasons.append("walk-forward report has no doubled-cost stress test")
+    else:
+        stress_multiplier = float(stress.get("multiplier") or 0.0)
+        stress_expectancy = float(stress.get("expectancy_bps") or 0.0)
+        stress_return_raw = stress.get("return_pct")
+        stress_return = None if stress_return_raw is None else float(stress_return_raw)
+        stress_drawdown = float(stress.get("max_drawdown_pct") or 0.0)
+        stress_folds = list(stress.get("folds") or [])
+        if stress_folds and "return_pct" in stress_folds[-1]:
+            stress_latest_return = float(stress_folds[-1].get("return_pct") or 0.0)
+        if stress_multiplier + 1e-9 < policy.min_cost_stress_multiplier:
+            reasons.append(
+                f"execution-cost stress is only {stress_multiplier:.2f}x "
+                f"(need at least {policy.min_cost_stress_multiplier:.2f}x)"
+            )
+        if stress_expectancy < policy.min_oos_expectancy_bps:
+            reasons.append(
+                f"doubled-cost expectancy {stress_expectancy:.2f}bps "
+                f"< required {policy.min_oos_expectancy_bps:.2f}bps"
+            )
+        if stress_return is None:
+            reasons.append("doubled-cost stress has no account-level return")
+        elif stress_return <= 0:
+            reasons.append(
+                f"doubled-cost account return is not positive ({stress_return:.3f}%)"
+            )
+        if stress_drawdown > policy.max_oos_drawdown_pct:
+            reasons.append(
+                f"doubled-cost drawdown {stress_drawdown:.1f}% "
+                f"> allowed {policy.max_oos_drawdown_pct:.1f}%"
+            )
+        if stress_latest_return is None:
+            reasons.append("doubled-cost stress has no latest-fold account return")
+        elif stress_latest_return <= 0:
+            reasons.append(
+                "latest walk-forward fold loses money when execution costs "
+                f"are doubled ({stress_latest_return:.3f}%)"
+            )
+    if cost_check is not None and not bool(cost_check.get("current")):
+        reasons.append(
+            "walk-forward cost model is stale: report used "
+            f"{float(cost_check.get('reported_per_side_bps') or 0):.2f}bps/side + "
+            f"${float(cost_check.get('reported_fee_per_order_usd') or 0):.2f}/order, "
+            "current evidence requires "
+            f"{float(cost_check.get('current_per_side_bps') or 0):.2f}bps/side + "
+            f"${float(cost_check.get('current_fee_per_order_usd') or 0):.2f}/order"
+        )
+    if capital_check is not None and not bool(capital_check.get("current")):
+        reasons.append(
+            "walk-forward capital assumption is stale: report tested "
+            f"${float(capital_check.get('reported_equity') or 0):.2f}, current "
+            f"equity is ${float(capital_check.get('current_equity') or 0):.2f}"
+        )
+    if sizing_check is not None and not bool(sizing_check.get("current")):
+        if not bool(sizing_check.get("floor_model_current", True)):
+            reasons.append(
+                "walk-forward sizing is stale: the report did not reproduce "
+                "the current fixed-dollar floor and daily opening cap"
+            )
+        else:
+            reasons.append(
+                "walk-forward sizing is stale: report tested "
+                f"{float(sizing_check.get('reported_per_order_pct') or 0) * 100:.2f}% "
+                "per order, current small-account policy may use "
+                f"{float(sizing_check.get('current_per_order_pct') or 0) * 100:.2f}%"
+            )
+    if model_check is not None and not bool(model_check.get("current")):
+        reasons.append(
+            "walk-forward model is stale: report strategy, sizing mode, "
+            "position count, or symbol universe differs from the current book"
+        )
+    if forward_required:
+        if forward_trades < policy.min_forward_trades:
+            forward_reasons.append(
+                f"forward shadow sample too small ({forward_trades} completed trades "
+                f"< {policy.min_forward_trades})"
+            )
+        if forward_days < policy.min_forward_days:
+            forward_reasons.append(
+                f"forward shadow window too short ({forward_days:.1f} days "
+                f"< {policy.min_forward_days:.1f})"
+            )
+        if forward_trades >= policy.min_forward_trades and forward_pnl <= 0:
+            forward_reasons.append(
+                f"forward shadow P&L is not positive after modeled costs "
+                f"(${forward_pnl:.2f})"
+            )
 
     gate_size = gate.get("per_order_pct")
     if gate_size is None:
@@ -230,7 +428,9 @@ def assess_walkforward(
             f"no size holds the {policy.max_oos_drawdown_pct:.0f}% drawdown "
             "ceiling on this history"
         )
-    elif live_per_order_pct is not None and live_per_order_pct > float(gate_size) * 1.001:
+    elif (
+        live_per_order_pct is not None and live_per_order_pct > float(gate_size) * 1.001
+    ):
         override = bool(getattr(policy, "accept_evidence_override", False))
         message = (
             f"trading {live_per_order_pct * 100:.2f}% per order but the evidence "
@@ -245,7 +445,18 @@ def assess_walkforward(
         else:
             reasons.append(message)
 
-    score = expectancy * min(1.0, trades / max(1, policy.min_oos_trades)) - 0.05 * drawdown
+    # The $5 floor is used to collect genuinely forward observations, so it
+    # cannot itself require those observations or the system deadlocks forever.
+    # It may activate only after every retrospective, cost, recency and sizing
+    # check has passed at the exact floor size. Live promotion still requires
+    # both this result and all forward requirements below.
+    retrospective_reasons = list(reasons)
+    retrospective_eligible = not retrospective_reasons
+    reasons.extend(forward_reasons)
+
+    score = (
+        expectancy * min(1.0, trades / max(1, policy.min_oos_trades)) - 0.05 * drawdown
+    )
     confidence, confidence_parts = grade_confidence(
         oos_trades=trades,
         expectancy_bps=expectancy,
@@ -255,10 +466,30 @@ def assess_walkforward(
         profit_factor=profit_factor,
         policy=policy,
     )
+    retrospective_confidence = confidence
+    if forward_required:
+        trade_progress = (
+            1.0
+            if policy.min_forward_trades <= 0
+            else min(1.0, forward_trades / policy.min_forward_trades)
+        )
+        day_progress = (
+            1.0
+            if policy.min_forward_days <= 0
+            else min(1.0, forward_days / policy.min_forward_days)
+        )
+        forward_progress = min(trade_progress, day_progress)
+        if forward_trades >= policy.min_forward_trades and forward_pnl <= 0:
+            forward_progress = 0.0
+        confidence *= forward_progress
+        confidence_parts["forward"] = round(forward_progress, 4)
     evidence = {
         "source": "walkforward",
         "oos_trades": trades,
         "oos_expectancy_bps": round(expectancy, 3),
+        "oos_return_pct": (
+            None if account_return is None else round(account_return, 4)
+        ),
         "oos_win_rate": config.get("win_rate"),
         "oos_profit_factor": (
             None if profit_factor == float("inf") else round(profit_factor, 4)
@@ -269,10 +500,39 @@ def assess_walkforward(
         "effective_alpha": policy.max_bootstrap_p_value,
         "folds_positive": folds_positive,
         "folds_total": folds_total,
+        "latest_fold_return_pct": (
+            latest_fold_return if latest_has_account_return else None
+        ),
+        "recent_folds_required": recent_fold_count,
+        "recent_fold_min_trades": policy.min_recent_fold_trades,
+        "cost_stress_multiplier": round(stress_multiplier, 4),
+        "cost_stress_expectancy_bps": round(stress_expectancy, 3),
+        "cost_stress_return_pct": (
+            None if stress_return is None else round(stress_return, 4)
+        ),
+        "cost_stress_max_drawdown_pct": round(stress_drawdown, 3),
+        "cost_stress_latest_fold_return_pct": stress_latest_return,
+        "forward_trades": forward_trades,
+        "forward_days": round(forward_days, 2),
+        "forward_realized_pnl": round(forward_pnl, 4),
+        "forward_required": forward_required,
+        "retrospective_eligible": retrospective_eligible,
+        "retrospective_reasons": retrospective_reasons,
+        "retrospective_confidence": round(retrospective_confidence, 4),
         "per_order_pct": per_order_pct,
         "gate_size_pct": None if gate_size is None else float(gate_size),
         "report_age_days": None if age_days is None else round(age_days, 2),
         "report_generated_at": generated,
+        "reported_starting_equity": report.get("starting_equity"),
+        "capital_current": (
+            None if capital_check is None else bool(capital_check.get("current"))
+        ),
+        "sizing_current": (
+            None if sizing_check is None else bool(sizing_check.get("current"))
+        ),
+        "model_current": (
+            None if model_check is None else bool(model_check.get("current"))
+        ),
         # Identity of the evidence itself, so re-running the report on the same
         # bars cannot advance the promotion streak.
         "report_key": "|".join(
@@ -281,10 +541,23 @@ def assess_walkforward(
                 str(len((report.get("series") or {}).get("symbols") or [])),
                 str(trades),
                 f"{expectancy:.2f}",
+                str(account_return),
                 f"{drawdown:.3f}",
                 f"{p_value:.5f}",
                 str(per_order_pct),
                 str(gate_size),
+                str(latest_fold_return),
+                f"{stress_multiplier:.2f}",
+                f"{stress_expectancy:.2f}",
+                str(stress_return),
+                str(stress_latest_return),
+                str(forward_trades),
+                f"{forward_pnl:.4f}",
+                str((cost_check or {}).get("current")),
+                str((capital_check or {}).get("current")),
+                str((sizing_check or {}).get("current")),
+                str((model_check or {}).get("current")),
+                json.dumps(report.get("small_account_floor"), sort_keys=True),
             ]
         ),
         "symbols": len((report.get("series") or {}).get("symbols") or []),
@@ -459,6 +732,10 @@ def apply_assessment(
                 }
             )
         state.streak = 0
+        if state.stage != "shadow":
+            event = _demote(state, "evidence_gate_failed")
+            event["reasons"] = list(assessment.reasons)
+            events.append(event)
     else:
         state.streak += 1
         if state.streak >= policy.required_cycles:
@@ -518,9 +795,7 @@ def check_demotion(
         if reference > 0:
             drawdown = float((reference - current_equity) / reference * 100)
             if drawdown >= policy.demote_drawdown_pct:
-                return _demote(
-                    state, f"drawdown_{drawdown:.1f}pct_exceeds_limit"
-                )
+                return _demote(state, f"drawdown_{drawdown:.1f}pct_exceeds_limit")
     return None
 
 
@@ -546,9 +821,20 @@ def state_path(state_dir: Path | str) -> Path:
 
 def policy_from_config(config: Any) -> PromotionPolicy:
     """Build the policy from bot config (keeps thresholds operator-controlled)."""
+    requires_forward = str(getattr(config, "strategy", "")) == "trend_crypto"
     return PromotionPolicy(
         min_oos_trades=int(getattr(config, "min_oos_trades", 30)),
+        min_recent_positive_folds=int(getattr(config, "min_recent_positive_folds", 2)),
+        min_recent_fold_trades=int(getattr(config, "min_recent_fold_trades", 10)),
         required_cycles=int(getattr(config, "promotion_cycles_required", 3)),
+        min_forward_trades=(
+            int(getattr(config, "min_forward_trades", 30)) if requires_forward else 0
+        ),
+        min_forward_days=(
+            float(getattr(config, "min_forward_days", 30.0))
+            if requires_forward
+            else 0.0
+        ),
         accept_evidence_override=bool(
             getattr(config, "accept_evidence_override", False)
         ),

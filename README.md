@@ -1,9 +1,9 @@
 # Agentic Trader
 
-**An autonomous trading agent for Robinhood that has to earn the right to trade — and still asks you before it spends a cent.**
+**An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-752%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-820%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -26,11 +26,11 @@ trend it was not configured for is not a trend it misses.
 
 ## What this is not
 
-- **Not a guaranteed money-maker.** The honest measured result on 11 years of the
-  current 16-symbol universe is a thin edge: **+856 bps expectancy per trade**,
-  495 trades, 5 of 6 walk-forward folds positive, p = 0.0005 — and at a
-  drawdown-compliant size that is roughly **$2/year on a $50 account**. Sized
-  larger, the same rule carries a ~30% drawdown. Both numbers are on the console.
+- **Not a guaranteed money-maker, and not currently validated for live use.**
+  The September 20, 2026 audit invalidated the old headline backtest for
+  promotion: its cost model omitted the measured fixed execution charge, its
+  newest walk-forward fold loses money, and the selected rule has 0 completed
+  prospective shadow trades. Historical fit is not a prediction of profit.
 - **Not financial advice**, not a signal service, and not something to run with
   money you cannot afford to lose.
 - **Not agentic in the "does whatever it likes" sense.** The LLM in this system
@@ -40,7 +40,7 @@ trend it was not configured for is not a trend it misses.
 ## 60-second overview
 
 ```text
-quotes ─► strategy ─► risk guard ─► gates ─► journal ─► console (read-only)
+quotes ─► strategy ─► risk guard ─► gates ─► journal ─► local console
                                        │
                                        └─► order submission  ◄── you arm this
 ```
@@ -48,16 +48,19 @@ quotes ─► strategy ─► risk guard ─► gates ─► journal ─► cons
 1. **Strategy** — a fixed multi-horizon trend rule (50/100/200/252-bar votes),
    rebalanced once per UTC day, sized inversely to volatility.
 2. **Risk guard** — per-order and daily notional caps, symbol whitelist, daily
-   loss limit, correlation clusters, kill switch. The caps bound *opening*
-   exposure; a close is always allowed, because an exit that the entry budget
-   can veto is a position that cannot be sold.
+   loss limit, correlation clusters, kill switch. Ordinary size, daily and
+   position caps and the loss/error kill switch bind *opening* exposure and do
+   not veto a verified, non-overselling close. Failed holdings/open-order reads
+   still fail closed before any broker write.
 3. **Gates** — an LLM regime read (chop/panic blocks entries), an advisory veto,
-   and the evidence gate: a walk-forward report that must be fresh, and a book
-   that must fit inside the size its drawdown allows.
+   and the evidence gate: a cost-current walk-forward report, positive account
+   return in both recent folds, survival at doubled execution costs, and at
+   least 30 completed prospective shadow trades over 30 days.
 4. **Journal** — every decision, accepted or rejected, with the reason and a
    confidence grade for that specific order.
-5. **Console** — a read-only local dashboard: order table, live stream,
-   candidates, promotion gate, evidence, back-checks.
+5. **Console** — a loopback-only dashboard: order table, live stream,
+   candidates, promotion gate, evidence and back-checks. Its only write actions
+   are explicitly confirmed arm/disarm controls.
 6. **Order submission** — the only path to real money, and it is off until you
    turn it on.
 
@@ -68,7 +71,8 @@ quotes ─► strategy ─► risk guard ─► gates ─► journal ─► cons
 ```bash
 git clone https://github.com/Hkshoonya/agentic-trader.git
 cd agentic-trader
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+uv sync --frozen --extra dev                              # hash-locked install
+# Without uv: python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 cp config/agentic.example.toml config/agentic.toml     # edit paths and caps
 .venv/bin/agentic-trading auth    --config config/agentic.toml   # Robinhood OAuth
 .venv/bin/agentic-trading run     --config config/agentic.toml   # shadow, no orders
@@ -86,7 +90,7 @@ with `windows\build.ps1` — see [windows/README.md](windows/README.md).
 ### Try it without any credentials
 
 ```bash
-.venv/bin/python -m pytest tests -q                     # 752 tests
+.venv/bin/python -m pytest tests -q
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/python paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --output results
 ```
@@ -100,12 +104,19 @@ Nothing else decides how much the agent may do on its own.
 
 | Switch | Default | What it allows | Where |
 |---|---|---|---|
-| Autonomy | **off** | the agent may promote/demote its own stage as evidence changes, and the scout may add/drop the symbols it picks | `AGENTIC_ALLOW_AUTONOMY=1` |
-| Arm | **off** | real orders may be submitted to the broker | `AGENTIC_ALLOW_LIVE=1` (Windows app: type `ARM`) |
+| Machine capability | **off** | this machine may submit orders; autonomous operation also permits self-promotion/scouting | `AGENTIC_ALLOW_LIVE=1` (manual) or `AGENTIC_ALLOW_AUTONOMY=1` (autonomous) |
+| Eligible arm latch | **off** | this workspace has passed its current evidence, cost, capital, stage, and kill-switch checks | guarded console/auto-arm file |
 
-Both are session environment, not configuration files, so a copy of this repo on
-someone else's machine starts inert whatever the state files say. A promoted but
-unarmed agent journals `live_gate_blocked` with the order it *would* have sent.
+Both are required for a real submission; neither is a bypass for the other. The
+environment capability is session-scoped. The arm file is durable local state,
+so the runtime revalidates its evidence schema and exact assessed report, stage,
+freshness, measured costs, and kill switch every time it reads the latch. A
+promoted but unarmed agent journals `live_gate_blocked` with the order it would
+have sent.
+
+> **Historical examples below are explanatory, not a current launch verdict.**
+> Re-run `walkforward` with the current measured cost model and complete the
+> prospective shadow gate before relying on any sizing or return figure.
 
 ## How positions are sized
 
@@ -118,21 +129,21 @@ the per-order budget is scaled by that weight (capped at 1.0, so a quiet asset
 never exceeds your ceiling); with `sizing = "flat"` every entry gets the same
 dollars and the weight only decides *which* symbols get slots.
 
-That difference is not cosmetic. Same rule, same 495 trades, same +856 bps per
-trade, measured on 11 years of the current universe:
+That difference is not cosmetic: flat sizing hands a 60%-vol pair the same
+dollars as a 14%-vol ETF, while proportional sizing reduces the wild name's
+allocation. The fixed-dollar small-account floor is the deliberate exception:
+an order cannot be weight-scaled below its $5 minimum, so conviction rank
+decides which signal receives the one useful daily slot. It is a risk-allocation
+rule, not evidence of profitability.
 
-| sizing | per order | max drawdown | $50 → |
-|---|---|---|---|
-| flat | 0.92% | 13.0% | $72 |
-| **proportional** | 0.92% | **4.1%** | $58 |
-| flat | 2.04% | 23.9% | $106 |
-| **proportional** | 2.04% | **9.0%** | $67 |
-
-Flat sizing hands a 60%-vol pair the same dollars as a 14%-vol ETF, so the risk
-concentrates in exactly the instruments the weighting meant to hold back. The
-proportional book gives up some upside (fewer dollars in the wild names) and
-takes roughly a third of the drawdown for it — which is why it is what the
-shipped Windows template uses.
+The corrected schema-4 report on 2026-09-20 models that exact behavior: a
+$5.10 fixed-dollar target, re-derived as equity changes, with the daily cap
+enforced. It loses money at every ordinary 0.5%-3% size. The floor path is
+aggregate-positive and statistically significant on the full history, but it
+still has 33.112% drawdown, only 3/6 profitable folds, three consecutive losing
+folds, and a -3.741% newest fold. Under doubled costs drawdown is 43.560% and the
+newest fold loses 9.460%. Those current-regime and risk failures mean neither
+sizing path currently justifies live trading.
 
 ```
 sizing = "proportional"   # or "flat" for the older behaviour
@@ -140,55 +151,72 @@ sizing = "proportional"   # or "flat" for the older behaviour
 
 ## Trading a small account
 
-There is a third decision, and it is the one a $50 account runs into on day one:
-**the evidence-compliant order can be smaller than the broker's minimum.**
-Robinhood will not take an order below $1.00, and 1% of $50 is $0.46 — so the
-agent refuses every entry, correctly, and does nothing at all.
+There is a third decision, and it is the one a roughly $50 account runs into on
+day one: the ordinary 1% risk cap produces only about $0.50. That is below the
+$1 broker minimum and, more importantly for this account, far below the $5
+needed to keep the measured $0.10 round trip at or below 2% of the order.
 
-`small_account_max_order_pct` is the operator's answer to that. Set it above zero
-and, while the account is too small to place an evidence-compliant order, the
-per-order cap is raised to *just* enough to place one order — never above your
-number — and released automatically the moment the account can stand on its own:
+The active configuration now has a confidence-gated forward-research floor:
 
 ```toml
 min_order_notional = "1.00"
-small_account_max_order_pct = "0.025"   # 0 = refuse rather than size up
+small_account_target_notional = "5.00"
+small_account_max_order_pct = "0.11"
+small_account_max_daily_pct = "0.11"
 ```
 
-What that actually does on $50, from the live journal:
+The target is not an unconditional $5 order. Before the cap can rise, a fresh
+schema-4 walk-forward report must test the exact production path and pass all
+retrospective requirements: positive account return and expectancy after costs,
+enough trades, current/recent profitable folds, doubled-cost stress, the
+block-bootstrap significance bar, current capital and cost assumptions, and a
+maximum drawdown no greater than 15%. A stale report, a report tested at a
+smaller size, or a failing strategy keeps the ordinary cap in force.
+
+At $50, the sizer adds 2% for quantity rounding and price drift:
 
 ```text
-small_account_mode  engaged=true  sufficient=true
-  policy_max_order_pct = 0.01  ->  effective 0.0204
-  $1.00 minimum + rounding margin / $50 = 2.04%
+target order              $5.00
+runtime sizing target     $5.10
+required account share    10.20%
+authorized ceiling        11.00%
 ```
 
-The console says what that size costs, from the evidence report's own size
-frontier (`/api/summary` → `risk.drawdown_at_effective_pct`). Measured on the
-current 16-symbol universe with **proportional sizing**:
+The same 11% ceiling is applied to the day's opening notional while the floor is
+active, so one approximately $5.10 entry consumes the useful daily budget and a
+second floor-sized entry is refused. When several signals arrive, the strategy
+emits them in conviction order so the strongest-ranked eligible signal gets
+that slot first. The evidence simulator enforces the same fixed-dollar and
+daily-budget behavior rather than compounding 10.20% on later equity. If
+measured execution cost rises, the
+useful target rises too; if it no longer fits the 11% ceilings, the system
+refuses rather than placing a cost-heavy smaller order. At an 11% ceiling the
+account also needs at least about $46.36 to fit a $5.10 entry.
 
-| per order | max drawdown | $50 → | inside the 15% gate |
-|---|---|---|---|
-| 0.50% | 2.2% | $54 | yes |
-| 0.92% (evidence size) | 4.1% | $58 | yes |
-| **2.04%** (small-account mode) | **8.8%** | $67 | **yes** |
-| 3.00% | 13.1% | $77 | yes |
+There is one intentional split in the gate. The floor may collect **shadow-only
+forward evidence** after the retrospective checks pass; requiring the forward
+sample before allowing it to collect that sample would be a deadlock. Real
+orders still require at least 30 completed shadow round trips spanning 30 days,
+positive forward P&L after modeled costs, consecutive promotion cycles, the
+live stage, the machine capability, and a currently valid arm latch. The floor
+does not bypass any of those live controls.
 
-The daily notional ceiling still applies, and on $50 it binds first: 3.68% of $50
-is $1.84, so **one $1.02 entry a day**, not four. Small-account mode buys you a
-seat at the table; it does not buy you more bets.
+The current strategy does not pass the retrospective checks, so enabling this
+cap does **not** make it trade immediately. The dashboard reports `$5 forward
+floor: waiting for proof` and the daemon keeps the smaller policy caps. This is
+the requested ability to trade $5 when confidence is earned, not an assumption
+that confidence already exists.
 
 With the rule off (`0`, the default in `config/agentic.example.toml`) nothing
 changes: entries are refused with `below_min_notional` until the account grows
-past the point where the evidence-compliant size clears the minimum (~$110 at a
-1% ceiling).
+past the point where the normal policy size clears the useful minimum.
 
-### The daily budget follows the account size
+### Optional account-size budget schedule
 
-One flat daily ceiling cannot suit both a $50 account and a $50,000 one. At 1%
-of $50 — 46 cents a day — the agent would take fifty days to become fully
-invested, which is not a trading system, it is a queue. So the ceiling is a
-schedule keyed on account size, with each tier scaled by evidence confidence:
+The runtime supports an account-size schedule, but the reviewed configuration
+does not use one. It keeps the evidence-oriented flat limits: 1% per order, 4%
+per day, and a 1% hard per-order cap. The aggressive example below is retained
+only to document the feature and must not be treated as a recommended preset:
 
 | account | per day, at no confidence | at full confidence |
 |---|---|---|
@@ -200,9 +228,10 @@ schedule keyed on account size, with each tier scaled by evidence confidence:
 Between two thresholds the band moves linearly, so crossing $500 does not double
 the risk in a day. The per-order ceiling is the day's share divided across the
 book's open slots — one order can never eat the day — hard-bounded by
-`max_order_hard_pct`. A config with no schedule keeps its flat ceilings, so
-nothing written before this existed changes behaviour. On the live $50 account
-the numbers in force are **$11.13 per order and $44.53 a day**.
+`max_order_hard_pct`. A config with no schedule keeps its flat ceilings. With a
+$49.90 balance, the ordinary 1% ceiling is about $0.50. The conditional $5
+floor described above can replace it only after evidence at that exact size
+passes; the current failing report leaves it held.
 
 ```toml
 daily_budget_schedule = [
@@ -246,10 +275,12 @@ the operator's own instruction unimplemented.
 
 So the trade-off has to be *stated*. With `accept_evidence_override = false`
 (the default, and what `config/agentic.example.toml` ships) a schedule above the
-frontier fails the gate and the book does not arm. With it set true, the gate
-passes and every assessment carries the mismatch as a note — the console prints
-it beside the budget, and the back-check reports it as a warning rather than a
-failure. The size is never quietly pretending to be evidence-compliant:
+frontier fails the gate and the book does not arm. Setting it to true waives
+**only that sizing mismatch** and records it as a note. The reviewed active
+configuration keeps the override false. It cannot waive stale or under-modeled
+costs, a losing recent fold, doubled-cost stress failure, or the prospective
+30-trade/30-day shadow gate. The size is never quietly pretending to be
+evidence-compliant:
 
 ```text
 promotion: eligible, note "trading 22.26% per order but the evidence only
@@ -438,7 +469,7 @@ Optional: `TYPESAFE_BASE_URL`, `TYPESAFE_MODEL` (default `jev-latest`).
 What changes, concretely:
 
 - one request per refresh instead of one per symbol: measured live on this
-  book, **all 16 symbols in one call, 1.85 s**, against 368 chat-model calls on
+  measured test book, **16 symbols in one call, 1.85 s**, against 368 chat-model calls on
   a quiet day;
 - every view carries its distribution, so the console can show
   `chop 0.65, trend_down 0.20, trend_up 0.10, panic 0.05` instead of a label;
@@ -496,14 +527,18 @@ and the arming snapshots are one durable record (`data/state/account.json`), and
 
 ## Arming from the console
 
-Order submission needs `AGENTIC_ALLOW_LIVE=1` **or** this workspace's arm file.
-The console can write the second one — and the button is **only rendered when the
-system has earned it**: the promotion gate must say eligible, the stage must be at
-least `probation`, and the walk-forward report must be current. Otherwise the
-panel says why arming is unavailable, and there is nothing to click.
+Order submission needs a machine capability (`AGENTIC_ALLOW_LIVE=1` for manual
+operation or `AGENTIC_ALLOW_AUTONOMY=1` for autonomous operation) **and** this
+workspace's valid arm file. The console can write the arm latch—and its button is **only rendered when the
+system has earned it**: the same complete pre-flight used by auto-arm must pass,
+including eligible promotion/stage, current evidence, a clear kill switch, a
+readable account, an in-ceiling budget, and a fresh healthy report attributable
+to the running daemon. Otherwise the panel says why arming is unavailable, and
+there is nothing to click. A latch already on disk is ineffective whenever any
+of those checks later fails.
 
-That matters because the console was read-only from the start. Adding a write path
-is a real change in the attack surface, so it is fenced in one place
+That matters because the console is otherwise read-only. Adding a write path is
+a real change in the attack surface, so it is fenced in one place
 (`src/agentic_trading/arming.py`):
 
 - **loopback only** — the handler checks the peer address, rather than trusting
@@ -512,19 +547,22 @@ is a real change in the attack surface, so it is fenced in one place
   is 404 and no other endpoint has a write side;
 - **typed confirmation** — `{"confirm": "ARM"}`; a stray form post cannot arm an
   account;
-- **eligibility** — refused unless the gate, the stage and the evidence agree;
+- **eligibility** — refused unless every named pre-flight check passes;
 - **disarming is always allowed**, because lowering risk never needs permission;
 - **journalled** — an `arming_changed` event lands next to every decision, so the
   record shows who armed what and when.
 
-A copy of this workspace elsewhere still starts inert: the arm file lives inside
-the workspace, and a fresh install has none.
+A fresh install starts inert because it has no arm file. Do not copy a populated
+`data/state` directory into another deployment: it contains the durable arm
+latch, even though the receiving runtime will re-check whether that latch is
+still eligible before using it.
 
 ## The console
 
-<img src="docs/assets/console.png" alt="The read-only console: account equity, promotion gate, market and order table with per-order confidence, candidates, live execution stream, agents on duty, walk-forward evidence" width="900">
+<img src="docs/assets/console.png" alt="The local console: account equity, promotion gate, market and order table with per-order confidence, candidates, live execution stream, agents on duty, walk-forward evidence" width="900">
 
-Read-only, stdlib-only, bound to `127.0.0.1`. It shows the order table with a
+Stdlib-only and bound to `127.0.0.1`. Apart from the guarded arm/disarm POSTs it
+is read-only. It shows the order table with a
 confidence grade per order, what the rule wants to hold right now and what is
 blocking each name, the promotion gate's unmet requirements, the walk-forward
 evidence the current size is justified by, and a pulse badge that says
@@ -569,7 +607,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   752 tests, including the honesty tests for the rig
+tests/                   820 tests, including the honesty tests for the rig
 ```
 
 ## Operations
@@ -652,12 +690,19 @@ For authenticated MCP (equity review, account read, and optional live placement)
 
 Then run shadow as above; with valid tokens the broker uses the real MCP endpoint instead of Fake MCP.
 
-### Live mode (two gates)
+### Live mode (mode plus arming)
 
-Shadow is the safe default. **Live order placement requires both:**
+Shadow is the safe default. **Live order placement requires:**
 
 1. `agentic-trading flip-mode live --config config/agentic.toml`
-2. `AGENTIC_ALLOW_LIVE=1` in the environment when running
+2. a machine capability: `AGENTIC_ALLOW_LIVE=1` for supervised manual operation
+   or `AGENTIC_ALLOW_AUTONOMY=1` for autonomous operation
+3. an eligible arm file written by the local console/auto-arm policy and
+   revalidated against the exact assessed evidence report
+4. valid OAuth and a broker pre-trade review
+
+The environment is a capability, not an evidence bypass. It cannot submit an
+order without the revalidated workspace arm latch.
 
 Revert to shadow with `agentic-trading flip-mode shadow --config config/agentic.toml`.
 
@@ -703,8 +748,9 @@ python3 paper_scalper.py --quotes data/spy_quotes.jsonl --config config.json --o
 Live placement still requires **all** of:
 
 1. `agentic-trading flip-mode live --config config/agentic.toml`
-2. `AGENTIC_ALLOW_LIVE=1` in the environment
-3. Valid OAuth tokens (`agentic-trading auth`)
+2. `AGENTIC_ALLOW_LIVE=1` (manual) or `AGENTIC_ALLOW_AUTONOMY=1` (autonomous)
+3. an eligible, revalidated workspace arm file
+4. Valid OAuth tokens (`agentic-trading auth`)
 
 Never set `AGENTIC_ALLOW_LIVE` for routine soaks. Operator checklist: [`docs/superpowers/plans/manual-live-flip-checklist.md`](docs/superpowers/plans/manual-live-flip-checklist.md).
 
@@ -750,7 +796,9 @@ Optional OpenAI-compatible HTTP when configured:
 
 ### Live dual-gate warning
 
-Same as Phase 0/1: live placement still requires `flip-mode live`, `AGENTIC_ALLOW_LIVE=1`, and valid OAuth. Never set `AGENTIC_ALLOW_LIVE` for routine soaks.
+Same as Phase 0/1: live placement requires `flip-mode live`, valid OAuth, a
+machine capability, and an eligible workspace arm file. Never set a submission
+capability for routine soaks.
 
 ### Verify Phase 2
 
@@ -795,12 +843,13 @@ agentic-trading run --config config/agentic.toml --daemon
 `--dry-run` forces shadow mode even when `state_dir/mode` says live. `probe`
 writes `state_dir/probe.json`, which contains account data and is gitignored.
 
-### Live gates (all four required)
+### Live gates (all five required)
 
 1. `agentic-trading flip-mode live --config config/agentic.toml`
-2. `AGENTIC_ALLOW_LIVE=1` in the environment
-3. Current session permitted by `session_policy` (default `regular`)
-4. RiskGuard allows the intent, and a review call precedes every placement
+2. `AGENTIC_ALLOW_LIVE=1` (manual) or `AGENTIC_ALLOW_AUTONOMY=1` (autonomous)
+3. an eligible, revalidated workspace arm file
+4. Current session permitted by `session_policy` (default `regular`)
+5. RiskGuard allows the intent, and a review call precedes every placement
 
 ### Order construction rules (encoded, not assumed)
 
@@ -892,9 +941,9 @@ systemctl --user restart agentic-trading-dashboard  # console on 127.0.0.1:8787
 journalctl --user -u agentic-trading -f             # live log
 ```
 
-The console is read-only, binds to loopback, and re-reads `config/agentic.toml`
-on every request, so editing the strategy or whitelist does not require a
-restart (and cannot silently misreport what the daemon is doing).
+The console binds to loopback and re-reads `config/agentic.toml` on every
+request, so editing the strategy or whitelist does not require a dashboard
+restart. Its only write surface is the guarded arm/disarm control.
 
 ### Self-promotion vs. arming: two different switches
 
@@ -903,9 +952,9 @@ The agent can promote itself, and that is now on (`autonomy = "auto"` plus
 consecutive assessments it moves itself shadow → probation → live with no
 operator action.
 
-Submitting a real order is a *separate* switch, `AGENTIC_ALLOW_LIVE=1`, and it
-is deliberately unset. So there are three states, and the console badge tells
-them apart:
+Submitting a real order is a *separate* permission: a machine capability and
+the revalidated workspace arm file must both be present. So there are three
+states, and the console badge tells them apart:
 
 | State | Meaning | How it reads |
 |---|---|---|
@@ -1062,10 +1111,11 @@ against that promise rather than assumed:
 | stage, streak, last assessment | `state_dir/promotion.json` | yes |
 | risk budget, confidence, session policy | `state_dir/effective_limits.json` | yes |
 | kill switch, day P&L, daily notional | `state_dir/risk_guard.json` | yes |
-| shadow book (rebuilt from today's journal) | `journal_dir/<date>.jsonl` | yes |
+| shadow book (rebuilt from every date-named journal) | `journal_dir/<date>.jsonl` | yes |
 | orders used today (counted from the journal) | `journal_dir/<date>.jsonl` | yes |
 | LLM regime classifications | `state_dir/regimes.json` | yes — otherwise the gate goes deaf until the worker catches up |
-| arming state, autonomy state | `state_dir/live_gate.json` | yes |
+| arming latch | `state_dir/arm.json` | yes — eligibility is rechecked on use |
+| daemon-published gate status | `state_dir/live_gate.json` | rewritten on start/stage changes |
 | per-worker roster for the console | `state_dir/agents.json` | rewritten on start |
 
 State files are written atomically (`jsonio.write_text`), because a torn read of
@@ -1090,10 +1140,9 @@ deliberate audit of a quiet overnight run found three defects in
 
 Holdings are now derived from a ledger that only a reported fill changes, keyed
 the way the bar files are, persisted to `state_dir/strategy_trend_crypto.json`,
-and reconciled at start-up against the runtime's view — plus a replay of recent
-`accepted` records, because the runtime's own shadow book is day-scoped and
-legitimately forgets yesterday. An empty runtime view is treated as "no
-information", never as "you hold nothing".
+and reconciled at start-up against the authoritative runtime view. Shadow mode
+replays all date-named shadow-fill journals; live mode trusts the broker's
+current holdings, including an authoritative empty book.
 
 ### Alerts, and the roster on the console
 
@@ -1250,23 +1299,25 @@ removing one.
 
 ### Are the assumed costs a lie?
 
-The evidence is graded with a cost model of 1 bp half-spread + 1 bp slippage per
-side (2 bps per side, 4 bps round trip). That number decides whether a strategy
-looks profitable, and it had never been checked against a real fill.
+The original evidence was graded with 1 bp half-spread + 1 bp slippage per side
+(2 bps per side, 4 bps round trip). That number decides whether a strategy looks
+profitable, so the current gate compares the report's assumptions with measured
+execution and refuses a stale cost model.
 
 Now it is checked automatically: the daemon pulls the broker's own trade history
 (`get_pnl_trade_history`), joins each fill to the price its decision was taken at
-(within 30 minutes, from the journal), and reports the all-in per-side cost in
-bps against the assumption. Results land in `state_dir/execution_costs.json` and
-the journal (`execution_costs`), and once **5+ fills** exist the measured cost
-replaces the assumption inside the evolution's `CostModel` — so the gate grades
-the strategy on the costs it actually pays.
+(within 30 minutes, from the journal), and reports the all-in cost against the
+assumption. Results land in `state_dir/execution_costs.json` and the journal
+(`execution_costs`). A positive measured round-trip charge is applied
+immediately as a conservative fixed per-order fee; once enough attributable
+fills exist, the measured basis-point estimate can replace the percentage
+assumption as well.
 
-Current state, honestly: **0 fills, so nothing is measured yet** — the report
-says exactly that. The pipeline is built and tested (including sign conventions
-for buys and sells, unattributable fills, and a clamp so a single broken print
-cannot make execution look free or absurd), and it switches over by itself the
-first time the bot trades.
+Current state, honestly: there is one observed XLM round trip, $5.00 bought and
+$4.90 sold, for a $0.10 round-trip charge. That is too little data to estimate a
+stable symbol-specific cost curve, but it is enough to invalidate a report that
+models $0.00 fixed cost. Until more fills exist, the evidence engine
+conservatively prices half that observed round-trip amount on each order.
 
 ### Known constraints and unverified areas
 
@@ -1311,7 +1362,12 @@ assumed to fill first.
 | Out-of-sample expectancy after costs | > 1 bps |
 | Profitable out-of-sample folds | ≥ 60% |
 | Out-of-sample max drawdown | ≤ 15% |
-| Bootstrap p-value on trade returns | < 0.05 |
+| Block-bootstrap p-value on daily account returns | < 0.05 |
+| Aggregate account return | positive after costs |
+| Two most recent walk-forward folds | positive account return and ≥ 10 trades each |
+| Execution-cost stress | still profitable with percentage and fixed costs doubled |
+| Cost model | current with measured execution |
+| Prospective shadow record (trend strategy) | ≥ 30 completed trades over ≥ 30 days, positive realized P&L |
 | Consecutive passing assessments per stage | 3 |
 
 Stages are `shadow → probation → live`. Probation trades live at a reduced
@@ -1337,8 +1393,9 @@ evaluates, journals `promotion_requires_consent`, and stays in shadow.
 agentic-trading dashboard --config config/agentic.toml --open
 ```
 
-Read-only, stdlib-only, binds to `127.0.0.1`. It auto-refreshes every 2 seconds
-and shows: mode/session/kill-switch badges, account equity and daily notional
+Stdlib-only and bound to `127.0.0.1`; only the guarded arm/disarm endpoints
+write state. It auto-refreshes every 2 seconds and shows:
+mode/session/kill-switch badges, account equity and daily notional
 against the cap, accepted/placed/rejected counters, the promotion streak gauge,
 the gate's verdict with every unmet requirement listed, an animated order-flow
 chart, the live execution stream, the latest evolution evidence, and the
@@ -1387,7 +1444,8 @@ bar is a plain `p < 0.05`.
 
 It prices three things on the bars in `history_path`:
 
-- `production` — the rule at the size the confidence ladder would trade today.
+- `production` — the rule at the largest size the current policy may actually
+  use, including an enabled small-account floor.
 - `inverse_vol` — the strategy's own specification: each slot sized to carry the
   same risk (`notional = per_order_pct / sigma`) instead of the same dollars,
   never rescaled to fill the budget.
@@ -1402,25 +1460,33 @@ back-check agent: if the live per-order size is larger than `gate_size`, the
 `evidence` check fails.
 
 The report does not depend on anyone remembering to run it. The daemon rebuilds
-it in its evaluation worker whenever it is older than `evidence_refresh_days`
-(default 7 days, `0` disables), off freshly synced bars, and journals
+it in its evaluation worker whenever it is older than `evidence_refresh_days`,
+when account capital falls materially, when the potential floor sizing changes,
+or when the strategy, base sizing mode, position count, or effective symbol
+universe differs from the report (default age 7 days, `0` disables), off
+freshly synced bars, and journals
 `evidence_refreshed` with the headline numbers. That matters because the
 promotion gate refuses a stale report — without the automatic rebuild, "the bot
 earns its own promotion" would quietly become "the bot stalls in a month".
 
 Promotion itself is applied on every path that can reach it: the stage (which
-the evidence decides) raises the run mode, the mode file records it for the next
-restart, and the console journals `stage_applied` / `autonomy_applied`. The mode
-only ever moves *up* on its own — a demotion or the operator lowers it — because
-silently dropping a deliberately-configured `mode = "live"` would be a different
-kind of bug. Submission still needs `AGENTIC_ALLOW_LIVE=1`, so a promoted agent
-that is not armed journals `live_gate_blocked` instead of placing.
+the evidence decides) raises the run mode only with autonomy consent, and the
+mode file records it for the next restart. A failed evidence gate immediately
+demotes an autonomous live stage and applies the lower-risk shadow mode; lowering
+risk does not wait for consent. Submission separately needs a machine capability
+and an eligible workspace arm file, so a promoted agent that is not armed
+journals `live_gate_blocked` instead of placing.
 
-On 11 years of the current 16-symbol universe (to 2026-09-17) the rule returns
-the same `+856 bps` expectancy per trade at every flat size, and drawdown scales
-with the size: 3.0% per order → 30.5% max drawdown, 1.5% → 19.2%, 1.0% → 14.0%.
-The config ceiling is therefore `max_order_pct = "0.01"`, with the ladder trading
-0.25%–1.0% underneath it.
+The old zero-fixed-cost snapshot looked profitable; the measured $0.10 round
+trip invalidated it. The corrected 2026-09-20 schema-4 report loses money at
+every ordinary 0.5%-3% size, including -85.449% account return and 87.193%
+maximum drawdown at 1%. The exact small-account path does not compound 10.2204%
+of later equity: it holds the order near $5.10, enforces the daily cap, and
+recomputes the required share as equity moves. Across the full history that path
+returns +352.801%, with p=0.0085, but suffers 33.112% maximum drawdown, only 3/6
+profitable folds, and a -3.741% newest fold. With doubled costs, drawdown rises
+to 43.560% and the newest fold loses 9.460%. Those seven retrospective failures
+keep the floor off and the strategy shadow-only.
 
 ### Reality check on the current data
 

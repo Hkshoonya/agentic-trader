@@ -244,6 +244,43 @@ class StrategyReconcileTests(unittest.TestCase):
             self.assertEqual(loop._strategy_book, {"SPY": "2"})
             self.assertIn("strategy_reconcile_failed", _event_names(loop))
 
+    def test_a_verified_empty_live_book_clears_the_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            broker = _StubBroker({"SPY": Decimal("2")})
+            loop = self._loop(Path(name), broker)
+            self.assertTrue(loop.reconcile_strategy_positions())
+
+            broker.held = {}
+            self.assertTrue(loop.reconcile_strategy_positions())
+
+            strategy = loop.strategy
+            self.assertEqual(strategy.seeded[-1], {})
+            self.assertEqual(loop._strategy_book, {})
+
+    def test_live_startup_never_turns_an_unplaced_approval_into_a_holding(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            loop = self._loop(Path(name), _StubBroker())
+            loop.journal.append(
+                {
+                    "event": "accepted",
+                    "decision_id": "approved-not-placed",
+                    "mode": "live",
+                    "would_place": True,
+                    "may_place": True,
+                    "intent": {
+                        "symbol": "SPY",
+                        "side": "buy",
+                        "quantity": "1",
+                        "ref_price": "100",
+                    },
+                }
+            )
+
+            loop.seed_strategy_positions()
+
+            self.assertEqual(loop.strategy.seeded[-1], {})
+            self.assertEqual(loop._strategy_book, {})
+
     def test_a_shadow_loop_does_not_reconcile_from_the_broker(self) -> None:
         """In shadow the runtime applies its own fills; the broker is not truth."""
         with tempfile.TemporaryDirectory() as name:
@@ -320,11 +357,60 @@ class DeferredIntentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             loop = self._loop(Path(name), armed=True)
             loop.armed_for_submission = lambda: True  # type: ignore[method-assign]
-            loop.process_intent = lambda intent, *, session="regular", advised=False: "retry"  # type: ignore[assignment]
+            loop.process_intent = lambda intent, **kwargs: "retry"  # type: ignore[assignment]
             for _ in range(4):
                 loop.flush_deferred()
             self.assertEqual(loop.deferred_intents, {})
             self.assertIn("deferral_expired", _event_names(loop))
+
+    def test_retry_reuses_its_daily_and_order_reservations(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            loop = _Loop(
+                _config(
+                    Path(name),
+                    symbol_whitelist='["XLM-USD"]',
+                    max_orders_per_day="1",
+                    daily_notional_pct='"0.021"',
+                ),
+                _StubBroker(),
+                _RecordingStrategy(),
+            )
+            loop.mode = "live"
+            loop.stage = "live"
+            loop.guard.current_equity = Decimal("50")
+            loop.account_number = "ACCOUNT"
+            loop.armed_for_submission = lambda: False  # type: ignore[method-assign]
+
+            loop.process_intent(_intent(), session="afterhours")
+
+            reserved = loop.guard._daily_notional
+            self.assertEqual(loop.orders_today, 1)
+            self.assertEqual(len(loop.deferred_intents), 1)
+
+            placed: list[OrderIntent] = []
+            loop.armed_for_submission = lambda: True  # type: ignore[method-assign]
+            loop._place = lambda intent, request: placed.append(intent)  # type: ignore[method-assign]
+
+            self.assertEqual(loop.flush_deferred(), 1)
+
+            self.assertEqual(len(placed), 1)
+            self.assertEqual(loop.orders_today, 1)
+            self.assertEqual(loop.guard._daily_notional, reserved)
+            accepted = [e for e in _events(loop) if e.get("event") == "accepted"]
+            self.assertEqual(len(accepted), 2)
+            self.assertEqual(accepted[1]["reservation_of"], accepted[0]["decision_id"])
+
+    def test_a_retry_failure_does_not_spawn_a_second_queue_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            loop = self._loop(Path(name), armed=True)
+            original = next(iter(loop.deferred_intents))
+            loop.broker.review_order = lambda request: (_ for _ in ()).throw(  # type: ignore[method-assign]
+                RuntimeError("still unavailable")
+            )
+
+            self.assertEqual(loop.flush_deferred(), 0)
+
+            self.assertEqual(list(loop.deferred_intents), [original])
 
 
 def _intent() -> OrderIntent:

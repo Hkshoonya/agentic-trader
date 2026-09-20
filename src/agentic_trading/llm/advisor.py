@@ -19,9 +19,12 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from agentic_trading.llm.client import LlmClient, build_llm_client
+
+if TYPE_CHECKING:
+    from agentic_trading.llm.regime import RegimeGate
 
 SYSTEM_PROMPT = (
     "You are a risk gate for an automated trading agent. You may only VETO a "

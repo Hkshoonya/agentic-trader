@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
 from agentic_trading.llm.client import build_llm_client, load_dotenv
 

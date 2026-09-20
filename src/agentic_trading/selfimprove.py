@@ -21,7 +21,6 @@ from agentic_trading.history import load_bars
 from agentic_trading import jsonio
 from agentic_trading.promotion import (
     Assessment,
-    PromotionPolicy,
     PromotionState,
     apply_assessment,
     assess,
@@ -37,9 +36,7 @@ def autonomy_enabled() -> bool:
     return os.environ.get("AGENTIC_ALLOW_AUTONOMY") == "1"
 
 
-def history_plan(
-    directory: Path, config: Config
-) -> tuple[str, list[str], list[str]]:
+def history_plan(directory: Path, config: Config) -> tuple[str, list[str], list[str]]:
     """Which interval and which symbols the evaluation should read.
 
     The universe is restricted to the operator's whitelist whenever those files
@@ -177,9 +174,7 @@ def evaluate_and_record(
     return assessment, state, events
 
 
-def _primary_assessment(
-    config: Config, policy: Any, search_assessment: Any
-) -> Any:
+def _primary_assessment(config: Config, policy: Any, search_assessment: Any) -> Any:
     """Choose which experiment the promotion gate answers to.
 
     The search tries N genomes and pays for it with a significance bar divided
@@ -190,7 +185,11 @@ def _primary_assessment(
 
     Falls back to the search assessment when no walk-forward report exists yet.
     """
-    from agentic_trading.evidence import read_report
+    from agentic_trading.evidence import (
+        effective_per_order_pct,
+        read_report,
+        with_current_forward,
+    )
     from agentic_trading.limits import load_limits
     from agentic_trading.promotion import assess_walkforward
 
@@ -200,11 +199,14 @@ def _primary_assessment(
         report = None
     if not report:
         return search_assessment
+    report = with_current_forward(config, report)
     stored = load_limits(config.state_dir)
-    live = (
-        float(stored.max_order_pct)
-        if stored is not None
-        else float(config.max_order_pct)
+    policy_size = Decimal(
+        str(stored.max_order_pct if stored is not None else config.max_order_pct)
+    )
+    live = effective_per_order_pct(
+        config,
+        policy_pct=policy_size,
     )
     return assess_walkforward(report, policy, live_per_order_pct=live)
 
@@ -236,9 +238,7 @@ def update_limits(
             config, assessment, current=previous, reset=reset
         )
     else:
-        updated = propose(
-            config, eligible=bool(eligible), current=previous
-        )
+        updated = propose(config, eligible=bool(eligible), current=previous)
     if previous is not None and previous.to_dict() == updated.to_dict():
         return []
     save_limits(config.state_dir, updated)
@@ -258,9 +258,7 @@ def update_limits(
     ]
 
 
-def apply_stage(
-    config: Config, state: PromotionState
-) -> list[dict[str, Any]]:
+def apply_stage(config: Config, state: PromotionState) -> list[dict[str, Any]]:
     """Persist the stage as a run mode and adjust RiskGuard caps for probation."""
     from agentic_trading.runtime import write_mode
 

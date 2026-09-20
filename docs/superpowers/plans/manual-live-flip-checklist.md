@@ -25,9 +25,12 @@ the Agentic account can lose all funds.
 ## Gates (all required)
 
 1. Persist live mode: `agentic-trading flip-mode live --config config/agentic.toml`
-2. Export gate: `export AGENTIC_ALLOW_LIVE=1` (only for the live session)
-3. Session must be permitted by `session_policy` (default `regular` only)
-4. RiskGuard must allow the intent; every placement is preceded by a review call
+2. Export the machine capability: `export AGENTIC_ALLOW_LIVE=1` (only for the
+   supervised live session)
+3. Arm the eligible workspace from the loopback dashboard; this is refused
+   unless the current assessed evidence, stage, costs and kill switch pass
+4. Session must be permitted by `session_policy` (default `regular` only)
+5. RiskGuard must allow the intent; every placement is preceded by a review call
 
 Missing any gate → no place. Revert promptly:
 

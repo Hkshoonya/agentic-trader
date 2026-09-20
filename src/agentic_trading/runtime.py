@@ -6,8 +6,11 @@ Two entry points:
 - :func:`run_daemon` — continuous autonomous loop over a live quote feed with
   session gating, equity refresh, fill reconciliation and error kill-switch
 
-Live placement requires **all** of: mode ``live``, ``AGENTIC_ALLOW_LIVE=1``, a
-session permitted by ``session_policy``, and a RiskGuard allow decision.
+Live placement requires **all** of: mode ``live``, a machine capability switch
+(``AGENTIC_ALLOW_LIVE=1`` for manual operation or
+``AGENTIC_ALLOW_AUTONOMY=1`` for autonomous operation), a currently eligible
+workspace arm file, a session permitted by ``session_policy``, and a RiskGuard
+allow decision. An environment variable alone is never an evidence bypass.
 """
 
 from __future__ import annotations
@@ -74,9 +77,9 @@ def effective_mode(config: Config) -> str:
 def write_mode(state_dir: Path | str, mode: str) -> None:
     if mode not in ("shadow", "live"):
         raise ValueError("mode must be shadow|live")
-    path = Path(state_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    (path / _MODE_FILE).write_text(mode + "\n", encoding="utf-8")
+    from agentic_trading import jsonio
+
+    jsonio.write_text(Path(state_dir) / _MODE_FILE, mode + "\n")
 
 
 def build_guard(config: Config, mode: str) -> RiskGuard:
@@ -149,23 +152,30 @@ def modeled_session(quote: dict) -> str:
 
 
 def quote_is_fresh(quote: dict, *, now: datetime, max_age_seconds: float) -> bool:
-    """True only for quotes observed within ``max_age_seconds`` of ``now``.
+    """True only when both transport and market timestamps are fresh.
 
-    Applied in the live daemon so a restarted process, a stalled collector, or a
-    replayed recording can never drive a real order. Unparseable timestamps fail
-    closed.
+    ``observed_at`` catches a replayed file or a stalled collector. ``quote_at``
+    catches a broker that answered now with an old market snapshot (notably an
+    equity quote outside its session). Checking only the former makes a stale
+    price look fresh merely because the network request just completed.
+    Unparseable, missing and future timestamps fail closed.
     """
-    raw = quote.get("observed_at")
-    if not isinstance(raw, str) or not raw.strip():
-        return False
-    try:
-        observed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if observed.tzinfo is None:
-        observed = observed.replace(tzinfo=timezone.utc)
-    age = (now - observed.astimezone(timezone.utc)).total_seconds()
-    return 0 <= age <= max_age_seconds
+    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    for field in ("observed_at", "quote_at"):
+        raw = quote.get(field)
+        if not isinstance(raw, str) or not raw.strip():
+            return False
+        try:
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        age = (current - stamp.astimezone(timezone.utc)).total_seconds()
+        if not 0 <= age <= max_age_seconds:
+            return False
+    return True
 
 
 def build_order_request(
@@ -308,9 +318,9 @@ class _Loop:
             # here, and an alert must never be able to block one.
             self.journal = NotifyingJournal(self.journal, notifier)
         self.guard = build_guard(config, self.mode)
-        # A month-long window: positions and realized P&L are meant to
-        # accumulate, and only the day-scoped counters belong to one file.
-        self.shadow_book = ShadowBook.from_journal(self.journal, days=30)
+        # Positions and cumulative P&L have no safe expiry window. Replay every
+        # date-named shadow journal; only daily risk counters are day-scoped.
+        self.shadow_book = ShadowBook.from_journal(self.journal, days=None)
         self.guard.attach_shadow_book(self.shadow_book)
         self.guard.load(config.state_dir, self.journal)
         if self.mode == "shadow":
@@ -326,6 +336,11 @@ class _Loop:
         self.open_order_sides: dict[str, set[str]] = {}
         self._exit_pending_noted: set[str] = set()
         self._open_orders_read_at = 0.0
+        # False until an actual read fails. Direct/test callers that have not
+        # polled yet retain the old behaviour; the daemon polls before it lets a
+        # quote reach the strategy. Once a live read fails, writes fail closed
+        # until a later successful read proves no duplicate order is working.
+        self.open_orders_read_failed = False
         self._stopping = False
         self.stage = "shadow"
         self.session_policy = config.session_policy
@@ -384,10 +399,6 @@ class _Loop:
             self.guard.max_order_pct = min(view.max_order_pct, probation_cap)
         else:
             self.guard.max_order_pct = view.max_order_pct
-        # The cap the *evidence* justifies, before the small-account floor is
-        # considered. Kept separately so the floor can never ratchet: it is
-        # always derived from this value, not from its own previous output.
-        self.policy_max_order_pct = Decimal(self.guard.max_order_pct)
         # The agent's stored limits may only ever tighten what the operator set.
         from agentic_trading.limits import apply_to_guard, load_limits, reconcile
 
@@ -397,17 +408,21 @@ class _Loop:
         # unchanged, which is most days.
         reconcile(view)
         apply_to_guard(self.guard, view)
+        # Caps the evidence/confidence ladder currently justifies, before the
+        # small-account floor is considered. Keep both separately so the floor
+        # is re-derived rather than ratcheting its own previous result. These
+        # assignments must follow ``apply_to_guard``: stored confidence limits
+        # can be tighter than the stage/config view.
+        self.policy_max_order_pct = Decimal(str(self.guard.max_order_pct))
+        self.policy_daily_notional_pct = Decimal(str(self.guard.daily_notional_pct))
         stored = load_limits(view.state_dir)
         # Confidence in force right now, so every decision can record the
         # evidence level it was taken under.
-        self.evidence_confidence = float(
-            (stored.confidence if stored else "") or 0.0
-        )
+        self.evidence_confidence = float((stored.confidence if stored else "") or 0.0)
         # The agent may widen trading hours only up to the operator's bound, and
         # only when its own confidence ladder says the evidence earned it.
         self.session_policy = str(
-            (stored.session_policy if stored else "")
-            or self.config.session_policy
+            (stored.session_policy if stored else "") or self.config.session_policy
         )
         self.apply_correlation_policy()
         self.apply_size_floor()
@@ -480,7 +495,11 @@ class _Loop:
         judged it was yesterday's. Re-reading it is a JSON parse and some
         arithmetic, so it costs nothing to do whenever the daemon looks.
         """
-        from agentic_trading.evidence import read_report
+        from agentic_trading.evidence import (
+            effective_per_order_pct,
+            read_report,
+            with_current_forward,
+        )
         from agentic_trading.limits import load_limits
         from agentic_trading.promotion import (
             apply_assessment,
@@ -494,11 +513,19 @@ class _Loop:
         report = read_report(self.config)
         if not report:
             return None
+        report = with_current_forward(self.config, report)
         stored = load_limits(self.config.state_dir)
-        live = float(
-            stored.max_order_pct
-            if stored is not None
-            else self.config.max_order_pct
+        policy_size = Decimal(
+            str(
+                stored.max_order_pct
+                if stored is not None
+                else self.config.max_order_pct
+            )
+        )
+        live = effective_per_order_pct(
+            self.config,
+            policy_pct=policy_size,
+            equity=Decimal(str(self.guard.current_equity or 0)),
         )
         try:
             verdict = assess_walkforward(
@@ -515,19 +542,54 @@ class _Loop:
         previous = {}
         if isinstance(state.last_assessment, dict):
             previous = state.last_assessment
+        previous_evidence = (
+            previous.get("evidence")
+            if isinstance(previous.get("evidence"), dict)
+            else {}
+        )
+        same_evidence = bool(
+            previous_evidence.get("report_key")
+            and previous_evidence.get("report_key")
+            == verdict.evidence.get("report_key")
+        )
         changed = (
             bool(previous.get("eligible")) != bool(verdict.eligible)
             or list(previous.get("reasons") or []) != list(verdict.reasons)
+            or not same_evidence
         )
         if not changed:
+            # A periodic rebuild may reproduce exactly the same measurements
+            # under a new file timestamp. Relink the assessment without calling
+            # apply_assessment: the same evidence must not advance a promotion
+            # streak, but the floor must still know this exact report was read.
+            if previous_evidence.get("report_generated_at") != verdict.evidence.get(
+                "report_generated_at"
+            ):
+                state.last_assessment = verdict.to_dict()
+                save_state(self.config.state_dir, state)
+                event = {
+                    "event": "assessment_relinked",
+                    "report_key": verdict.evidence.get("report_key"),
+                    "report_generated_at": verdict.evidence.get("report_generated_at"),
+                }
+                self.journal.append(event)
+                return event
             return None
         events = apply_assessment(
-            state, verdict, policy_from_config(self.config), equity=self.guard.current_equity
+            state,
+            verdict,
+            policy_from_config(self.config),
+            equity=self.guard.current_equity,
         )
         save_state(self.config.state_dir, state)
         events.extend(update_limits(self.config, assessment=verdict))
         for event in events:
             self.journal.append(event)
+        if any(
+            transition.get("event") in ("promotion", "demotion")
+            for transition in events
+        ):
+            _apply_promotion(self.config, self, self.journal, state)
         event = {
             "event": "assessment_refreshed",
             "eligible": verdict.eligible,
@@ -540,119 +602,167 @@ class _Loop:
         return event
 
     def apply_size_floor(self) -> Optional[dict[str, Any]]:
-        """Raise the per-order cap when the account is too small to place one.
+        """Enable one useful $5 forward entry only after retrospective proof.
 
-        On a $50 account with a 0.92% ceiling the order is $0.46 and the broker
-        minimum is $1.00, so every entry is refused `below_min_notional`. That is
-        the guard being honest, and it is useless if you want to see results: the
-        operator can authorise a higher temporary ceiling
-        (`small_account_max_order_pct`), and this raises the cap to just enough
-        to place one order and no further — then drops it the moment the account
-        clears the minimum on its own.
-
-        Derived, never accumulated: always computed from ``policy_max_order_pct``
-        and the current equity, so it cannot ratchet and it survives restarts.
+        The floor solves a circular problem: a sub-$100 account cannot gather a
+        forward record when its confidence cap produces orders below the useful
+        minimum, but forward evidence is required before live promotion. The
+        escape hatch is deliberately narrow: the exact floor size must first
+        pass every historical, cost, recency, stress and drawdown check; the
+        daily cap then permits at most one such opening entry. It does not skip
+        the separate forward-evidence or live-arming gates.
         """
         from agentic_trading import sizer
+        from agentic_trading.evidence import (
+            effective_small_account_target,
+            retrospective_floor_ready,
+        )
+        from agentic_trading.promotion import load_state
 
-        policy = Decimal(
+        policy_order = Decimal(
             str(getattr(self, "policy_max_order_pct", self.guard.max_order_pct))
         )
-        ceiling = Decimal(str(self.config.small_account_max_order_pct))
+        policy_daily = Decimal(
+            str(
+                getattr(
+                    self,
+                    "policy_daily_notional_pct",
+                    self.guard.daily_notional_pct,
+                )
+            )
+        )
+        order_ceiling = Decimal(str(self.config.small_account_max_order_pct))
+        daily_ceiling = Decimal(str(self.config.small_account_max_daily_pct))
+        if daily_ceiling <= 0:
+            daily_ceiling = order_ceiling
         equity = Decimal(str(self.guard.current_equity or 0))
+        broker_minimum = Decimal(str(self.config.min_order_notional))
+        self._effective_min_order_notional = broker_minimum
         if equity <= 0:
             # Before the first equity refresh there is nothing to divide by, and
             # guessing a size is worse than waiting one cycle.
             return None
 
+        target = effective_small_account_target(self.config)
         margin = Decimal(str(getattr(sizer, "FLOOR_MARGIN", Decimal("0.02"))))
-        minimum = Decimal(str(self.config.min_order_notional))
+        needed = (target * (Decimal(1) + margin)) / equity
+        state = load_state(self.config.state_dir)
+        assessment = (
+            state.last_assessment if isinstance(state.last_assessment, dict) else {}
+        )
+        ready, readiness_blockers = retrospective_floor_ready(self.config, assessment)
+        enabled = order_ceiling > 0 and daily_ceiling > 0
 
-        if ceiling <= 0:
-            # Disabled means off: restore the ladder's cap and say so only if the
-            # floor had been engaged, so switching it off is visible in the
-            # journal but a disabled rule never chatters.
-            self.guard.max_order_pct = policy
-            if not getattr(self, "_size_floor_active", False):
-                return None
+        if not enabled or not ready:
+            self.guard.max_order_pct = policy_order
+            self.guard.daily_notional_pct = policy_daily
+            was_active = bool(getattr(self, "_size_floor_active", False))
+            previous_ready = getattr(self, "_size_floor_ready", None)
             self._size_floor_active = False
             self._size_floor_sufficient = True
+            self._size_floor_ready = ready
+            self._size_floor_signature = None
+            # A disabled default stays silent. An enabled but unqualified floor
+            # is reported once (and whenever readiness changes), so the operator
+            # can distinguish "waiting for evidence" from a broken order path.
+            if not enabled and not was_active:
+                return None
+            if enabled and previous_ready is False and not was_active:
+                return None
             event = {
                 "event": "small_account_mode",
                 "engaged": False,
                 "sufficient": True,
-                "policy_max_order_pct": str(policy),
-                "effective_max_order_pct": str(policy),
+                "forward_floor_ready": ready,
+                "policy_max_order_pct": str(policy_order),
+                "effective_max_order_pct": str(policy_order),
+                "policy_daily_notional_pct": str(policy_daily),
+                "effective_daily_notional_pct": str(policy_daily),
                 "equity": str(equity),
-                "min_order_notional": str(minimum),
-                "small_account_max_order_pct": str(ceiling),
+                "min_order_notional": str(broker_minimum),
+                "target_notional": str(target),
+                "small_account_max_order_pct": str(order_ceiling),
+                "small_account_max_daily_pct": str(daily_ceiling),
+                "readiness_blockers": readiness_blockers,
                 "reason": (
-                    "small-account mode is off; the evidence-compliant cap is "
-                    "back in force"
+                    "small-account mode is disabled; policy caps are in force"
+                    if not enabled
+                    else "the $5 forward floor is held until the exact size "
+                    "passes retrospective, cost, stress and drawdown gates"
                 ),
             }
             self.journal.append(event)
             return event
 
-        effective = sizer.floor_cap(
+        effective_order = sizer.floor_cap(
             equity=equity,
-            policy_cap=policy,
-            min_notional=minimum,
-            max_cap=ceiling,
+            policy_cap=policy_order,
+            min_notional=target,
+            max_cap=order_ceiling,
         )
-        self.guard.max_order_pct = effective
-        engaged = effective > policy
-        # Two different failures look identical from the journal otherwise: a
-        # floor that is engaged and placeable, and one whose authorised ceiling
-        # is still too small for the minimum (a $1.00 order at 2.00% of $50 lands
-        # on exactly $1.00 and rounds a hair under it). Say which one this is.
-        needed = (minimum * (Decimal(1) + margin)) / equity
-        sufficient = bool(effective >= needed)
-        was_active = bool(getattr(self, "_size_floor_active", False))
-        was_sufficient = bool(getattr(self, "_size_floor_sufficient", True))
-        # Only an engagement whose placeability changed is news. An unengaged
-        # floor is not "insufficient" — there is nothing to be insufficient for.
-        if engaged == was_active and (not engaged or sufficient == was_sufficient):
-            return None
+        needs_floor = needed > policy_order
+        effective_daily = policy_daily
+        if needs_floor:
+            # The daily ceiling is an actual ceiling while floor mode is active,
+            # even when the ordinary policy allows more. With equal order/daily
+            # ceilings, one floor-sized entry exhausts the opening budget.
+            effective_daily = min(max(policy_daily, needed), daily_ceiling)
+        sufficient = bool(effective_order >= needed and effective_daily >= needed)
+        if not sufficient:
+            # A ceiling that almost fits the target is not permission for an
+            # almost-target order. Keep the ordinary caps so the effective
+            # minimum below refuses the entry; this is also what the simulator
+            # models when capital falls under the authorized threshold.
+            effective_order = policy_order
+            effective_daily = policy_daily
+        self.guard.max_order_pct = effective_order
+        self.guard.daily_notional_pct = effective_daily
+        self._effective_min_order_notional = target
+        engaged = bool(
+            effective_order != policy_order or effective_daily != policy_daily
+        )
+        signature = (engaged, sufficient, ready, effective_order, effective_daily)
+        previous_signature = getattr(self, "_size_floor_signature", None)
+        self._size_floor_signature = signature
         self._size_floor_active = engaged
-        self._size_floor_sufficient = sufficient if engaged else True
+        self._size_floor_sufficient = sufficient
+        self._size_floor_ready = ready
+        if signature == previous_signature:
+            return None
+
         event = {
             "event": "small_account_mode",
             "engaged": engaged,
             "sufficient": sufficient,
+            "forward_floor_ready": ready,
             "needed_max_order_pct": str(needed.quantize(Decimal("0.000001"))),
-            "policy_max_order_pct": str(policy),
-            "effective_max_order_pct": str(effective),
+            "policy_max_order_pct": str(policy_order),
+            "effective_max_order_pct": str(effective_order),
+            "policy_daily_notional_pct": str(policy_daily),
+            "effective_daily_notional_pct": str(effective_daily),
             "equity": str(equity),
-            "min_order_notional": str(minimum),
-            "small_account_max_order_pct": str(ceiling),
+            "min_order_notional": str(broker_minimum),
+            "target_notional": str(target),
+            "small_account_max_order_pct": str(order_ceiling),
+            "small_account_max_daily_pct": str(daily_ceiling),
             "reason": (
-                (
-                    "the evidence-compliant order is below the broker minimum, so "
-                    "the cap is raised to place one order (this trades outside the "
-                    "size the walk-forward supports)"
-                    if sufficient
-                    else "even the authorised small-account ceiling cannot place "
-                    "an order at this equity: raise small_account_max_order_pct "
-                    f"to at least {needed.quantize(Decimal('0.0001'))}"
-                )
-                if engaged
-                else "the account can now place an evidence-compliant order"
+                "the exact $5 floor passed retrospective gates and is enabled "
+                "for forward collection; live trading still requires the full "
+                "forward gate and arming"
+                if sufficient
+                else "the qualified target cannot fit inside the authorized "
+                "small-account order and daily ceilings; raise "
+                "small_account_max_order_pct and small_account_max_daily_pct "
+                f"to at least {needed.quantize(Decimal('0.0001'))}"
             ),
         }
-        if engaged:
-            # Quote the measured cost of this size from the same report the
-            # promotion gate reads. "You authorised 2.04%" is half a sentence;
-            # "...and the walk-forward measures 8.8% drawdown there, against a
-            # 15% ceiling" is the other half.
-            measured = self._evidence_drawdown(effective)
-            event["drawdown_at_effective_pct"] = measured
-            if measured is not None:
-                event["reason"] = (
-                    f"{event['reason']}; the walk-forward measures "
-                    f"{measured:.2f}% max drawdown at this size, against a 15% "
-                    "ceiling"
-                )
+        measured = self._evidence_drawdown(effective_order)
+        event["drawdown_at_effective_pct"] = measured
+        if measured is not None:
+            event["reason"] = (
+                f"{event['reason']}; walk-forward max drawdown at this size is "
+                f"{measured:.2f}% (15% ceiling)"
+            )
         self.journal.append(event)
         return event
 
@@ -700,15 +810,13 @@ class _Loop:
         current = effective_mode(self.config)
         if target == current:
             return None
-        if not (
-            self.config.autonomy == "auto" and selfimprove.autonomy_enabled()
-        ):
+        if not (self.config.autonomy == "auto" and selfimprove.autonomy_enabled()):
             # Raising risk needs the operator's consent switch.
             event = {
                 "event": "stage_mode_blocked",
                 "stage": state.stage,
                 "mode": current,
-                "hint": "set autonomy = \"auto\" and AGENTIC_ALLOW_AUTONOMY=1",
+                "hint": 'set autonomy = "auto" and AGENTIC_ALLOW_AUTONOMY=1',
             }
             self.journal.append(event)
             return event
@@ -798,7 +906,9 @@ class _Loop:
             entry["consecutive_failures"] = 0
             entry["last_error"] = ""
         else:
-            entry["consecutive_failures"] = int(entry.get("consecutive_failures", 0)) + 1
+            entry["consecutive_failures"] = (
+                int(entry.get("consecutive_failures", 0)) + 1
+            )
             entry["errors"] = int(entry.get("errors", 0)) + 1
             entry["last_error"] = str(error)[:300]
         if detail:
@@ -903,9 +1013,7 @@ class _Loop:
                 "role": "self-evaluation and promotion gate",
                 "kind": "worker",
                 "status": (
-                    "running"
-                    if eval_thread and eval_thread.is_alive()
-                    else "idle"
+                    "running" if eval_thread and eval_thread.is_alive() else "idle"
                 ),
                 "stage": self.stage,
                 "session_policy": self.session_policy,
@@ -967,43 +1075,54 @@ class _Loop:
         the daily rebalance, and it can never emit an exit for a position it
         does not know it has. The runtime owns the truth, so it hands it over.
 
-        The runtime's own shadow book is day-scoped, so "what is held" is taken
-        from the journal across recent days as well, which is where a position
-        opened yesterday actually lives.
+        Shadow truth is the complete simulated-fill replay. Live truth is only
+        the broker's position book: an ``accepted`` live journal record is an
+        approval written before arming/placement and must never become a fill.
         """
         seed = getattr(self.strategy, "seed_positions", None)
         if not callable(seed):
             return
-        held: dict[str, Decimal] = {}
         try:
             if self.mode == "shadow":
-                held.update(dict(self.shadow_book.as_snapshot().held))
+                snapshot = self.shadow_book.as_snapshot()
             else:
-                held.update(dict(self.live_positions().held))
+                snapshot = self.live_positions()
         except Exception as exc:  # noqa: BLE001 — never block start-up
-            self.journal.append({"event": "strategy_seed_failed", "error": str(exc)[:200]})
+            self.journal.append(
+                {"event": "strategy_seed_failed", "error": str(exc)[:200]}
+            )
             return
-        replayed = self.held_from_journal()
-        for symbol, quantity in replayed.items():
-            # The broker view wins when both exist; the journal covers the
-            # positions it has already forgotten (a new day, a restart).
-            held.setdefault(symbol, quantity)
-        if not held:
-            return
-        try:
-            count = seed({symbol: str(quantity) for symbol, quantity in held.items()})
-        except Exception as exc:  # noqa: BLE001
-            self.journal.append({"event": "strategy_seed_failed", "error": str(exc)[:200]})
-            return
-        if count:
+        if snapshot.positions_read_failed:
             self.journal.append(
                 {
-                    "event": "strategy_seeded",
-                    "positions": count,
-                    "from_journal": sorted(replayed),
-                    "mode": self.mode,
+                    "event": "strategy_seed_failed",
+                    "error": "the broker did not return a usable position book",
                 }
             )
+            return
+        held = {
+            symbol: quantity
+            for symbol, quantity in snapshot.held.items()
+            if quantity > 0
+        }
+        current = {symbol: str(quantity) for symbol, quantity in held.items()}
+        try:
+            count = seed(current)
+        except Exception as exc:  # noqa: BLE001
+            self.journal.append(
+                {"event": "strategy_seed_failed", "error": str(exc)[:200]}
+            )
+            return
+        self._strategy_book = current
+        self.journal.append(
+            {
+                "event": "strategy_seeded",
+                "positions": count,
+                "held": sorted(current),
+                "source": "shadow_journal" if self.mode == "shadow" else "broker",
+                "mode": self.mode,
+            }
+        )
 
     def adopt_universe(self, symbols: Iterable[str]) -> bool:
         """Take on a universe the scout has changed — without a restart.
@@ -1018,7 +1137,9 @@ class _Loop:
         A strategy that cannot be rebuilt for the new universe is worse than one
         that is a pass behind, so a failure rolls the change back and says so.
         """
-        adopted = frozenset(str(s).upper() for s in symbols) - self.config.symbol_whitelist
+        adopted = (
+            frozenset(str(s).upper() for s in symbols) - self.config.symbol_whitelist
+        )
         if adopted == self.config.discovered_symbols:
             return False
         previous = self.config.discovered_symbols
@@ -1095,7 +1216,11 @@ class _Loop:
                 }
             )
             return False
-        held = {symbol: quantity for symbol, quantity in snapshot.held.items() if quantity > 0}
+        held = {
+            symbol: quantity
+            for symbol, quantity in snapshot.held.items()
+            if quantity > 0
+        }
         current = {symbol: str(quantity) for symbol, quantity in held.items()}
         if current == self._strategy_book:
             return False
@@ -1149,9 +1274,10 @@ class _Loop:
         held: dict[str, Decimal] = {}
         today = date.today()
         for offset in range(days - 1, -1, -1):
-            path = Path(self.config.journal_dir) / (
-                today - timedelta(days=offset)
-            ).isoformat()
+            path = (
+                Path(self.config.journal_dir)
+                / (today - timedelta(days=offset)).isoformat()
+            )
             file = path.with_suffix(".jsonl")
             if not file.is_file():
                 continue
@@ -1169,7 +1295,11 @@ class _Loop:
                     continue
                 if record.get("event") != "accepted":
                     continue
-                intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+                intent = (
+                    record.get("intent")
+                    if isinstance(record.get("intent"), dict)
+                    else {}
+                )
                 symbol = str(record.get("symbol") or intent.get("symbol") or "").upper()
                 quantity = record.get("quantity") or intent.get("quantity")
                 if not symbol or quantity in (None, ""):
@@ -1286,9 +1416,12 @@ class _Loop:
                     )
                 )
         except Exception as exc:  # noqa: BLE001 — never crash the loop on reads
-            self.journal.append(
-                {"event": "open_orders_read_failed", "error": str(exc)}
-            )
+            self.open_orders_read_failed = True
+            # Throttle a broken remote endpoint just like a successful read.
+            # Leaving this at zero retries on every quote and can turn one
+            # outage into a request storm.
+            self._open_orders_read_at = time.monotonic()
+            self.journal.append({"event": "open_orders_read_failed", "error": str(exc)})
             return
 
         symbols: set[str] = set()
@@ -1314,6 +1447,7 @@ class _Loop:
             )
         self.open_order_symbols = symbols
         self.open_order_sides = sides
+        self.open_orders_read_failed = False
         # A symbol that is no longer working can be noted again if it comes back.
         self._exit_pending_noted &= {
             symbol for symbol, working in sides.items() if "sell" in working
@@ -1408,7 +1542,10 @@ class _Loop:
         *,
         session: str = "regular",
         advised: bool = False,
-    ) -> None:
+        reservation_of: Optional[str] = None,
+        reserved_notional: Decimal = Decimal("0"),
+        deferred_root: Optional[str] = None,
+    ) -> Optional[str]:
         """Take one intent through sizing, judgement, the guard and placement.
 
         ``advised`` says the advisory layer (Jev's entry read, the regime gate,
@@ -1424,6 +1561,22 @@ class _Loop:
         side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
         is_entry = side is Side.BUY
 
+        if self.mode == "live" and self.open_orders_read_failed:
+            # An unknown order book is not an empty order book. Entries could
+            # stack exposure and exits could duplicate a working sell, so no
+            # live write is safe until the broker read recovers.
+            self.journal.append(
+                {
+                    "decision_id": intent.decision_id,
+                    "event": "decision_deferred",
+                    "reason": "open_orders_read_failed",
+                    "symbol": intent.symbol,
+                    "side": side.value,
+                    "hint": "waiting for a successful broker open-order read",
+                }
+            )
+            return RETRY
+
         # Fit entries to the per-order cap before the guard sees them: a small
         # account must trade smaller, not refuse to trade at all.
         if self.config.equity_sizing and is_entry:
@@ -1433,7 +1586,15 @@ class _Loop:
                 intent,
                 equity=self.guard.current_equity,
                 max_order_pct=self.guard.max_order_pct,
-                min_notional=self.config.min_order_notional,
+                min_notional=Decimal(
+                    str(
+                        getattr(
+                            self,
+                            "_effective_min_order_notional",
+                            self.config.min_order_notional,
+                        )
+                    )
+                ),
                 proportional=self.config.sizing == "proportional",
             )
             if sized is None:
@@ -1471,7 +1632,9 @@ class _Loop:
                 )
             intent = sized
 
-        if is_entry and self.orders_today >= self.config.max_orders_per_day:
+        reserved_entry = bool(is_entry and reservation_of)
+        counted_orders = self.orders_today - (1 if reserved_entry else 0)
+        if is_entry and counted_orders >= self.config.max_orders_per_day:
             self._journal_rejected(intent, "max_orders_per_day", Decimal("0"))
             return
         if is_entry:
@@ -1481,7 +1644,9 @@ class _Loop:
             )
 
             share = float(getattr(self.config, "max_cost_share_of_order", 0) or 0)
-            required = required_notional_for_cost(self.config.state_dir, max_share=share)
+            required = required_notional_for_cost(
+                self.config.state_dir, max_share=share
+            )
             notional = intent.resolved_notional()
             if required and notional < Decimal(str(required)):
                 cost = measured_cost_usd(self.config.state_dir) or 0.0
@@ -1571,8 +1736,7 @@ class _Loop:
             if blocked is not None:
                 self._journal_rejected(
                     intent,
-                    f"regime_block: {blocked.regime} "
-                    f"c={blocked.confidence:.2f}"[:120],
+                    f"regime_block: {blocked.regime} c={blocked.confidence:.2f}"[:120],
                     intent.resolved_notional(),
                 )
                 return
@@ -1620,7 +1784,9 @@ class _Loop:
                 if decision.vetoes and is_entry:
                     self._journal_rejected(
                         intent,
-                        f"llm_veto: {decision.reason}" if decision.reason else "llm_veto",
+                        f"llm_veto: {decision.reason}"
+                        if decision.reason
+                        else "llm_veto",
                         intent.resolved_notional(),
                         advisor=advisor_payload,
                     )
@@ -1657,7 +1823,13 @@ class _Loop:
                 return RETRY
 
         try:
-            decision = self.guard.evaluate(intent, snapshot)
+            decision = self.guard.evaluate(
+                intent,
+                snapshot,
+                reserved_notional=(
+                    reserved_notional if reserved_entry else Decimal("0")
+                ),
+            )
         except ValueError as exc:
             self._journal_rejected(
                 intent, f"guard_error: {exc}", Decimal("0"), advisor=advisor_payload
@@ -1713,7 +1885,8 @@ class _Loop:
             self.note_error("review_failed", exc)
             # The judgement is done and the guard said yes; only the broker call
             # failed. Hold it rather than making the strategy re-decide.
-            self.defer_intent(intent, session=session, why="review_failed")
+            if deferred_root is None:
+                self.defer_intent(intent, session=session, why="review_failed")
             return RETRY
         self.journal.append(
             {
@@ -1739,10 +1912,12 @@ class _Loop:
                 "ref_price": (
                     str(intent.ref_price) if intent.ref_price is not None else None
                 ),
+                "reservation_of": reservation_of,
             }
         )
-        self.guard.record_accepted(intent)
-        self.orders_today += 1
+        if is_entry and not reserved_entry:
+            self.guard.record_accepted(intent)
+            self.orders_today += 1
 
         if self.mode == "shadow":
             # NEVER place_order when mode == shadow
@@ -1775,17 +1950,25 @@ class _Loop:
                     {
                         "decision_id": intent.decision_id,
                         "event": "live_gate_blocked",
-                        "reason": "AGENTIC_ALLOW_LIVE_not_set",
+                        "reason": self.submission_gate_reason(),
                         "symbol": intent.symbol,
                         "side": side.value,
                         "notional": str(decision.notional),
                         "stage": self.stage,
-                        "hint": "arm with AGENTIC_ALLOW_LIVE=1 in the daemon environment",
+                        "hint": (
+                            "enable the machine submission capability and arm "
+                            "the workspace after its evidence gate passes"
+                        ),
                     }
                 )
                 # Everything passed except the operator's switch. Keep the
                 # decision; if the switch closes later, the order still stands.
-                self.defer_intent(intent, session=session, why="not_armed")
+                self.defer_intent(
+                    intent,
+                    session=session,
+                    why="not_armed",
+                    reserved_notional=decision.notional,
+                )
             self.guard.persist(self.config.state_dir)
             # The evidence gate and the broker both said yes; only the operator's
             # arming switch is closed. If they arm it later today, the decision
@@ -1815,6 +1998,13 @@ class _Loop:
         try:
             result = self.broker.place_order(request)
         except Exception as exc:  # noqa: BLE001 — record and count the failure
+            # A transport failure does not prove the broker rejected the order:
+            # it may have accepted the write and lost only the response. Treat
+            # the order book as unknown immediately, so another intent in this
+            # cycle cannot submit a duplicate. The daemon forces a fresh broker
+            # read on the next cycle before allowing any more live writes.
+            self.open_orders_read_failed = True
+            self._open_orders_read_at = 0.0
             self.journal.append(
                 {
                     "decision_id": intent.decision_id,
@@ -1861,9 +2051,10 @@ class _Loop:
         if (now - getattr(self, "_last_auto_arm_at", 0.0)) < 30.0:
             return None
         self._last_auto_arm_at = now
-        enabled = bool(self.config.auto_arm) and os.environ.get(
-            "AGENTIC_ALLOW_AUTONOMY"
-        ) == "1"
+        enabled = (
+            bool(self.config.auto_arm)
+            and os.environ.get("AGENTIC_ALLOW_AUTONOMY") == "1"
+        )
         try:
             event = arming.maybe_auto_arm(
                 self.config.state_dir,
@@ -1871,9 +2062,7 @@ class _Loop:
                 min_interval_hours=self.config.auto_arm_min_interval_hours,
             )
         except Exception as exc:  # noqa: BLE001 — never kill the loop
-            self.journal.append(
-                {"event": "auto_arm_failed", "error": str(exc)[:200]}
-            )
+            self.journal.append({"event": "auto_arm_failed", "error": str(exc)[:200]})
             return None
         if event is None:
             return None
@@ -1896,22 +2085,44 @@ class _Loop:
         )
 
     def armed_for_submission(self) -> bool:
-        """May this session submit? Environment switch **or** the console's arm.
+        """May this session submit? Machine capability **and** eligible arm.
 
-        The environment variable remains the stronger switch and still works
-        alone. The file is the console's equivalent, scoped to this workspace —
-        so copying a workspace cannot arm another machine, which is the property
-        that made the environment-only design worth keeping.
+        The environment says this machine may ever submit; the workspace latch
+        says this strategy has passed its current evidence, cost, stage, and
+        kill-switch checks. Requiring both means neither a copied workspace nor
+        a stale service environment can place an order by itself.
         """
-        if os.environ.get("AGENTIC_ALLOW_LIVE") == "1":
-            return True
+        capability = (
+            os.environ.get("AGENTIC_ALLOW_LIVE") == "1"
+            or os.environ.get("AGENTIC_ALLOW_AUTONOMY") == "1"
+        )
+        if not capability:
+            return False
         from agentic_trading.arming import is_armed
 
-        return is_armed(self.config.state_dir)
+        return bool(is_armed(self.config.state_dir))
+
+    def submission_gate_reason(self) -> str:
+        capability = (
+            os.environ.get("AGENTIC_ALLOW_LIVE") == "1"
+            or os.environ.get("AGENTIC_ALLOW_AUTONOMY") == "1"
+        )
+        return (
+            "workspace_not_eligible_or_armed"
+            if capability
+            else "submission_capability_not_enabled"
+        )
 
     # -- intents that passed everything but could not be submitted ---------
 
-    def defer_intent(self, intent: OrderIntent, *, session: str, why: str) -> None:
+    def defer_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        session: str,
+        why: str,
+        reserved_notional: Decimal = Decimal("0"),
+    ) -> None:
         """Park an intent that cleared every judgement but hit a mechanical wall.
 
         Two things land here: an order the evidence gate and the broker both
@@ -1933,6 +2144,7 @@ class _Loop:
             "why": why,
             "at": time.monotonic(),
             "attempts": 0,
+            "reserved_notional": Decimal(str(reserved_notional)),
         }
 
     def flush_deferred(self) -> int:
@@ -1975,8 +2187,14 @@ class _Loop:
                     "retry_of": decision_id,
                 },
             )
+            reserved = Decimal(str(entry.get("reserved_notional") or "0"))
             outcome = self.process_intent(
-                retry, session=str(entry["session"]), advised=True
+                retry,
+                session=str(entry["session"]),
+                advised=True,
+                reservation_of=decision_id if reserved > 0 else None,
+                reserved_notional=reserved,
+                deferred_root=decision_id,
             )
             # Written *after* the attempt, and keyed on the original decision:
             # a record carrying the retry's own id would make the idempotency
@@ -2123,7 +2341,9 @@ class _Loop:
         payload["source"] = "live"
         return payload
 
-    def market_features(self, symbol: str, quote: Optional[dict[str, Any]] = None) -> Any:
+    def market_features(
+        self, symbol: str, quote: Optional[dict[str, Any]] = None
+    ) -> Any:
         """Bars-derived features, memoised briefly: the tape does not change
         between two intents a second apart, and re-reading a symbol's file for
         every intent is pure overhead."""
@@ -2178,11 +2398,25 @@ class _Loop:
         ]
 
     def _count_orders_today(self) -> int:
-        count = 0
+        reservations: set[str] = set()
+        anonymous = 0
         for record in self.journal.iter_today():
-            if record.get("event") in ("accepted", "placed"):
-                count += 1
-        return count
+            if record.get("event") != "accepted":
+                continue
+            intent = record.get("intent")
+            side = record.get("side")
+            if side is None and isinstance(intent, dict):
+                side = intent.get("side")
+            # Unknown legacy acceptances count conservatively as entries; a
+            # known sell never consumes the entry limit.
+            if str(side or "buy").lower() == "sell":
+                continue
+            root = str(record.get("reservation_of") or record.get("decision_id") or "")
+            if root:
+                reservations.add(root)
+            else:
+                anonymous += 1
+        return len(reservations) + anonymous
 
 
 def run_loop(
@@ -2505,6 +2739,10 @@ def run_daemon(
                         name="self-evaluation",
                     )
                     loop.eval_thread.start()
+                    # Shutdown must join every writer. Without tracking this
+                    # one, it could keep writing evidence/state after the
+                    # daemon returned (and made temporary workspaces flaky).
+                    workers.append(loop.eval_thread)
             now = time.monotonic()
             if (now - last_equity_at) >= config.equity_refresh_seconds:
                 loop.refresh_equity()
@@ -2535,9 +2773,7 @@ def run_daemon(
                             "backcheck",
                             ok=report.healthy,
                             detail={
-                                "ok": sum(
-                                    1 for c in report.checks if c.status == "ok"
-                                ),
+                                "ok": sum(1 for c in report.checks if c.status == "ok"),
                                 "failed": [c.name for c in report.failures],
                             },
                             error="a check failed" if not report.healthy else "",
@@ -2546,9 +2782,7 @@ def run_daemon(
                             {
                                 "event": "selfcheck",
                                 "healthy": report.healthy,
-                                "ok": sum(
-                                    1 for c in report.checks if c.status == "ok"
-                                ),
+                                "ok": sum(1 for c in report.checks if c.status == "ok"),
                                 "warnings": [c.to_dict() for c in report.warnings],
                                 "failures": [c.to_dict() for c in report.failures],
                             }
@@ -2642,8 +2876,7 @@ def run_daemon(
                     # and a strategy that is still being built must never be
                     # handed a quote.
                     _loop.pending_universe = [
-                        str(symbol).upper()
-                        for symbol in (report.get("adopted") or [])
+                        str(symbol).upper() for symbol in (report.get("adopted") or [])
                     ]
 
                 loop.discovery_thread = threading.Thread(  # type: ignore[attr-defined]
@@ -2692,10 +2925,15 @@ def run_daemon(
                         filled = _loop.refresh_entry_context()
                         if filled:
                             _loop.journal.append(
-                                {"event": "entry_context", "refreshed": filled,
-                                 "model": getattr(
-                                     getattr(_loop, "entry_advisor", None), "model", ""
-                                 )}
+                                {
+                                    "event": "entry_context",
+                                    "refreshed": filled,
+                                    "model": getattr(
+                                        getattr(_loop, "entry_advisor", None),
+                                        "model",
+                                        "",
+                                    ),
+                                }
                             )
                     except Exception as exc:  # noqa: BLE001 — advisory only
                         _loop.journal.append(
@@ -2748,6 +2986,7 @@ def run_daemon(
                 )
 
             cycle_had_error = False
+            errors_before_quotes = loop.consecutive_errors
             for quote in fresh:
                 if loop.should_stop():
                     break
@@ -2757,11 +2996,16 @@ def run_daemon(
                     cycle_had_error = True
                     loop.note_error("loop_error", exc)
 
-            # A tick that raised is counted; a cycle that raises nothing is
-            # evidence the connection is back. Without this reset, three
-            # transient errors spread across an outage would accumulate into a
-            # kill switch and stop the agent until a human cleared it.
-            if loop.consecutive_errors and not cycle_had_error:
+            # A tick that raised is counted, and broker failures handled inside
+            # the order path also increment ``consecutive_errors``. Only a
+            # cycle that recorded no new error is evidence the connection is
+            # back. Resetting merely because _place caught its own exception
+            # made the consecutive-error kill switch ineffective across cycles.
+            if (
+                loop.consecutive_errors
+                and not cycle_had_error
+                and loop.consecutive_errors == errors_before_quotes
+            ):
                 loop.journal.append(
                     {
                         "event": "error_streak_cleared",
@@ -2875,7 +3119,7 @@ def save_evaluation_state(config: Any, payload: dict[str, Any]) -> None:
 def _apply_promotion(
     config: Config, loop: _Loop, journal: DecisionJournal, state: Any
 ) -> None:
-    """Flip the run mode and record it, for any path that advanced a stage.
+    """Apply a promotion or evidence demotion to the running mode.
 
     Two paths can promote — the scheduled search and the walk-forward regrade —
     and they must not each own their own copy of this. The regrade path used to
@@ -2884,12 +3128,15 @@ def _apply_promotion(
     """
     from agentic_trading import selfimprove
 
-    if config.autonomy != "auto" or not selfimprove.autonomy_enabled():
+    lowering_risk = state.stage == "shadow"
+    if not lowering_risk and (
+        config.autonomy != "auto" or not selfimprove.autonomy_enabled()
+    ):
         journal.append(
             {
                 "event": "promotion_requires_consent",
                 "stage": state.stage,
-                "hint": "set autonomy = \"auto\" and AGENTIC_ALLOW_AUTONOMY=1",
+                "hint": 'set autonomy = "auto" and AGENTIC_ALLOW_AUTONOMY=1',
             }
         )
         return
@@ -2929,9 +3176,10 @@ def _propose_system_changes(
         loop.note_agent(
             "evolution",
             ok=True,
-            detail={"proposed": len(proposals), "pending": len(
-                evolve_system.read(config).get("proposals") or []
-            )},
+            detail={
+                "proposed": len(proposals),
+                "pending": len(evolve_system.read(config).get("proposals") or []),
+            },
         )
     else:
         loop.note_agent("evolution", ok=True, detail={"proposed": 0})
@@ -3013,7 +3261,11 @@ def _regrade_from_evidence(
     report and only reports when the report itself changed.
     """
     from agentic_trading import selfimprove
-    from agentic_trading.evidence import read_report
+    from agentic_trading.evidence import (
+        effective_per_order_pct,
+        read_report,
+        with_current_forward,
+    )
     from agentic_trading.limits import load_limits
     from agentic_trading.promotion import (
         apply_assessment,
@@ -3030,14 +3282,18 @@ def _regrade_from_evidence(
         return
     if not report:
         return
+    report = with_current_forward(config, report)
     policy = policy_from_config(config)
     state = load_state(config.state_dir)
     previous = (state.last_assessment or {}).get("evidence") or {}
     stored = load_limits(config.state_dir)
-    live = (
-        float(stored.max_order_pct)
-        if stored is not None
-        else float(config.max_order_pct)
+    policy_size = Decimal(
+        str(stored.max_order_pct if stored is not None else config.max_order_pct)
+    )
+    live = effective_per_order_pct(
+        config,
+        policy_pct=policy_size,
+        equity=Decimal(str(loop.guard.current_equity or 0)),
     )
     assessment = assess_walkforward(report, policy, live_per_order_pct=live)
     # Grade the *evidence*, not the file. Re-running walkforward on the same
@@ -3078,7 +3334,7 @@ def _regrade_from_evidence(
             "stage": loop.stage,
         }
     )
-    if any(event.get("event") == "promotion" for event in events):
+    if any(event.get("event") in ("promotion", "demotion") for event in events):
         _apply_promotion(config, loop, journal, state)
 
 
@@ -3121,13 +3377,17 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
             for reset_event in selfimprove.update_limits(config, reset=True):
                 journal.append(reset_event)
             loop.set_mode("shadow")
-            journal.append({"event": "autonomy_applied", "stage": "shadow", "mode": "shadow"})
+            journal.append(
+                {"event": "autonomy_applied", "stage": "shadow", "mode": "shadow"}
+            )
             return
 
     # 2. Re-evolve on a schedule.
     now = time.monotonic()
     interval = config.evolution_interval_minutes * 60
-    if interval <= 0 or (loop.last_evolution_at and (now - loop.last_evolution_at) < interval):
+    if interval <= 0 or (
+        loop.last_evolution_at and (now - loop.last_evolution_at) < interval
+    ):
         return
     loop.last_evolution_at = now
 
@@ -3145,11 +3405,7 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                 from agentic_trading.history_sync import sync_history
 
                 results, errors = sync_history(config, loop.broker)
-                flagged = [
-                    result.to_dict()
-                    for result in results
-                    if result.issues
-                ]
+                flagged = [result.to_dict() for result in results if result.issues]
                 journal.append(
                     {
                         "event": "history_sync",
@@ -3185,7 +3441,9 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                 )
             except Exception as exc:  # noqa: BLE001 — never kill the loop
                 loop.note_agent("data", ok=False, error=str(exc))
-                journal.append({"event": "history_sync_failed", "error": str(exc)[:200]})
+                journal.append(
+                    {"event": "history_sync_failed", "error": str(exc)[:200]}
+                )
 
             # Correlations and execution costs are recomputed on the same
             # cadence as the data: both are derived from it.
@@ -3215,9 +3473,7 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                         "strongest": [
                             {"pair": name, "corr": value} for name, value in strongest
                         ],
-                        "max_correlated_positions": (
-                            config.max_correlated_positions
-                        ),
+                        "max_correlated_positions": (config.max_correlated_positions),
                     }
                 )
             except Exception as exc:  # noqa: BLE001 — never kill the loop
@@ -3266,9 +3522,7 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
             }
         )
     except Exception as exc:  # noqa: BLE001 — never kill the loop
-        journal.append(
-            {"event": "execution_costs_failed", "error": str(exc)[:200]}
-        )
+        journal.append({"event": "execution_costs_failed", "error": str(exc)[:200]})
 
     if config.history_path is not None:
         from agentic_trading.history_sync import fingerprint
@@ -3344,7 +3598,9 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
     )
 
     # 3. Apply a promotion only with explicit operator consent.
-    promoted = any(event.get("event") == "promotion" for event in events)
-    if not promoted:
+    transitioned = any(
+        event.get("event") in ("promotion", "demotion") for event in events
+    )
+    if not transitioned:
         return
     _apply_promotion(config, loop, journal, promotion_state)

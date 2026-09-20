@@ -70,12 +70,23 @@ the agent may do by itself:
 | Switch | Where | What it allows |
 |---|---|---|
 | **Autonomy** | checkbox in the window (`AGENTIC_ALLOW_AUTONOMY=1`) | the agent may promote/demote itself as evidence changes |
-| **Arm live** | *Arm live trading…* → type `ARM` (`AGENTIC_ALLOW_LIVE=1`) | real orders may be submitted to the broker |
+| **Arm live** | *Arm live trading…* → type `ARM` | enables the machine capability and requests the evidence-gated workspace latch |
 
-Both are per-session environment, deliberately not configuration files: a copy
-of the app sitting on someone else's computer starts inert, whatever the state
-files say. Unarmed, a promoted agent journals `live_gate_blocked` with the order
-it wanted instead of placing it.
+The machine capabilities are per-session environment, deliberately not config
+files. Real submission also requires the workspace latch, which the launcher
+will write only when current evidence is eligible and the runtime revalidates on
+every use. A copied app or stale environment therefore starts inert unless both
+independent halves pass. Unarmed, a promoted agent journals `live_gate_blocked`.
+
+The shipped template also contains a $5 small-account **shadow research** floor.
+It does not raise the cap merely because the balance is below $100: the exact
+approximately $5.10 size must first pass current historical, recent-fold,
+doubled-cost, significance and 15% drawdown checks. Equal 11% order/day ceilings
+permit one such opening per day, and the report models it as a fixed-dollar
+target rather than compounding the initial account percentage. The
+highest-ranked eligible signal gets that scarce slot. Live submission still
+requires the complete 30-trade/30-day positive forward record, promotion, and
+both switches above.
 
 ## Where things live
 

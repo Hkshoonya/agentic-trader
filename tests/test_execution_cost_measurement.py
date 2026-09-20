@@ -68,6 +68,18 @@ class RoundTripMeasurementTests(unittest.TestCase):
 
 
 class CostAwareSizingTests(unittest.TestCase):
+    def test_a_measured_round_trip_becomes_a_fixed_fee_model(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            execution.record_round_trip(
+                state, symbol="XLM-USD", buy_notional=5.00, sell_notional=4.90
+            )
+
+            model = execution.cost_model_for(state)
+
+            self.assertEqual(model.per_side_bps, Decimal("0"))
+            self.assertEqual(model.fee_per_order, Decimal("0.05"))
+
     def test_the_smallest_order_that_can_absorb_the_measured_cost(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             state = Path(name)

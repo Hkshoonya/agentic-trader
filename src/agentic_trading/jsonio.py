@@ -43,7 +43,7 @@ def write_text(path: Path | str, text: str, *, mode: int = 0o600) -> None:
     atomic on POSIX, so a reader sees either the old file or the new one.
     """
     destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(
         dir=str(destination.parent), prefix=f".{destination.name}.", suffix=".tmp"
     )

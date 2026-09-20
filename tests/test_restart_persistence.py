@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from decimal import Decimal
+import stat
 from pathlib import Path
 
 from agentic_trading.config import load_config
@@ -62,6 +63,12 @@ class RestartPersistenceTests(unittest.TestCase):
 
             self.assertEqual(load_state(config.state_dir).stage, "probation")
             self.assertEqual(load_state(config.state_dir).streak, 2)
+            self.assertEqual(
+                stat.S_IMODE((Path(config.state_dir) / "mode").stat().st_mode), 0o600
+            )
+            self.assertEqual(
+                stat.S_IMODE(Path(config.state_dir).stat().st_mode), 0o700
+            )
 
     def test_the_risk_budget_survives_a_restart_and_still_binds_the_guard(self) -> None:
         with tempfile.TemporaryDirectory() as name:

@@ -32,7 +32,11 @@ PKCE: S256. Public client (no client secret). Scope: `internal`.
    - Writes `tools_snapshot_path` + dated sibling.
 5. **Shadow run:** `agentic-trading run --config config/agentic.toml`  
    - Default is shadow (review/simulate only; no place).  
-   - Live requires `flip-mode live` **and** `AGENTIC_ALLOW_LIVE=1`.
+   - Live submission requires `flip-mode live`, a machine capability
+     (`AGENTIC_ALLOW_LIVE=1` for supervised operation or
+     `AGENTIC_ALLOW_AUTONOMY=1` for autonomous operation), **and** the current
+     evidence-gated workspace arm latch. An environment variable alone cannot
+     submit an order.
 
 ## If auth fails
 

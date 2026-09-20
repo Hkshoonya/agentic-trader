@@ -63,6 +63,8 @@ class TrendCryptoStrategy:
         # Holdings are keyed the way the bar files are (BTCUSD), and are only
         # ever changed by a *reported fill* — never by emitting an intent.
         self._quantities: dict[str, Decimal] = {}
+        self._last_decision_dates: dict[str, str] = {}
+        # Most recent key, retained for older dashboards and state readers.
         self._last_decision_date = ""
         # The day the *runtime* last saw a rebalance from this strategy. The
         # runtime reads it to ask for a retry when the day's intents could not
@@ -99,7 +101,28 @@ class TrendCryptoStrategy:
                     continue
                 if quantity > 0:
                     self._quantities[self._key(symbol)] = quantity
-        self._last_decision_date = str(payload.get("last_decision_date", ""))
+        stored_dates = payload.get("last_decision_dates")
+        if isinstance(stored_dates, dict):
+            self._last_decision_dates = {
+                str(book): str(day)
+                for book, day in stored_dates.items()
+                if str(book) in ("crypto", "equity") and str(day)
+            }
+        legacy = str(payload.get("last_decision_date", ""))
+        self._last_decision_date = legacy
+        if legacy and not self._last_decision_dates:
+            if ":" in legacy:
+                book, day = legacy.split(":", 1)
+                if book in ("crypto", "equity") and day:
+                    self._last_decision_dates[book] = day
+            else:
+                # Old state pre-dates the book split. Conservatively treat both
+                # books as already decided that day instead of duplicating risk
+                # after an upgrade/restart.
+                self._last_decision_dates = {
+                    "crypto": legacy,
+                    "equity": legacy,
+                }
 
     def _save_state(self) -> None:
         if self.state_path is None:
@@ -108,12 +131,11 @@ class TrendCryptoStrategy:
 
         payload = {
             "last_decision_date": self._last_decision_date,
+            "last_decision_dates": dict(self._last_decision_dates),
             "quantities": {key: str(value) for key, value in self._quantities.items()},
         }
         try:
-            jsonio.write_text(
-                self.state_path, jsonio.dumps(payload, indent=2) + "\n"
-            )
+            jsonio.write_text(self.state_path, jsonio.dumps(payload, indent=2) + "\n")
         except OSError:
             return
 
@@ -124,13 +146,11 @@ class TrendCryptoStrategy:
         which positions need exits, and so the strategy cannot believe it holds
         something that was vetoed or never filled.
 
-        An **empty** view is treated as "no information" rather than "you hold
-        nothing": the runtime's shadow book is day-scoped, so it is legitimately
-        empty at the start of a new day, and wiping the strategy's remembered
-        positions on that basis would strand exactly the exits we need.
+        The view is authoritative, including an empty one. The runtime now
+        rebuilds the complete shadow history and treats a failed live position
+        read separately, so an empty mapping means the account is flat. Keeping
+        old quantities here would create phantom exits after a position closed.
         """
-        if not positions:
-            return 0
         seeded = 0
         reconciled: dict[str, Decimal] = {}
         for symbol, quantity in (positions or {}).items():
@@ -147,15 +167,16 @@ class TrendCryptoStrategy:
 
     # -- signal ----------------------------------------------------------
 
-    def target_weights(
-        self, *, as_of: Optional[datetime] = None
-    ) -> dict[str, Decimal]:
+    def target_weights(self, *, as_of: Optional[datetime] = None) -> dict[str, Decimal]:
         """The book the rule wants: ``{bar-file symbol: inverse-vol weight}``.
 
         The weight is ``min(MAX_LEVERAGE, TARGET_VOL / sigma)`` — 1.0 for a
         20%-vol asset, lower for wilder ones. Ranking uses vote × weight, and the
-        runtime sizes each entry by the weight, so a 60%-vol pair ends up with a
-        third of the dollars a 20%-vol name gets instead of the same amount.
+        runtime normally sizes each entry by the weight, so a 60%-vol pair gets
+        a third of the dollars a 20%-vol name gets. At the fixed-dollar
+        small-account minimum, weights cannot shrink an order below that
+        minimum; the score instead determines which signal gets the scarce
+        daily slot first.
         """
         cutoff = as_of or datetime.now(timezone.utc)
         scored: list[tuple[float, str, float]] = []
@@ -176,7 +197,7 @@ class TrendCryptoStrategy:
             if size <= 0:
                 continue
             scored.append((vote * size, symbol, size))
-        scored.sort(reverse=True)
+        scored.sort(key=lambda item: (-item[0], item[1]))
         return {
             symbol: Decimal(str(round(size, 6)))
             for _, symbol, size in scored[: self.max_positions]
@@ -251,7 +272,8 @@ class TrendCryptoStrategy:
         def in_same_book(key: str) -> bool:
             return is_crypto_symbol(key) == is_crypto
 
-        targets = set(self.target_symbols(as_of=stamp))
+        ranked_targets = self.target_symbols(as_of=stamp)
+        targets = set(ranked_targets)
         intents: list[OrderIntent] = []
 
         held = {key for key in self._held if in_same_book(key)}
@@ -286,13 +308,17 @@ class TrendCryptoStrategy:
             # Nothing to decide: this book can only be ordered while its session
             # is open, and the exits above have already been considered.
             return intents
-        if decision_key == self._last_decision_date:
+        if self._last_decision_dates.get(book) == day:
             return intents
 
+        self._last_decision_dates[book] = day
         self._last_decision_date = decision_key
         self.last_decided_day = decision_key
         self._save_state()  # a restart must not re-run today's entries
-        entering = sorted(wanted - held)
+        # The daily cap may admit only one useful small-account order, so intent
+        # order is material: emit the strategy's highest-ranked candidate first
+        # instead of alphabetically donating the budget to an arbitrary ticker.
+        entering = [key for key in ranked_targets if key in wanted and key not in held]
         weights = self.target_weights(as_of=stamp)
         for new_symbol in entering:
             price = quote.get("ask") if new_symbol == symbol else None
@@ -310,8 +336,9 @@ class TrendCryptoStrategy:
                     ref_price=Decimal(str(price)),
                     reason="trend_entry",
                     created_at=stamp,
-                    # The same weight the ranking used, so the dollars match the
-                    # conviction instead of every symbol getting the same size.
+                    # The same weight the ranking used. It scales ordinary
+                    # orders; at the small-account minimum, rank decides which
+                    # candidate gets the one useful daily slot first.
                     weight=weights.get(new_symbol),
                 )
             )
@@ -334,9 +361,14 @@ class TrendCryptoStrategy:
         control. It is also never released once anything was placed, so a retry
         cannot buy the same symbol twice.
         """
-        if not day or day != self._last_decision_date:
+        if not day or ":" not in day:
             return False
-        self._last_decision_date = ""
+        book, decided_day = day.split(":", 1)
+        if self._last_decision_dates.get(book) != decided_day:
+            return False
+        self._last_decision_dates.pop(book, None)
+        if self._last_decision_date == day:
+            self._last_decision_date = ""
         self.last_decided_day = ""
         self._save_state()
         return True

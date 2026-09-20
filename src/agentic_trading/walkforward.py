@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import math
 import random
+import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -33,6 +34,42 @@ from agentic_trading.history import Bar
 TARGET_VOL = 0.20
 MAX_LEVERAGE = 1.5
 EWMA_LAMBDA = 0.94
+
+
+@dataclass(frozen=True)
+class SmallAccountFloor:
+    """Runtime small-account sizing inputs reproduced by the simulator.
+
+    The live loop does not keep a $5 order at a fixed percentage of equity. It
+    recomputes the percentage needed for the same dollar target, and its daily
+    cap can limit how many such entries are accepted. Keeping those inputs as a
+    first-class object prevents the evidence report from accidentally testing a
+    compounding percentage book while the daemon runs a fixed-dollar book.
+    """
+
+    target_notional: float
+    policy_per_order_pct: float
+    policy_daily_notional_pct: float
+    max_order_pct: float
+    max_daily_notional_pct: float
+    margin: float = 0.02
+    proportional: bool = False
+
+    @property
+    def sized_notional(self) -> float:
+        return self.target_notional * (1.0 + self.margin)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target_notional": self.target_notional,
+            "sized_notional": self.sized_notional,
+            "margin": self.margin,
+            "policy_per_order_pct": self.policy_per_order_pct,
+            "policy_daily_notional_pct": self.policy_daily_notional_pct,
+            "max_order_pct": self.max_order_pct,
+            "max_daily_notional_pct": self.max_daily_notional_pct,
+            "proportional": self.proportional,
+        }
 
 
 @dataclass
@@ -54,7 +91,11 @@ class WalkForwardResult:
     profit_factor: float = 0.0
     max_drawdown_pct: float = 0.0
     final_equity: float = 0.0
+    return_pct: float = 0.0
     bootstrap_p_value: float = 1.0
+    significance_method: str = "moving_block_bootstrap_daily_account_returns"
+    significance_observations: int = 0
+    significance_block_days: int = 20
     alpha: float = 0.05
 
     @property
@@ -62,6 +103,7 @@ class WalkForwardResult:
         return (
             self.trades >= 30
             and self.expectancy_bps > 1.0
+            and self.return_pct > 0.0
             and self.bootstrap_p_value <= self.alpha
             and self.max_drawdown_pct <= 15.0
         )
@@ -77,7 +119,11 @@ class WalkForwardResult:
             "profit_factor": round(self.profit_factor, 4),
             "max_drawdown_pct": round(self.max_drawdown_pct, 3),
             "final_equity": round(self.final_equity, 4),
+            "return_pct": round(self.return_pct, 4),
             "bootstrap_p_value": round(self.bootstrap_p_value, 4),
+            "significance_method": self.significance_method,
+            "significance_observations": self.significance_observations,
+            "significance_block_days": self.significance_block_days,
             "eligible": self.eligible,
         }
 
@@ -93,7 +139,9 @@ def _vol(closes: list[float]) -> Optional[float]:
     ]
     if len(rets) < 20:
         return None
-    var = sum(value * value for value in rets) / len(rets) or 1e-6
+    # Keep this byte-for-byte equivalent in meaning to the production strategy:
+    # evidence must rank the same symbols, not a research approximation.
+    var = statistics.pvariance(rets) or 1e-6
     for value in rets:
         var = EWMA_LAMBDA * var + (1 - EWMA_LAMBDA) * value * value
     return math.sqrt(var * 252)
@@ -147,24 +195,29 @@ def rank_targets(
         elif not sigma:
             row["reason"] = "no usable volatility estimate"
         else:
-            row["reason"] = (
-                f"vote {vote:.2f} ({sum(votes)}/{len(votes)} horizons up)"
-            )
+            row["reason"] = f"vote {vote:.2f} ({sum(votes)}/{len(votes)} horizons up)"
             row["selected"] = True
         rows.append(row)
     selected = sorted(
         (row for row in rows if row["selected"]),
-        key=lambda row: row["vote"] * row["weight"],
-        reverse=True,
+        key=lambda row: (
+            -(float(row["vote"]) * float(row["weight"])),
+            str(row["symbol"]),
+        ),
     )
     for position, row in enumerate(selected):
         if position >= max_positions:
             row["selected"] = False
             row["reason"] = (
-                f"ranked {position + 1} of {len(selected)}, "
-                f"only {max_positions} slots"
+                f"ranked {position + 1} of {len(selected)}, only {max_positions} slots"
             )
-    rows.sort(key=lambda row: (not row["selected"], -float(row["vote"])))
+    rows.sort(
+        key=lambda row: (
+            not row["selected"],
+            -(float(row["vote"]) * float(row["weight"])),
+            str(row["symbol"]),
+        )
+    )
     return rows
 
 
@@ -201,7 +254,7 @@ def targets_as_of(
         max_positions=max_positions,
     )
     weights = {
-        row["symbol"]: float(row["weight"]) for row in rows if row["selected"]
+        row["symbol"]: round(float(row["weight"]), 6) for row in rows if row["selected"]
     }
     if normalise and weights:
         total = sum(weights.values()) or 1.0
@@ -225,6 +278,7 @@ def simulate(
     throttle_min: float = 0.25,
     inverse_vol: bool = False,
     proportional: bool = False,
+    small_account_floor: Optional[SmallAccountFloor] = None,
 ) -> tuple[list[dict[str, Any]], list[float]]:
     """Trade the fixed rule forward through one window; return round-trip trades.
 
@@ -245,6 +299,12 @@ def simulate(
     Gross exposure of the open book is capped at ``max_gross`` times equity in
     both modes, so neither can quietly lever the account up.
 
+    ``small_account_floor`` reproduces the daemon's conditional fixed-dollar
+    sizing. The effective order and daily percentages are re-derived from
+    marked-to-market equity each day, weighted entries are raised only to the
+    useful minimum the live sizer would use, and entries beyond that day's
+    opening-notional cap are skipped.
+
     ``governor`` is a drawdown brake measured on the marked-to-market account:
     new entries are throttled linearly as the account falls toward the
     threshold and stop entirely at it (existing positions keep their mechanical
@@ -253,6 +313,7 @@ def simulate(
     """
     costs = costs or CostModel()
     per_side = float(costs.per_side_bps) / 10_000
+    fee_per_order = max(0.0, float(costs.fee_per_order))
     # The gross budget the flat baseline would deploy when every slot is full,
     # as a fraction of equity.
     gross_budget_pct = min(per_order_pct * max_positions, max_gross)
@@ -298,7 +359,7 @@ def simulate(
             price = prices[symbol]
             units = held.pop(symbol)
             entry_price, notional = entry.pop(symbol)
-            proceeds = units * price * (1 - per_side)
+            proceeds = units * price * (1 - per_side) - fee_per_order
             equity += proceeds
             trades.append(
                 {
@@ -311,13 +372,8 @@ def simulate(
                 }
             )
 
-        def marked_equity() -> float:
-            book = sum(
-                units * last_seen.get(symbol, 0.0) for symbol, units in held.items()
-            )
-            return equity + book
-
-        account = marked_equity()
+        book = sum(units * last_seen.get(symbol, 0.0) for symbol, units in held.items())
+        account = equity + book
         curve.append(account)
         peak = max(peak, account)
         in_drawdown = (peak - account) / peak if peak > 0 else 0.0
@@ -342,14 +398,31 @@ def simulate(
         # vol-targeted rule into a crypto beta proxy. ``inverse_vol=False``
         # ignores them for sizing and uses them only to rank the slots, which
         # is what the live runtime does.
-        gross = sum(
-            entry[symbol][1] for symbol in held if symbol in entry
-        )
-        # ``equity`` is cash only — a position's cost sits in the book, not the
-        # cash balance — so exposure caps are measured against cash + book.
-        book_equity = equity + gross
+        gross = sum(entry[symbol][1] for symbol in held if symbol in entry)
+        # ``equity`` is cash only — a position's value sits in the book, not the
+        # cash balance — so sizing uses current marked-to-market account value.
+        # Using entry cost here would freeze the equity input after a position
+        # moved and diverge from the broker equity the runtime sizes against.
+        book_equity = account
         weight_total = sum(targets.values())
         budget_left = max(0.0, book_equity * gross_budget_pct - gross)
+        runtime_order_pct = per_order_pct
+        runtime_daily_pct: Optional[float] = None
+        if small_account_floor is not None and book_equity > 0:
+            needed = small_account_floor.sized_notional / book_equity
+            runtime_order_pct = small_account_floor.policy_per_order_pct
+            runtime_daily_pct = small_account_floor.policy_daily_notional_pct
+            if needed > runtime_order_pct:
+                if (
+                    needed <= small_account_floor.max_order_pct
+                    and needed <= small_account_floor.max_daily_notional_pct
+                ):
+                    runtime_order_pct = needed
+                    runtime_daily_pct = min(
+                        max(runtime_daily_pct, needed),
+                        small_account_floor.max_daily_notional_pct,
+                    )
+        daily_opening_notional = 0.0
         for symbol, weight in targets.items():
             if symbol in held or symbol not in prices:
                 continue
@@ -358,7 +431,7 @@ def simulate(
                 # inverse-vol weight decides how much of it this symbol takes.
                 # A 60%-vol pair gets a third of what a 20%-vol name gets, which
                 # is the point of weighting them in the first place.
-                notional = book_equity * per_order_pct * min(1.0, weight)
+                notional = book_equity * runtime_order_pct * min(1.0, weight)
             elif inverse_vol:
                 if weight_total <= 0:
                     continue
@@ -366,9 +439,7 @@ def simulate(
                 # scaling it by ``per_order_pct / TARGET_VOL`` turns it into
                 # "the notional that risks per_order_pct of equity at this
                 # symbol's own measured volatility".
-                notional = (
-                    book_equity * per_order_pct / TARGET_VOL * weight
-                )
+                notional = book_equity * runtime_order_pct / TARGET_VOL * weight
                 notional = min(
                     notional,
                     book_equity * max_position_pct,
@@ -379,20 +450,50 @@ def simulate(
                 # per-order risk cap, not to the strategy's volatility score —
                 # the score only ranks which symbols get the slot. Simulating
                 # anything else would be testing a bot that does not exist.
-                notional = book_equity * per_order_pct
+                notional = book_equity * runtime_order_pct
+
+            if small_account_floor is not None:
+                # Mirror size_intent's weighted-floor rule. A volatile symbol's
+                # share may fall below the useful minimum, but the unweighted
+                # operator cap can authorise exactly the floor — never more.
+                unweighted_cap = book_equity * runtime_order_pct
+                if (
+                    proportional
+                    and notional < small_account_floor.sized_notional
+                    and unweighted_cap + 1e-12 >= small_account_floor.target_notional
+                ):
+                    notional = min(unweighted_cap, small_account_floor.sized_notional)
             notional *= throttle
             if notional <= 0:
                 continue
+            if (
+                small_account_floor is not None
+                and notional + 1e-12 < small_account_floor.target_notional
+            ):
+                # This is the same fail-closed result as quantity rounding below
+                # the runtime's effective minimum. In particular, it stops the
+                # floor when a falling account no longer fits the operator's
+                # percentage ceiling.
+                continue
+            if (
+                runtime_daily_pct is not None
+                and daily_opening_notional + notional
+                > book_equity * runtime_daily_pct + 1e-12
+            ):
+                continue
             if gross + notional > book_equity * max_gross + 1e-12:
                 continue
-            if notional >= equity or notional < 1e-9:
+            if notional >= equity or notional <= fee_per_order:
                 continue
             equity -= notional
             price = prices[symbol]
-            units = notional / (price * (1 + per_side))
+            # ``notional`` is the total cash budget, including the entry fee,
+            # matching both the live small-account constraint and backtest.py.
+            units = (notional - fee_per_order) / (price * (1 + per_side))
             held[symbol] = units
             entry[symbol] = (price, notional)
             gross += notional
+            daily_opening_notional += notional
             budget_left = max(0.0, book_equity * gross_budget_pct - gross)
 
     # Close whatever is still open at the end of the window.
@@ -404,7 +505,7 @@ def simulate(
             continue
         units = held.pop(symbol)
         entry_price, notional = entry.pop(symbol)
-        proceeds = units * price * (1 - per_side)
+        proceeds = units * price * (1 - per_side) - fee_per_order
         equity += proceeds
         trades.append(
             {
@@ -443,7 +544,9 @@ def _max_drawdown(returns_bps: list[float]) -> float:
     return worst
 
 
-def bootstrap_p(returns_bps: list[float], *, samples: int = 2000, seed: int = 7) -> float:
+def bootstrap_p(
+    returns_bps: list[float], *, samples: int = 2000, seed: int = 7
+) -> float:
     """P(mean <= 0) under resampling with replacement — one hypothesis, so no
     multiple-comparison correction applies."""
     if len(returns_bps) < 5:
@@ -456,6 +559,50 @@ def bootstrap_p(returns_bps: list[float], *, samples: int = 2000, seed: int = 7)
         if sum(draw) / size <= 0:
             worse += 1
     return (worse + 1) / (samples + 1)
+
+
+SIGNIFICANCE_BLOCK_DAYS = 20
+
+
+def moving_block_bootstrap_p(
+    returns_bps: list[float],
+    *,
+    block_days: int = SIGNIFICANCE_BLOCK_DAYS,
+    samples: int = 2000,
+    seed: int = 7,
+) -> float:
+    """Probability that mean account return is non-positive by block bootstrap.
+
+    Trade outcomes from the same market regime are not independent observations.
+    Resampling individual trades makes a correlated crypto book look as though it
+    has far more evidence than it does. This resamples contiguous *daily account*
+    returns in circular blocks, preserving short-run clustering while producing
+    samples of the same length as the observed path.
+    """
+    size = len(returns_bps)
+    if size < 5 or block_days < 1 or size < block_days:
+        return 1.0
+    width = min(size, int(block_days))
+    rng = random.Random(seed)
+    worse = 0
+    for _ in range(samples):
+        draw: list[float] = []
+        while len(draw) < size:
+            start = rng.randrange(size)
+            draw.extend(returns_bps[(start + offset) % size] for offset in range(width))
+        if sum(draw[:size]) / size <= 0:
+            worse += 1
+    return (worse + 1) / (samples + 1)
+
+
+def _curve_returns_bps(curve: list[float]) -> list[float]:
+    """Convert a marked-to-market account curve to consecutive returns."""
+    out: list[float] = []
+    for previous, current in zip(curve, curve[1:], strict=False):
+        if previous <= 0:
+            continue
+        out.append((current / previous - 1.0) * 10_000)
+    return out
 
 
 def walk_forward(
@@ -472,6 +619,7 @@ def walk_forward(
     inverse_vol: bool = False,
     proportional: bool = False,
     max_gross: float = 1.0,
+    small_account_floor: Optional[SmallAccountFloor] = None,
 ) -> WalkForwardResult:
     """Cut the pooled timeline into consecutive windows and trade each one."""
     dates = sorted({bar.start for bars in series.values() for bar in bars})
@@ -502,6 +650,7 @@ def walk_forward(
             inverse_vol=inverse_vol,
             proportional=proportional,
             max_gross=max_gross,
+            small_account_floor=small_account_floor,
         )
         equity_curve.extend(fold_curve[1:])
         window_returns = [trade["return_bps"] for trade in trades]
@@ -530,12 +679,19 @@ def walk_forward(
         result.win_rate = len(wins) / len(returns)
         gross_win = sum(wins)
         gross_loss = abs(sum(losses))
-        result.profit_factor = (
-            gross_win / gross_loss if gross_loss else float("inf")
-        )
+        result.profit_factor = gross_win / gross_loss if gross_loss else float("inf")
         result.max_drawdown_pct = _curve_drawdown(equity_curve)
-        result.bootstrap_p_value = bootstrap_p(returns)
     result.final_equity = equity
+    result.return_pct = (
+        (equity / starting_cash - 1.0) * 100 if starting_cash > 0 else 0.0
+    )
+    account_returns = _curve_returns_bps(equity_curve)
+    result.significance_observations = len(account_returns)
+    result.significance_block_days = SIGNIFICANCE_BLOCK_DAYS
+    result.bootstrap_p_value = moving_block_bootstrap_p(
+        account_returns,
+        block_days=SIGNIFICANCE_BLOCK_DAYS,
+    )
     result.alpha = 0.05
     return result
 
@@ -546,6 +702,7 @@ def walk_forward(
 # a terminal one afternoon.
 GATE_SIZE_GRID = (0.005, 0.0075, 0.01, 0.015, 0.02, 0.03)
 DRAWDOWN_CEILING_PCT = 15.0
+COST_STRESS_MULTIPLIER = Decimal("2")
 
 
 def build_evidence(
@@ -558,18 +715,21 @@ def build_evidence(
     starting_cash: float = 50.0,
     grid: tuple[float, ...] = GATE_SIZE_GRID,
     proportional: bool = False,
+    small_account_floor: Optional[SmallAccountFloor] = None,
 ) -> dict[str, Any]:
     """The three numbers the promotion gate is allowed to see, in one report.
 
     - ``production``: the rule at the size production would trade today.
     - ``inverse_vol``: the strategy's own specification — the same gross budget
       split by inverse volatility instead of evenly.
-    - ``gate_size``: the largest flat size on ``GATE_SIZE_GRID`` whose
-      out-of-sample max drawdown still fits inside the gate's ceiling. It is
-      selected on the same sample it is reported on, so it is an upper bound on
-      what the rule could carry, not a promise — the report says so explicitly.
+    - ``gate_size``: the largest candidate size in the configured sizing mode
+      whose out-of-sample max drawdown still fits inside the gate's ceiling.
+      The exact production point uses the fixed-dollar floor model when one is
+      configured. It is selected on the same sample it is reported on, so it is
+      an upper bound on what the rule could carry, not a promise.
     """
-    def run(**kwargs: Any) -> WalkForwardResult:
+
+    def run(*, use_floor: bool = False, **kwargs: Any) -> WalkForwardResult:
         # ``costs`` may be overridden per run (the gross pass switches costs off),
         # so it is popped rather than passed twice.
         return walk_forward(
@@ -579,23 +739,46 @@ def build_evidence(
             starting_cash=starting_cash,
             max_positions=max_positions,
             proportional=proportional,
+            small_account_floor=(small_account_floor if use_floor else None),
             **kwargs,
         )
 
-    production = run(per_order_pct=per_order_pct)
-    inverse = run(per_order_pct=per_order_pct, inverse_vol=True)
+    base_costs = costs or CostModel()
+    production = run(per_order_pct=per_order_pct, use_floor=True)
+    inverse = run(per_order_pct=per_order_pct, inverse_vol=True, use_floor=True)
     # What the edge survives in costs. The gate grades with an assumed cost
     # model, and an edge whose break-even is below realistic costs is not an
     # edge — so the gross expectancy is measured once with costs switched off
     # and the break-even implied by it is reported next to the net number.
-    gross = run(per_order_pct=per_order_pct, costs=CostModel(spread_bps=Decimal("0"), slippage_bps=Decimal("0")))
+    gross = run(
+        per_order_pct=per_order_pct,
+        costs=CostModel(spread_bps=Decimal("0"), slippage_bps=Decimal("0")),
+        use_floor=True,
+    )
+    stressed_costs = CostModel(
+        spread_bps=base_costs.spread_bps * COST_STRESS_MULTIPLIER,
+        slippage_bps=base_costs.slippage_bps * COST_STRESS_MULTIPLIER,
+        fee_per_order=base_costs.fee_per_order * COST_STRESS_MULTIPLIER,
+    )
+    stressed = run(
+        per_order_pct=per_order_pct,
+        costs=stressed_costs,
+        use_floor=True,
+    )
     report: dict[str, Any] = {
+        "schema_version": 4,
         "hypotheses": 1,
         "alpha": 0.05,
-        "sizing": "proportional" if proportional else "flat",
+        "sizing": (
+            "small_account_floor"
+            if small_account_floor is not None
+            else ("proportional" if proportional else "flat")
+        ),
+        "base_sizing": "proportional" if proportional else "flat",
         "drawdown_ceiling_pct": DRAWDOWN_CEILING_PCT,
         "max_positions": max_positions,
         "folds": folds,
+        "starting_equity": round(starting_cash, 4),
         "series": {
             "symbols": sorted(series),
             "bars": sum(len(bars) for bars in series.values()),
@@ -604,6 +787,11 @@ def build_evidence(
             "production": {
                 "per_order_pct": per_order_pct,
                 "inverse_vol": False,
+                "sizing": (
+                    "small_account_floor"
+                    if small_account_floor is not None
+                    else ("proportional" if proportional else "flat")
+                ),
                 **production.to_dict(),
             },
             "inverse_vol": {
@@ -613,12 +801,20 @@ def build_evidence(
             },
         },
         "gate_size": None,
+        "cost_stress": {
+            "multiplier": float(COST_STRESS_MULTIPLIER),
+            "per_side_bps": float(stressed_costs.per_side_bps),
+            "fee_per_order_usd": float(stressed_costs.fee_per_order),
+            **stressed.to_dict(),
+        },
         "costs": {
             "gross_expectancy_bps": round(gross.expectancy_bps, 3),
             "net_expectancy_bps": round(production.expectancy_bps, 3),
             "break_even_per_side_bps": round(gross.expectancy_bps / 2, 3),
-            "assumed_per_side_bps": float(
-                ((costs or CostModel()).per_side_bps)
+            "assumed_per_side_bps": float(((costs or CostModel()).per_side_bps)),
+            "assumed_fee_per_order_usd": float((costs or CostModel()).fee_per_order),
+            "assumed_round_trip_fixed_usd": float(
+                (costs or CostModel()).fee_per_order * 2
             ),
             "trades": production.trades,
         },
@@ -628,14 +824,45 @@ def build_evidence(
             "before it is sold.",
             "That size is chosen on this sample; treat it as a ceiling on how "
             "much to trade, not as evidence of a larger edge.",
+            "Promotion also requires the same rule and size to remain profitable "
+            "when every modeled execution cost is doubled.",
+            "Significance is block-bootstrapped from daily marked-to-market "
+            "account returns, not from trades treated as independent bets.",
         ],
     }
+    if small_account_floor is not None:
+        report["small_account_floor"] = small_account_floor.to_dict()
+        report["notes"].append(
+            "Production reproduces the runtime's fixed-dollar small-account "
+            "target and daily opening-notional cap; it does not compound the "
+            "initial floor percentage as equity changes."
+        )
     frontier: list[dict[str, Any]] = []
-    for size in grid:
-        candidate = run(per_order_pct=size)
+    # Always grade the exact production size. A small-account floor can be
+    # 10.22% rather than one of the pre-registered frontier points; omitting it
+    # would test the $5 order in the headline while selecting the drawdown gate
+    # from unrelated 0.5%-3% positions.
+    tested_sizes = sorted({*grid, float(per_order_pct)})
+    for size in tested_sizes:
+        is_production_size = math.isclose(
+            size,
+            float(per_order_pct),
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        )
+        candidate_uses_floor = bool(small_account_floor and is_production_size)
+        candidate = run(
+            per_order_pct=size,
+            use_floor=candidate_uses_floor,
+        )
         frontier.append(
             {
                 "per_order_pct": size,
+                "sizing": (
+                    "small_account_floor"
+                    if candidate_uses_floor
+                    else ("proportional" if proportional else "flat")
+                ),
                 "trades": candidate.trades,
                 "expectancy_bps": round(candidate.expectancy_bps, 3),
                 "max_drawdown_pct": round(candidate.max_drawdown_pct, 3),
@@ -647,6 +874,11 @@ def build_evidence(
             report["gate_size"] = {
                 "per_order_pct": size,
                 "inverse_vol": False,
+                "sizing": (
+                    "small_account_floor"
+                    if candidate_uses_floor
+                    else ("proportional" if proportional else "flat")
+                ),
                 **candidate.to_dict(),
             }
     # The measured cost of sizing up, so "temporarily bigger bets on a small
@@ -659,7 +891,7 @@ def build_evidence(
             "reason": (
                 f"no size on the grid held max drawdown under "
                 f"{DRAWDOWN_CEILING_PCT}% (smallest tried "
-                f"{grid[0]:.4f})"
+                f"{tested_sizes[0]:.4f})"
             ),
         }
     return report

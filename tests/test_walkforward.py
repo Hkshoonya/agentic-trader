@@ -22,8 +22,9 @@ from agentic_trading.backtest import CostModel
 from agentic_trading.history import Bar
 from agentic_trading.walkforward import (
     MAX_LEVERAGE,
-    TARGET_VOL,
+    SmallAccountFloor,
     bootstrap_p,
+    moving_block_bootstrap_p,
     rank_targets,
     simulate,
     targets_as_of,
@@ -59,7 +60,9 @@ def _ramp(days: int, *, daily: float = 0.004, base: float = 100.0) -> list[float
     return [base * (1 + daily) ** index for index in range(days)]
 
 
-def _sawtooth(days: int, *, amplitude: float = 0.08, base: float = 100.0) -> list[float]:
+def _sawtooth(
+    days: int, *, amplitude: float = 0.08, base: float = 100.0
+) -> list[float]:
     """Alternating up/down with a rising floor: high vol, positive trend."""
     out = []
     for index in range(days):
@@ -69,6 +72,13 @@ def _sawtooth(days: int, *, amplitude: float = 0.08, base: float = 100.0) -> lis
 
 
 class TestTargets:
+    def test_volatility_estimate_matches_the_production_strategy(self) -> None:
+        from agentic_trading.strategies.trend_crypto import TrendCryptoStrategy
+        from agentic_trading.walkforward import _vol
+
+        closes = _sawtooth(300)
+        assert _vol(closes) == pytest.approx(TrendCryptoStrategy._ewma_vol(closes))
+
     def test_weights_are_raw_inverse_vol_not_normalised(self) -> None:
         # Two symbols with the same trend but very different vol.
         calm = _ramp(300, daily=0.004)
@@ -78,7 +88,9 @@ class TestTargets:
 
         assert set(targets) == {"CALM", "WILD"}
         assert sum(targets.values()) > 1.0, "raw sizes must not be forced to sum to one"
-        assert targets["WILD"] < targets["CALM"], "the volatile symbol gets the smaller size"
+        assert targets["WILD"] < targets["CALM"], (
+            "the volatile symbol gets the smaller size"
+        )
         assert all(size <= MAX_LEVERAGE + 1e-9 for size in targets.values())
 
     def test_normalise_opt_in_rescales_to_one(self) -> None:
@@ -114,6 +126,16 @@ class TestTargets:
 
 
 class TestSimulate:
+    @staticmethod
+    def _five_dollar_floor() -> SmallAccountFloor:
+        return SmallAccountFloor(
+            target_notional=5.0,
+            policy_per_order_pct=0.0025,
+            policy_daily_notional_pct=0.01,
+            max_order_pct=0.11,
+            max_daily_notional_pct=0.11,
+        )
+
     def test_costs_are_actually_charged(self) -> None:
         """The same trades must end lower when they pay spread and slippage."""
         series = {"A": _series("A", _ramp(300))}
@@ -121,14 +143,33 @@ class TestSimulate:
         charged, _ = simulate(series, **window)
         free, _ = simulate(
             series,
-            costs=CostModel(
-                spread_bps=Decimal("0"), slippage_bps=Decimal("0")
-            ),
+            costs=CostModel(spread_bps=Decimal("0"), slippage_bps=Decimal("0")),
             **window,
         )
         assert charged and free
         assert len(charged) == len(free)
         assert sum(t["pnl"] for t in charged) < sum(t["pnl"] for t in free)
+
+    def test_fixed_fees_are_charged_on_entry_and_exit(self) -> None:
+        series = {"A": _series("A", _ramp(300))}
+        window = dict(start=DAY, end=DAY + timedelta(days=299), starting_cash=50.0)
+        fixed, _ = simulate(
+            series,
+            costs=CostModel(
+                spread_bps=Decimal("0"),
+                slippage_bps=Decimal("0"),
+                fee_per_order=Decimal("0.05"),
+            ),
+            **window,
+        )
+        free, _ = simulate(
+            series,
+            costs=CostModel(spread_bps=Decimal("0"), slippage_bps=Decimal("0")),
+            **window,
+        )
+        assert fixed and free and len(fixed) == len(free)
+        assert sum(t["pnl"] for t in fixed) < sum(t["pnl"] for t in free)
+        assert fixed[0]["pnl"] == pytest.approx(free[0]["pnl"] - 0.10, abs=0.01)
 
     def test_entry_debits_cash(self) -> None:
         """Cash leaves the account at entry, so the balance cannot exceed it."""
@@ -188,6 +229,66 @@ class TestSimulate:
         )
         assert trades[0]["notional"] == pytest.approx(10.0)
 
+    def test_small_account_floor_uses_fixed_dollars_not_a_compounding_pct(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        closes = [100.0 * 1.01**index for index in range(30)]
+
+        def alternating_targets(*_args, **kwargs):
+            when = _args[1]
+            offset = (when.date() - DAY.date()).days
+            return {"A": 0.5} if offset % 2 else {}
+
+        monkeypatch.setattr(
+            "agentic_trading.walkforward.targets_as_of", alternating_targets
+        )
+        trades, _ = simulate(
+            {"A": _series("A", closes)},
+            start=DAY,
+            end=DAY + timedelta(days=len(closes) - 1),
+            starting_cash=50.0,
+            max_positions=1,
+            per_order_pct=0.102,
+            proportional=True,
+            small_account_floor=self._five_dollar_floor(),
+        )
+        assert len(trades) >= 2
+        assert all(trade["notional"] == pytest.approx(5.10) for trade in trades)
+
+    def test_small_account_daily_cap_admits_only_one_new_position_per_day(
+        self,
+    ) -> None:
+        series = {
+            "A": _series("A", _ramp(300, daily=0.003)),
+            "B": _series("B", _ramp(300, daily=0.004)),
+        }
+        trades, _ = simulate(
+            series,
+            start=DAY,
+            end=DAY + timedelta(days=254),
+            step_days=2,
+            starting_cash=50.0,
+            max_positions=2,
+            per_order_pct=0.102,
+            proportional=True,
+            small_account_floor=self._five_dollar_floor(),
+        )
+        assert len(trades) == 1
+        assert trades[0]["notional"] == pytest.approx(5.10)
+
+    def test_small_account_floor_stops_below_the_authorized_equity(self) -> None:
+        trades, _ = simulate(
+            {"A": _series("A", _ramp(300))},
+            start=DAY,
+            end=DAY + timedelta(days=299),
+            starting_cash=40.0,
+            max_positions=1,
+            per_order_pct=0.11,
+            proportional=True,
+            small_account_floor=self._five_dollar_floor(),
+        )
+        assert trades == []
+
     def test_inverse_vol_sizes_down_the_volatile_symbol(self) -> None:
         calm = _ramp(400, daily=0.002)
         wild = _sawtooth(400)
@@ -232,10 +333,7 @@ class TestSimulate:
         assert trades[0]["notional"] <= 5.0 + 1e-9
 
     def test_max_gross_caps_the_book(self) -> None:
-        series = {
-            name: _series(name, _ramp(300))
-            for name in ("A", "B", "C", "D")
-        }
+        series = {name: _series(name, _ramp(300)) for name in ("A", "B", "C", "D")}
         trades, _ = simulate(
             series,
             start=DAY,
@@ -389,6 +487,17 @@ class TestWalkForward:
                 and result.max_drawdown_pct <= 15.0
             )
 
+    def test_significance_uses_daily_account_blocks(self) -> None:
+        result = walk_forward({"A": _series("A", _ramp(600))}, folds=4)
+        assert result.significance_method == (
+            "moving_block_bootstrap_daily_account_returns"
+        )
+        assert result.significance_block_days == 20
+        assert result.significance_observations >= 20
+        assert result.return_pct == pytest.approx(
+            (result.final_equity / 50.0 - 1.0) * 100
+        )
+
 
 def _sigma(closes: list[float]) -> float:
     from agentic_trading.walkforward import _vol
@@ -412,6 +521,17 @@ class TestBootstrap:
         values = [120.0, -80.0, 40.0, -20.0, 10.0] * 8
         assert bootstrap_p(values) == bootstrap_p(values)
 
+    def test_block_bootstrap_is_deterministic_and_directional(self) -> None:
+        positive = [20.0] * 80
+        negative = [-20.0] * 80
+        first = moving_block_bootstrap_p(positive, samples=200, seed=11)
+        assert first == moving_block_bootstrap_p(positive, samples=200, seed=11)
+        assert first < 0.05
+        assert moving_block_bootstrap_p(negative, samples=200, seed=11) > 0.95
+
+    def test_block_bootstrap_refuses_less_than_one_full_block(self) -> None:
+        assert moving_block_bootstrap_p([100.0] * 19) == 1.0
+
 
 class RankTests(unittest.TestCase):
     """rank_targets explains a decision; targets_as_of makes it. They must agree."""
@@ -428,18 +548,26 @@ class RankTests(unittest.TestCase):
         assert [row["symbol"] for row in rows][0] == "UP"
 
     def test_selection_respects_the_slot_count(self) -> None:
-        series = {f"S{i}": _series(f"S{i}", _ramp(300, daily=0.003 + i * 1e-4)) for i in range(6)}
+        series = {
+            f"S{i}": _series(f"S{i}", _ramp(300, daily=0.003 + i * 1e-4))
+            for i in range(6)
+        }
         rows = rank_targets(series, DAY + timedelta(days=299), max_positions=2)
         self.assertEqual(sum(1 for row in rows if row["selected"]), 2)
         dropped = [row for row in rows if "slots" in str(row.get("reason"))]
         self.assertEqual(len(dropped), 4)
 
     def test_it_agrees_with_targets_as_of(self) -> None:
-        series = {f"S{i}": _series(f"S{i}", _ramp(300, daily=0.003 + i * 1e-4)) for i in range(5)}
+        series = {
+            f"S{i}": _series(f"S{i}", _ramp(300, daily=0.003 + i * 1e-4))
+            for i in range(5)
+        }
         when = DAY + timedelta(days=299)
         rows = rank_targets(series, when, max_positions=3)
         chosen = targets_as_of(series, when, max_positions=3)
-        self.assertEqual(set(chosen), {row["symbol"] for row in rows if row["selected"]})
+        self.assertEqual(
+            set(chosen), {row["symbol"] for row in rows if row["selected"]}
+        )
         for row in rows:
             if row["selected"]:
                 self.assertEqual(chosen[row["symbol"]], pytest.approx(row["weight"]))

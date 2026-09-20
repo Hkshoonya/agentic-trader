@@ -217,7 +217,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return selftest(workspace)
 
     try:
-        import tkinter as tk
+        import tkinter  # noqa: F401 — fail early with the CLI fallback below
     except ImportError:
         print(
             "This build has no windowing support. Run the CLI instead:\n"
@@ -514,8 +514,9 @@ class Launcher:
             dialog,
             text=(
                 "This lets the agent send real orders to your Robinhood account.\n"
-                "Type ARM to confirm. It stays armed until you disarm, or close "
-                "this app."
+                "Type ARM to confirm. Arming is refused unless the complete "
+                "pre-flight is currently green, and it is rechecked before "
+                "every submission."
             ),
             bg=BG, fg=FG, justify="left", font=("Segoe UI", 10),
         ).pack(padx=16, pady=(14, 6), anchor="w")
@@ -528,8 +529,24 @@ class Launcher:
                 self.log("arming cancelled: the confirmation phrase did not match")
                 dialog.destroy()
                 return
+            try:
+                from agentic_trading.arming import arm
+                from agentic_trading.config import load_config
+
+                config = load_config(config_path(self.workspace))
+                result = arm(config.state_dir, source="windows_launcher")
+            except Exception as exc:  # noqa: BLE001 — show the operator the refusal
+                self.log(f"arming failed: {exc}")
+                dialog.destroy()
+                return
+            if not result.get("armed"):
+                self.log(f"arming refused: {result.get('reason', 'evidence gate failed')}")
+                dialog.destroy()
+                return
             self.supervisor.arm_live = True
-            self.log("ARMED — real orders may be submitted from the next decision")
+            self.log(
+                "ARMED — machine capability and eligible workspace latch are active"
+            )
             self.log("restarting the agent so the switch applies cleanly…")
             self.supervisor.stop_all()
             self.supervisor.start_agent()
@@ -544,6 +561,18 @@ class Launcher:
 
     def _disarm(self) -> None:
         self.supervisor.arm_live = False
+        try:
+            from agentic_trading.arming import disarm
+            from agentic_trading.config import load_config
+
+            config = load_config(config_path(self.workspace))
+            disarm(
+                config.state_dir,
+                source="windows_launcher",
+                reason="operator_disarm",
+            )
+        except Exception as exc:  # noqa: BLE001 — capability still drops below
+            self.log(f"workspace disarm warning: {exc}")
         self.log("disarmed — the agent will journal live_gate_blocked instead of placing")
         if self.supervisor.agent_running():
             # The switch is environment, so it only takes effect on a restart.
@@ -568,7 +597,7 @@ class Launcher:
         self.root.after(2000, self._tick)
 
     def _render(self, status: dict[str, Any]) -> None:
-        armed = self.supervisor.arm_live
+        armed = bool(status.get("armed"))
         self._badge("mode", str(status["mode"]).upper(), GREEN if status["mode"] == "live" else AMBER)
         self._badge("stage", f"STAGE: {status['stage']}", FG)
         self._badge("armed", "ARMED" if armed else "DISARMED", RED if armed else MUTED)

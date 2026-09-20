@@ -44,7 +44,9 @@ def _quote(symbol: str, price: float, when: datetime) -> dict:
 
 
 class PositionBookTests(unittest.TestCase):
-    def _strategy(self, tmp: Path, *, state_path: Path | None = None) -> TrendCryptoStrategy:
+    def _strategy(
+        self, tmp: Path, *, state_path: Path | None = None
+    ) -> TrendCryptoStrategy:
         bars = tmp / "bars"
         bars.mkdir(exist_ok=True)
         _write_bars(bars, "BTC-USD", [100.0 + i for i in range(300)])
@@ -87,6 +89,77 @@ class PositionBookTests(unittest.TestCase):
             self.assertTrue(intents, "expected an entry intent")
             self.assertEqual(strategy._held, set())
 
+    def test_equity_and_crypto_each_decide_only_once_per_day(self) -> None:
+        """Alternating quote feeds must not erase the other book's day guard."""
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            bars = tmp / "bars"
+            bars.mkdir()
+            _write_bars(bars, "SPY", [100.0 + i for i in range(300)])
+            _write_bars(bars, "BTC-USD", [200.0 + i for i in range(300)])
+            strategy = TrendCryptoStrategy(
+                bar_dir=bars,
+                symbols=["SPY", "BTC-USD"],
+                max_positions=2,
+                state_path=tmp / "strategy.json",
+            )
+            when = datetime.now(timezone.utc)
+            equity_quote = {
+                **_quote("SPY", 400.0, when),
+                "market_session": "regular",
+            }
+            crypto_quote = _quote("BTC-USD", 500.0, when)
+
+            first_equity = strategy.on_quote(equity_quote)
+            first_crypto = strategy.on_quote(crypto_quote)
+            again_equity = strategy.on_quote(equity_quote)
+            again_crypto = strategy.on_quote(crypto_quote)
+
+        self.assertTrue(
+            [intent for intent in first_equity if intent.side.value == "buy"]
+        )
+        self.assertTrue(
+            [intent for intent in first_crypto if intent.side.value == "buy"]
+        )
+        self.assertFalse(
+            [intent for intent in again_equity if intent.side.value == "buy"]
+        )
+        self.assertFalse(
+            [intent for intent in again_crypto if intent.side.value == "buy"]
+        )
+        self.assertEqual(
+            strategy._last_decision_dates,
+            {"equity": when.date().isoformat(), "crypto": when.date().isoformat()},
+        )
+
+    def test_entry_intents_follow_conviction_rank_not_ticker_name(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            bars = tmp / "bars"
+            bars.mkdir()
+            _write_bars(bars, "AAPL", [100.0 + i * 0.2 for i in range(300)])
+            _write_bars(bars, "MSFT", [100.0 + i for i in range(300)])
+            strategy = TrendCryptoStrategy(
+                bar_dir=bars,
+                symbols=["AAPL", "MSFT"],
+                max_positions=2,
+            )
+            when = datetime.now(timezone.utc)
+            expected = [
+                symbol
+                for symbol in strategy.target_symbols(as_of=when)
+                if symbol in {"AAPL", "MSFT"}
+            ]
+            intents = strategy.on_quote(
+                {
+                    **_quote("AAPL", 200.0, when),
+                    "market_session": "regular",
+                }
+            )
+
+        buys = [intent.symbol for intent in intents if intent.side.value == "buy"]
+        self.assertEqual(buys, expected)
+
 
 class RestartTests(PositionBookTests):
     def test_holdings_and_the_daily_guard_survive_a_restart(self) -> None:
@@ -103,6 +176,7 @@ class RestartTests(PositionBookTests):
 
         self.assertEqual(restarted._held_quantity("BTCUSD"), Decimal("0.0015"))
         self.assertEqual(restarted._last_decision_date, first._last_decision_date)
+        self.assertEqual(restarted._last_decision_dates, first._last_decision_dates)
         # The same day must not rebalance twice just because the process died.
         self.assertEqual(restarted.on_quote(_quote("BTC-USD", 400.0, when)), [])
 
@@ -118,6 +192,19 @@ class RestartTests(PositionBookTests):
             self.assertEqual(seeded, 1)
             self.assertEqual(strategy._held, {"ETHUSD"})
             self.assertEqual(strategy._held_quantity("BTCUSD"), Decimal("0"))
+
+    def test_an_authoritative_empty_seed_clears_phantom_holdings(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            state = tmp / "strategy.json"
+            strategy = self._strategy(tmp, state_path=state)
+            strategy.note_fill("BTC-USD", Decimal("0.0015"))
+
+            self.assertEqual(strategy.seed_positions({}), 0)
+
+            self.assertEqual(strategy._held, set())
+            restarted = self._strategy(tmp, state_path=state)
+            self.assertEqual(restarted._held, set())
 
     def test_a_corrupt_state_file_does_not_break_startup(self) -> None:
         with tempfile.TemporaryDirectory() as name:

@@ -1,9 +1,9 @@
 """Local animated dashboard: live executions, equity flow, promotion state.
 
 Stdlib only (``http.server``) so it runs wherever the bot runs, with no CDN and
-no outbound network access. Every endpoint is read-only: state is derived from
-the decision journal, RiskGuard state, and evolution/promotion files. Nothing
-here can place an order.
+no outbound network access. State views are read-only; the sole write endpoint
+arms or disarms the workspace after local confirmation and evidence checks. It
+cannot construct or submit an order itself.
 
 Binds to ``127.0.0.1`` by default — this is an operator console, not a public
 web app, and the journal contains account activity.
@@ -12,6 +12,7 @@ web app, and the journal contains account activity.
 from __future__ import annotations
 
 import json
+import ipaddress
 import threading
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -29,6 +30,16 @@ from agentic_trading.jsonio import dumps as json_dumps
 from agentic_trading.promotion import load_state
 from agentic_trading.runtime import effective_mode
 from agentic_trading.session import next_session_open, session_allows, session_for
+
+
+def _is_loopback_host(host: str) -> bool:
+    text = str(host or "").strip().lower()
+    if text == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
 
 
 def _read_json(path: Path) -> Optional[dict[str, Any]]:
@@ -104,8 +115,18 @@ def _universe_view(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
     reasons per candidate, so the console only has to choose what to show.
     """
     if not payload:
-        return {"enabled": False, "rows": [], "adopted": [], "added": [], "dropped": [],
-                "notes": [], "as_of": "", "cycles": 0, "failures": 0, "last_error": ""}
+        return {
+            "enabled": False,
+            "rows": [],
+            "adopted": [],
+            "added": [],
+            "dropped": [],
+            "notes": [],
+            "as_of": "",
+            "cycles": 0,
+            "failures": 0,
+            "last_error": "",
+        }
     report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
     rows: list[dict[str, Any]] = []
     for item in (report.get("candidates") or [])[:12]:
@@ -180,7 +201,9 @@ def _grade_from_journal(
         return None
     entries = regime.get(str(symbol).upper()) or []
     when = _parse_stamp(at)
-    at_or_before = [entry for entry in entries if not at or str(entry.get("at") or "") <= at]
+    at_or_before = [
+        entry for entry in entries if not at or str(entry.get("at") or "") <= at
+    ]
     view = at_or_before[-1] if at_or_before else (entries[0] if entries else None)
     market = view.get("market") if isinstance(view, dict) else None
     rebuilt = False
@@ -206,7 +229,9 @@ def _grade_from_journal(
                     else float(market["spread_bps"])
                 ),
                 volume_z=(
-                    None if market.get("volume_z") is None else float(market["volume_z"])
+                    None
+                    if market.get("volume_z") is None
+                    else float(market["volume_z"])
                 ),
                 volume_coverage=float(market.get("volume_coverage") or 0.0),
             )
@@ -228,16 +253,16 @@ def _grade_from_journal(
             regime=view,
             advisor=advisor or None,
             blocked_by=(
-                str(record.get("reason", "")) if record.get("event") == "rejected" else None
+                str(record.get("reason", ""))
+                if record.get("event") == "rejected"
+                else None
             ),
         )
     except (TypeError, ValueError):
         return None
     payload = grade.to_dict()
     payload["source"] = "bars_asof" if rebuilt else "journal"
-    payload["snapshot_at"] = (
-        at if rebuilt else str((view or {}).get("at") or "")
-    )
+    payload["snapshot_at"] = at if rebuilt else str((view or {}).get("at") or "")
     payload["snapshot_exact"] = bool(at) and str((view or {}).get("at") or "") <= at
     if rebuilt:
         payload["basis"] = (
@@ -295,7 +320,9 @@ def _evidence_view(
 class DashboardState:
     """Reads bot state from disk. Every method is read-only."""
 
-    def __init__(self, config: Config, *, config_path: Path | str | None = None) -> None:
+    def __init__(
+        self, config: Config, *, config_path: Path | str | None = None
+    ) -> None:
         self.config = config
         self._config_path = Path(config_path) if config_path else None
         self._config_stamp: Optional[tuple[int, int]] = self._stat_config()
@@ -341,7 +368,9 @@ class DashboardState:
         """
         from agentic_trading.llm.market import features_from_closes
 
-        closes = [float(bar.close) for bar in self._bars_for(symbol) if bar.start <= when]
+        closes = [
+            float(bar.close) for bar in self._bars_for(symbol) if bar.start <= when
+        ]
         if len(closes) < 30:
             return None
         return features_from_closes(symbol.upper(), closes[-260:])
@@ -388,7 +417,9 @@ class DashboardState:
             return []
         return self._read_file(path, limit=limit)
 
-    def recent_records(self, *, days: int = 3, limit: int = 4000) -> list[dict[str, Any]]:
+    def recent_records(
+        self, *, days: int = 3, limit: int = 4000
+    ) -> list[dict[str, Any]]:
         """The last few journals, oldest first.
 
         The order table is decision-driven and this strategy decides once a day,
@@ -454,13 +485,11 @@ class DashboardState:
         # The console only needs the date, and a state file written before the
         # split holds a bare date, so both spellings are read here.
         last_day = last_date.rsplit(":", 1)[-1]
-        holds_equity_book = "-" not in last_date and ":" in last_date and last_date.startswith("equity")
+        holds_equity_book = (
+            "-" not in last_date and ":" in last_date and last_date.startswith("equity")
+        )
         quantities = state.get("quantities") if isinstance(state, dict) else {}
-        held = [
-            symbol
-            for symbol, qty in (quantities or {}).items()
-            if _positive(qty)
-        ]
+        held = [symbol for symbol, qty in (quantities or {}).items() if _positive(qty)]
         # The strategy rebalances on the first quote of each UTC day.
         next_at = datetime.combine(
             now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc
@@ -472,8 +501,15 @@ class DashboardState:
             next_at = now  # the next quote of this session triggers it
         last_at = ""
         for record in reversed(self.read_records(limit=4000)):
-            intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
-            if record.get("event") in ("accepted", "rejected", "placed", "place_failed"):
+            intent = (
+                record.get("intent") if isinstance(record.get("intent"), dict) else {}
+            )
+            if record.get("event") in (
+                "accepted",
+                "rejected",
+                "placed",
+                "place_failed",
+            ):
                 last_at = str(intent.get("created_at") or record.get("at") or "")
                 break
         return {
@@ -528,9 +564,7 @@ class DashboardState:
             row["held"] = symbol.replace("-", "") in held or broker_form in held
             view = regime.get(broker_form) or regime.get(symbol)
             row["regime"] = None if view is None else view.get("regime")
-            row["regime_confidence"] = (
-                None if view is None else view.get("confidence")
-            )
+            row["regime_confidence"] = None if view is None else view.get("confidence")
             blockers: list[str] = []
             # Mirror the gate exactly: a chop/panic read only blocks when the
             # model is at least DEFAULT_BLOCK_CONFIDENCE sure. Quoting the view's
@@ -583,17 +617,18 @@ class DashboardState:
             "generated_at": payload.get("generated_at", ""),
         }
 
-    def _size_floor(self, limits: dict[str, Any], risk: dict[str, Any]) -> dict[str, Any]:
-        """Whether the account is big enough to trade the size the evidence allows.
-
-        On 2026-09-18 the agent sat in live mode refusing every entry with
-        `below_min_notional`: at $50 and a 0.92% ceiling the order is $0.46, and
-        the broker minimum is $1.00. That is the guard working — it refuses
-        rather than oversizing — but five identical rejects are a poor way to
-        learn "your account is too small". Say it once, with the number that
-        would fix it.
-        """
+    def _size_floor(
+        self, limits: dict[str, Any], risk: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Explain the ordinary minimum and confidence-gated $5 forward floor."""
         from decimal import Decimal
+
+        from agentic_trading.evidence import (
+            effective_small_account_target,
+            retrospective_floor_ready,
+        )
+        from agentic_trading.promotion import load_state
+        from agentic_trading.sizer import FLOOR_MARGIN, floor_cap
 
         try:
             cap = Decimal(str(limits.get("max_order_pct") or self.config.max_order_pct))
@@ -603,30 +638,96 @@ class DashboardState:
             equity = Decimal(str(risk.get("current_equity") or "0"))
         except (ArithmeticError, TypeError, ValueError):
             equity = Decimal("0")
-        minimum = Decimal(str(self.config.min_order_notional))
+        broker_minimum = Decimal(str(self.config.min_order_notional))
+        ceiling = Decimal(
+            str(getattr(self.config, "small_account_max_order_pct", "0") or "0")
+        )
+        daily_ceiling = Decimal(
+            str(getattr(self.config, "small_account_max_daily_pct", "0") or "0")
+        )
+        if daily_ceiling <= 0:
+            daily_ceiling = ceiling
+        enabled = ceiling > 0 and daily_ceiling > 0
+        minimum = (
+            effective_small_account_target(self.config) if enabled else broker_minimum
+        )
         if cap <= 0:
             return {}
-        needed = (minimum / cap).quantize(Decimal("0.01"))
+        required_notional = (
+            minimum * (Decimal(1) + FLOOR_MARGIN) if enabled else minimum
+        )
+        needed = (required_notional / cap).quantize(Decimal("0.01"))
         order = (equity * cap).quantize(Decimal("0.01"))
-        ceiling = Decimal(str(getattr(self.config, "small_account_max_order_pct", "0") or "0"))
-        floor_active = bool(ceiling > 0 and equity > 0 and equity < needed)
+        state = load_state(self.config.state_dir)
+        assessment = (
+            state.last_assessment if isinstance(state.last_assessment, dict) else {}
+        )
+        ready, readiness_blockers = retrospective_floor_ready(self.config, assessment)
         effective = cap
-        if floor_active:
-            effective = min(
-                (minimum / equity) * Decimal("1.02"), ceiling
+        effective_daily = Decimal(
+            str(limits.get("daily_notional_pct") or self.config.daily_notional_pct)
+        )
+        needs_floor = bool(enabled and equity > 0 and required_notional / equity > cap)
+        if needs_floor and ready:
+            effective = floor_cap(
+                equity=equity,
+                policy_cap=cap,
+                min_notional=minimum,
+                max_cap=ceiling,
             )
+            effective_daily = min(
+                max(effective_daily, required_notional / equity),
+                daily_ceiling,
+            )
+        floor_active = bool(
+            needs_floor
+            and ready
+            and (
+                effective != cap
+                or effective_daily
+                != Decimal(
+                    str(
+                        limits.get("daily_notional_pct")
+                        or self.config.daily_notional_pct
+                    )
+                )
+            )
+        )
+        sufficient = bool(
+            not needs_floor
+            or (
+                ready
+                and effective * equity >= required_notional
+                and effective_daily * equity >= required_notional
+            )
+        )
         return {
             "min_order_notional": str(minimum),
+            "broker_min_order_notional": str(broker_minimum),
+            "small_account_target_notional": str(minimum),
             "order_at_ceiling": str(order),
             "equity_needed": str(needed),
             "too_small_to_trade": bool(equity > 0 and equity < needed),
             "small_account_max_order_pct": str(ceiling),
+            "small_account_max_daily_pct": str(daily_ceiling),
+            "small_account_enabled": enabled,
+            "forward_floor_ready": ready,
             "size_floor_active": floor_active,
+            "size_floor_sufficient": sufficient,
             "effective_order_pct": str(effective),
+            "effective_daily_notional_pct": str(effective_daily),
             "effective_order_notional": str(
                 (equity * effective).quantize(Decimal("0.01"))
             ),
             "drawdown_at_effective_pct": self._drawdown_at(effective),
+            "size_floor_reason": (
+                "qualified for forward collection"
+                if ready
+                else "waiting for the exact $5 size to pass retrospective gates"
+            )
+            if enabled
+            else "disabled",
+            "size_floor_blockers": readiness_blockers,
         }
 
     def _drawdown_at(self, per_order_pct: Any) -> Optional[float]:
@@ -672,9 +773,7 @@ class DashboardState:
             if event not in ("accepted", "placed", "rejected", "place_failed"):
                 continue
             at = str(
-                (record.get("intent") or {}).get("created_at")
-                or record.get("at")
-                or ""
+                (record.get("intent") or {}).get("created_at") or record.get("at") or ""
             )
             if at[:10] != today_utc:
                 continue
@@ -710,16 +809,16 @@ class DashboardState:
             if key not in ("accepted", "placed", "rejected"):
                 continue
             at = str(
-                (record.get("intent") or {}).get("created_at")
-                or record.get("at")
-                or ""
+                (record.get("intent") or {}).get("created_at") or record.get("at") or ""
             )
             day = at[:10]
             if day not in buckets:
                 continue
             buckets[day][key] += 1
             if key == "rejected":
-                reason = str(record.get("reason", "")).split(":")[0].strip() or "unknown"
+                reason = (
+                    str(record.get("reason", "")).split(":")[0].strip() or "unknown"
+                )
                 reasons[reason] = reasons.get(reason, 0) + 1
         payload = {
             "days": [{"day": day, **counts} for day, counts in buckets.items()],
@@ -853,7 +952,9 @@ class DashboardState:
         effective_policy = str(limits.get("session_policy") or "") or (
             self.config.session_policy
         )
-        details = limits.get("details") if isinstance(limits.get("details"), dict) else {}
+        details = (
+            limits.get("details") if isinstance(limits.get("details"), dict) else {}
+        )
         return {
             "mode": effective_mode(self.config),
             "kill_switch": bool(risk.get("kill_switch", False)),
@@ -912,7 +1013,9 @@ class DashboardState:
                 "checks": health.get("checks") or [],
             },
             "risk": {
-                "max_order_pct": limits.get("max_order_pct", str(self.config.max_order_pct)),
+                "max_order_pct": limits.get(
+                    "max_order_pct", str(self.config.max_order_pct)
+                ),
                 **self._size_floor(limits, risk),
                 "daily_notional_pct": limits.get(
                     "daily_notional_pct", str(self.config.daily_notional_pct)
@@ -925,8 +1028,7 @@ class DashboardState:
                 # the flat pair in the config file is only a fallback, and
                 # printing it next to a scheduled budget reads as an overrun.
                 "ceiling_max_order_pct": str(
-                    details.get("ceiling_max_order_pct")
-                    or self.config.max_order_pct
+                    details.get("ceiling_max_order_pct") or self.config.max_order_pct
                 ),
                 "ceiling_daily_notional_pct": str(
                     details.get("ceiling_daily_notional_pct")
@@ -958,12 +1060,8 @@ class DashboardState:
             },
             "pulse": self.pulse(),
             "candidate_summary": self._candidate_summary(),
-            "proposals": _proposals_view(
-                _read_json(self.state_dir / "proposals.json")
-            ),
-            "universe": _universe_view(
-                _read_json(self.state_dir / "universe.json")
-            ),
+            "proposals": _proposals_view(_read_json(self.state_dir / "proposals.json")),
+            "universe": _universe_view(_read_json(self.state_dir / "universe.json")),
             "evidence": _evidence_view(
                 _read_json(self.state_dir / "strategy_evidence.json"),
                 auto_refresh_days=self.config.evidence_refresh_days,
@@ -989,7 +1087,9 @@ class DashboardState:
         for record in records:
             if record.get("event") != "accepted":
                 continue
-            intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+            intent = (
+                record.get("intent") if isinstance(record.get("intent"), dict) else {}
+            )
             notional = Decimal(str(record.get("notional", "0") or "0"))
             cumulative += notional
             points.append(
@@ -1051,7 +1151,9 @@ class DashboardState:
             intent = (
                 record.get("intent") if isinstance(record.get("intent"), dict) else {}
             )
-            review = record.get("review") if isinstance(record.get("review"), dict) else {}
+            review = (
+                record.get("review") if isinstance(record.get("review"), dict) else {}
+            )
             alerts = (
                 review.get("data", {}).get("order_checks")
                 if isinstance(review.get("data"), dict)
@@ -1069,9 +1171,7 @@ class DashboardState:
             )
             advisor = advisor_by_decision.get(str(record.get("decision_id") or ""), {})
             symbol = (
-                record.get("symbol")
-                or request.get("symbol")
-                or intent.get("symbol")
+                record.get("symbol") or request.get("symbol") or intent.get("symbol")
             )
             at = intent.get("created_at") or record.get("at") or ""
             day = str(record.get("_journal_day") or str(at)[:10])
@@ -1085,7 +1185,9 @@ class DashboardState:
                     "event": event,
                     "reason": record.get("reason", ""),
                     "symbol": symbol,
-                    "side": record.get("side") or request.get("side") or intent.get("side"),
+                    "side": record.get("side")
+                    or request.get("side")
+                    or intent.get("side"),
                     "type": request.get("type", ""),
                     "market_hours": request.get("market_hours", ""),
                     "quantity": (
@@ -1109,9 +1211,9 @@ class DashboardState:
                     "last_price": (quote or {}).get("last_trade_price")
                     or intent.get("ref_price"),
                     "last_price_source": (
-                        "quote" if (quote or {}).get("last_trade_price") else (
-                            "decision" if intent.get("ref_price") else ""
-                        )
+                        "quote"
+                        if (quote or {}).get("last_trade_price")
+                        else ("decision" if intent.get("ref_price") else "")
                     ),
                     "alerts": alerts if isinstance(alerts, dict) else {},
                     "ref_id": request.get("ref_id"),
@@ -1206,8 +1308,10 @@ def _compact(record: dict[str, Any]) -> dict[str, Any]:
             if key in intent
         }
     compact["at"] = (
-        (intent or {}).get("created_at") if isinstance(intent, dict) else None
-    ) or record.get("at") or ""
+        ((intent or {}).get("created_at") if isinstance(intent, dict) else None)
+        or record.get("at")
+        or ""
+    )
     return compact
 
 
@@ -1222,6 +1326,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+        )
         self.end_headers()
         self.wfile.write(body)
 
@@ -1247,8 +1360,18 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path not in ("/api/arm", "/api/disarm"):
             self._json({"error": "not found"}, status=404)
             return
+        if not self._valid_host():
+            self._json({"error": "invalid dashboard host"}, status=403)
+            return
         if not self._from_loopback():
             self._json({"error": "arming is local-only"}, status=403)
+            return
+        content_type = str(self.headers.get("Content-Type") or "")
+        if content_type.split(";", 1)[0].strip().lower() != "application/json":
+            self._json({"error": "Content-Type must be application/json"}, status=415)
+            return
+        if not self._valid_origin():
+            self._json({"error": "cross-origin dashboard write refused"}, status=403)
             return
         payload = self._read_body()
         if parsed.path == "/api/arm":
@@ -1272,7 +1395,39 @@ class _Handler(BaseHTTPRequestHandler):
             host = str(self.client_address[0])
         except (AttributeError, IndexError):
             return False
-        return host in ("127.0.0.1", "::1", "localhost")
+        return _is_loopback_host(host)
+
+    def _valid_host(self) -> bool:
+        """Reject DNS-rebinding Host headers before returning account data."""
+        raw = str(self.headers.get("Host") or "")
+        try:
+            hostname = urlparse(f"//{raw}").hostname or ""
+        except ValueError:
+            return False
+        return _is_loopback_host(hostname)
+
+    def _valid_origin(self) -> bool:
+        """Browser writes must originate from this exact local dashboard."""
+        raw = self.headers.get("Origin")
+        # Non-browser clients such as curl have no Origin; loopback + JSON still
+        # fence them. Browsers always send Origin for cross-origin POSTs.
+        if raw is None:
+            return True
+        try:
+            origin = urlparse(str(raw))
+            target = urlparse(f"//{self.headers.get('Host') or ''}")
+            origin_port = origin.port or 80
+            target_port = target.port or 80
+        except ValueError:
+            return False
+        return bool(
+            origin.scheme == "http"
+            and origin.hostname
+            and target.hostname
+            and _is_loopback_host(origin.hostname)
+            and origin.hostname.lower() == target.hostname.lower()
+            and origin_port == target_port
+        )
 
     def _read_body(self) -> dict[str, Any]:
         try:
@@ -1305,6 +1460,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._valid_host():
+            self._json({"error": "invalid dashboard host"}, status=403)
+            return
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
             self._send(200, HTML.encode("utf-8"), "text/html; charset=utf-8")
@@ -1349,7 +1507,17 @@ def serve(
     open_browser: bool = False,
     config_path: Path | str | None = None,
 ) -> ThreadingHTTPServer:
-    """Build the dashboard server (call ``serve_forever()`` to block)."""
+    """Build the loopback-only dashboard server.
+
+    There is no authentication layer and the API exposes account activity, so
+    accepting a wildcard/LAN bind would turn an operator console into a public
+    control surface. Use a separate authenticated reverse proxy if remote
+    access is ever required.
+    """
+    if not _is_loopback_host(host):
+        raise ValueError(
+            "dashboard host must be loopback (127.0.0.1, ::1, or localhost)"
+        )
     state = DashboardState(config, config_path=config_path)
     handler = type("BoundHandler", (_Handler,), {"state": state})
     server = ThreadingHTTPServer((host, port), handler)

@@ -43,10 +43,14 @@ class CryptoHistoryError(RuntimeError):
 
 
 def _http_json(url: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != "api.kraken.com":
+        raise CryptoHistoryError("crypto history URL must use HTTPS on api.kraken.com")
     request = urllib.request.Request(
         url, headers={"User-Agent": "agentic-trading/0.1 (research)"}
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    # The scheme and host are constrained above; no local/custom URL is allowed.
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, dict):
         raise CryptoHistoryError(f"unexpected payload type from {url}")

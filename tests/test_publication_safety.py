@@ -121,9 +121,10 @@ class ReadmeTests(unittest.TestCase):
         self.assertIn("## What this is not", text)
         self.assertIn("Not a guaranteed money-maker", text)
         self.assertIn("Not financial advice", text)
-        # The measured numbers have to be the honest ones, not marketing ones.
-        self.assertIn("856 bps", text)
-        self.assertIn("$2/year", text)
+        # Current disqualifying evidence must replace stale marketing numbers.
+        self.assertIn("measured fixed execution charge", text)
+        self.assertIn("newest walk-forward fold loses money", text)
+        self.assertIn("0 completed", text)
 
     def test_the_two_switches_are_documented_with_their_defaults(self) -> None:
         text = self._readme()

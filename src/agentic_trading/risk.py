@@ -16,8 +16,9 @@ Accepted journal event shape (for ShadowBook.from_journal / daily rebuild)::
       }
     }
 
-Only records with event == "accepted" (and shadow would_place or live may_place /
-accepted writes) are applied to the shadow book and daily notional rebuild.
+Only shadow records with event == "accepted" are applied to the shadow book.
+Live acceptances are reservations written before broker submission, not fills;
+both modes' unique buy reservations are used for the daily-notional rebuild.
 
 Day roll / shadow PnL
 ---------------------
@@ -84,20 +85,22 @@ class ShadowBook:
     _avg_cost: dict[str, Decimal] = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_journal(cls, journal: Any, *, days: int = 1) -> "ShadowBook":
-        """Rebuild from the journal. ``days > 1`` makes positions persist.
+    def from_journal(cls, journal: Any, *, days: Optional[int] = 1) -> "ShadowBook":
+        """Rebuild shadow fills from the journal.
 
-        Replaying only today is what made holdings and P&L vanish at midnight
-        and on every restart.
+        ``days > 1`` provides a bounded historical view for reports and tests;
+        ``days=None`` replays every date-named journal and is the only correct
+        restart view for positions, which have no arbitrary expiry date.
         """
         book = cls()
-        iterate = (
-            journal.iter_recent(days=days)
-            if days > 1 and hasattr(journal, "iter_recent")
-            else journal.iter_today()
-        )
+        if days is None and hasattr(journal, "iter_all"):
+            iterate = journal.iter_all()
+        elif days is not None and days > 1 and hasattr(journal, "iter_recent"):
+            iterate = journal.iter_recent(days=days)
+        else:
+            iterate = journal.iter_today()
         for record in iterate:
-            if not _is_accepted_record(record):
+            if not _is_shadow_fill_record(record):
                 continue
             intent = _intent_from_record(record, require_qty_price=True)
             if intent is None:
@@ -212,22 +215,26 @@ class RiskGuard:
         self._shadow_book = book
 
     def evaluate(
-        self, intent: OrderIntent, snapshot: PortfolioSnapshot
+        self,
+        intent: OrderIntent,
+        snapshot: PortfolioSnapshot,
+        *,
+        reserved_notional: Decimal = Decimal("0"),
     ) -> GuardDecision:
         self._roll_day_if_needed()
         notional = intent.resolved_notional()
         side = intent.side if isinstance(intent.side, Side) else Side(str(intent.side))
         symbol = intent.symbol.upper()
 
-        if self._kill_switch:
-            return self._deny(notional, "kill_switch")
-
         # Closing a position is risk-reducing, so it is measured against the
         # position — never against the entry budget. A held name is always
         # sellable even if the universe moved on without it, and the per-order
         # and per-day caps below exist to bound *opening* exposure. Refusing an
         # exit because the position grew past the entry cap, or because the
-        # day's notional was already spent, is how a book gets stranded.
+        # day's notional was already spent, is how a book gets stranded. The
+        # kill switch is an entry circuit breaker for the same reason: after a
+        # verified position/open-order read, a mechanical sell must still be
+        # able to reduce exposure.
         if side is Side.SELL:
             held_qty = Decimal(str(snapshot.held.get(symbol, Decimal("0"))))
             if held_qty <= 0:
@@ -242,6 +249,9 @@ class RiskGuard:
                     return self._deny(notional, "oversell")
             return self._allow(notional)
 
+        if self._kill_switch:
+            return self._deny(notional, "kill_switch")
+
         if symbol not in self.whitelist:
             return self._deny(notional, "symbol_not_whitelisted")
 
@@ -251,7 +261,12 @@ class RiskGuard:
             return self._deny(notional, "over_max_order")
 
         daily_cap = self.daily_notional_pct * equity
-        if self._daily_notional + notional > daily_cap:
+        # A deferred order may already own a reservation from its first
+        # acceptance. Re-validating it must replace that reservation, not add a
+        # second copy and reject itself at the very cap it already consumed.
+        reserved = max(Decimal("0"), Decimal(str(reserved_notional)))
+        committed = max(Decimal("0"), self._daily_notional - reserved)
+        if committed + notional > daily_cap:
             return self._deny(notional, "over_daily_notional")
 
         if side is Side.BUY:
@@ -325,8 +340,9 @@ class RiskGuard:
         self._kill_reason = ""
 
     def persist(self, state_dir: Path | str) -> None:
+        from agentic_trading import jsonio
+
         path = Path(state_dir)
-        path.mkdir(parents=True, exist_ok=True)
         payload = {
             "kill_switch": self._kill_switch,
             "kill_reason": self._kill_reason,
@@ -339,8 +355,8 @@ class RiskGuard:
             "mode": self.mode,
             "timezone": self.timezone,
         }
-        (path / _STATE_FILE).write_text(
-            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+        jsonio.write_text(
+            path / _STATE_FILE, jsonio.dumps(payload, indent=2) + "\n"
         )
 
     def load(self, state_dir: Path | str, journal: Any = None) -> None:
@@ -372,12 +388,24 @@ class RiskGuard:
 
         if journal is not None:
             rebuilt = Decimal("0")
+            reservations: set[str] = set()
             for record in journal.iter_today():
                 if not _is_accepted_record(record):
+                    continue
+                if _side_from_record(record) is Side.SELL:
+                    continue
+                root = str(
+                    record.get("reservation_of")
+                    or record.get("decision_id")
+                    or ""
+                )
+                if root and root in reservations:
                     continue
                 n = _notional_from_record(record)
                 if n is not None:
                     rebuilt += n
+                    if root:
+                        reservations.add(root)
             if rebuilt > self._daily_notional:
                 self._daily_notional = rebuilt
 
@@ -451,6 +479,16 @@ def _is_accepted_record(record: Mapping[str, Any]) -> bool:
     return "intent" in record or "notional" in record
 
 
+def _is_shadow_fill_record(record: Mapping[str, Any]) -> bool:
+    """A shadow acceptance is a simulated fill; a live acceptance is not.
+
+    Live ``accepted`` is written before arming and broker submission, so replaying
+    it as a fill creates phantom holdings after an unarmed or failed order.
+    Legacy shadow journals predate the explicit ``mode`` field and remain valid.
+    """
+    return _is_accepted_record(record) and str(record.get("mode") or "shadow") != "live"
+
+
 def _notional_from_record(record: Mapping[str, Any]) -> Optional[Decimal]:
     if record.get("notional") is not None:
         return Decimal(str(record["notional"]))
@@ -461,6 +499,19 @@ def _notional_from_record(record: Mapping[str, Any]) -> Optional[Decimal]:
         if intent.get("quantity") is not None and intent.get("ref_price") is not None:
             return Decimal(str(intent["quantity"])) * Decimal(str(intent["ref_price"]))
     return None
+
+
+def _side_from_record(record: Mapping[str, Any]) -> Optional[Side]:
+    raw = record.get("side")
+    intent = record.get("intent")
+    if raw is None and isinstance(intent, Mapping):
+        raw = intent.get("side")
+    if isinstance(raw, Side):
+        return raw
+    try:
+        return Side(str(raw).lower())
+    except (TypeError, ValueError):
+        return None
 
 
 def _intent_from_record(

@@ -36,7 +36,7 @@ def _quote(bid: str = "100.00", ask: str = "100.02", second: int = 0) -> dict:
     return {
         "symbol": "SPY",
         "observed_at": f"2026-09-16T14:00:{second:02d}Z",
-        "quote_at": f"2026-09-16T13:59:{second:02d}Z",
+        "quote_at": f"2026-09-16T14:00:{second:02d}Z",
         "bid": Decimal(bid),
         "ask": Decimal(ask),
     }
@@ -189,10 +189,10 @@ class DaemonShadowTests(unittest.TestCase):
             self.assertEqual(len(accepted), 1)
             self.assertEqual(client.calls_named("place_equity_order"), [])
             self.assertEqual(accepted[0]["session"], "regular")
+            self.assertEqual(accepted[0]["order_request"]["dollar_amount"], "1.00")
             self.assertEqual(
-                accepted[0]["order_request"]["dollar_amount"], "1.00"
+                accepted[0]["order_request"]["account_number"], "[redacted]"
             )
-            self.assertTrue(accepted[0]["order_request"]["account_number"])
 
     def test_closed_session_does_no_work(self) -> None:
         tools = load_tools()
@@ -232,9 +232,7 @@ class DaemonShadowTests(unittest.TestCase):
             _run(config, broker, FixtureStrategy(), _StubFeed([stale]))
 
             records = _records(config)
-            self.assertEqual(
-                _decision_events(config), ["stale_quotes_rejected"]
-            )
+            self.assertEqual(_decision_events(config), ["stale_quotes_rejected"])
             self.assertEqual(client.calls_named("review_equity_order"), [])
             self.assertEqual(client.calls_named("place_equity_order"), [])
 
@@ -249,9 +247,31 @@ class DaemonShadowTests(unittest.TestCase):
             tmp = Path(tmp_name)
             config = load_config(_write_config(tmp))
             _run(config, broker, FixtureStrategy(), _StubFeed([quote]))
-            self.assertEqual(
-                _decision_events(config), ["stale_quotes_rejected"]
-            )
+            self.assertEqual(_decision_events(config), ["stale_quotes_rejected"])
+
+    def test_quote_without_market_timestamp_is_rejected(self) -> None:
+        tools = load_tools()
+        client = FakeMcpClient(tools)
+        broker = Broker(client, tools)
+        quote = _quote()
+        quote.pop("quote_at")
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            config = load_config(_write_config(Path(tmp_name)))
+            _run(config, broker, FixtureStrategy(), _StubFeed([quote]))
+            self.assertEqual(_decision_events(config), ["stale_quotes_rejected"])
+
+    def test_fresh_arrival_cannot_hide_stale_market_time(self) -> None:
+        tools = load_tools()
+        client = FakeMcpClient(tools)
+        broker = Broker(client, tools)
+        quote = _quote()
+        quote["quote_at"] = "2026-09-15T14:00:00Z"
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            config = load_config(_write_config(Path(tmp_name)))
+            _run(config, broker, FixtureStrategy(), _StubFeed([quote]))
+            self.assertEqual(_decision_events(config), ["stale_quotes_rejected"])
 
 
 class DaemonLiveTests(unittest.TestCase):
@@ -263,7 +283,10 @@ class DaemonLiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
             config = load_config(_write_config(tmp, mode="live"))
-            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+            with (
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
                 _run(config, broker, FixtureStrategy(), _StubFeed([_quote()]))
 
             calls = client.calls_named("place_equity_order")
@@ -286,10 +309,32 @@ class DaemonLiveTests(unittest.TestCase):
             tmp = Path(tmp_name)
             config = load_config(_write_config(tmp, mode="live"))
             env = {k: v for k, v in os.environ.items() if k != "AGENTIC_ALLOW_LIVE"}
-            with mock.patch.dict(os.environ, env, clear=True):
+            env.pop("AGENTIC_ALLOW_AUTONOMY", None)
+            with (
+                mock.patch.dict(os.environ, env, clear=True),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
                 _run(config, broker, FixtureStrategy(), _StubFeed([_quote()]))
             self.assertEqual(client.calls_named("place_equity_order"), [])
             self.assertTrue(any(r.get("event") == "accepted" for r in _records(config)))
+
+    def test_environment_capability_alone_does_not_bypass_the_arm_gate(self) -> None:
+        tools = load_tools()
+        client = FakeMcpClient(tools)
+        broker = Broker(client, tools)
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            config = load_config(_write_config(Path(tmp_name), mode="live"))
+            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+                _run(config, broker, FixtureStrategy(), _StubFeed([_quote()]))
+
+            self.assertEqual(client.calls_named("place_equity_order"), [])
+            blocked = [
+                row
+                for row in _records(config)
+                if row.get("event") == "live_gate_blocked"
+            ]
+            self.assertEqual(blocked[0]["reason"], "workspace_not_eligible_or_armed")
 
     def test_dry_run_forces_shadow_even_when_mode_file_says_live(self) -> None:
         tools = load_tools()
@@ -303,7 +348,10 @@ class DaemonLiveTests(unittest.TestCase):
             state_dir.mkdir(parents=True, exist_ok=True)
             (state_dir / "mode").write_text("live\n", encoding="utf-8")
 
-            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+            with (
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
                 _run(
                     config,
                     broker,
@@ -330,24 +378,68 @@ class DaemonLiveTests(unittest.TestCase):
             self.assertTrue(any(r["reason"] == "open_order_pending" for r in rejected))
             self.assertEqual(client.calls_named("place_equity_order"), [])
 
+    def test_failed_open_order_read_blocks_all_live_writes(self) -> None:
+        tools = load_tools()
+        client = FakeMcpClient(tools)
+        broker = Broker(client, tools)
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            config = load_config(_write_config(Path(tmp_name), mode="live"))
+            with (
+                mock.patch.object(
+                    broker, "get_orders", side_effect=RuntimeError("orders unavailable")
+                ),
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+            ):
+                _run(config, broker, FixtureStrategy(), _StubFeed([_quote()]))
+
+            records = _records(config)
+            self.assertTrue(
+                any(r.get("event") == "open_orders_read_failed" for r in records)
+            )
+            self.assertTrue(
+                any(
+                    r.get("event") == "decision_deferred"
+                    and r.get("reason") == "open_orders_read_failed"
+                    for r in records
+                )
+            )
+            self.assertEqual(client.calls_named("review_equity_order"), [])
+            self.assertEqual(client.calls_named("place_equity_order"), [])
+
     def test_consecutive_place_errors_trip_kill_switch(self) -> None:
         tools = load_tools()
         client = FakeMcpClient(tools, place_error=RuntimeError("broker down"))
         broker = Broker(client, tools)
+
+        class _OneQuotePerPoll:
+            def __init__(self) -> None:
+                self.quotes = [
+                    _quote(second=0),
+                    _quote(second=5),
+                    _quote(second=10),
+                ]
+
+            def poll(self) -> list[dict]:
+                return [self.quotes.pop(0)] if self.quotes else []
 
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
             config = load_config(
                 _write_config(tmp, mode="live", extra=["max_consecutive_errors = 2"])
             )
-            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+            with (
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
                 _run(
                     config,
                     broker,
                     _AlwaysBuy(),
-                    _StubFeed(
-                        [_quote(second=0), _quote(second=5), _quote(second=10)]
-                    ),
+                    _OneQuotePerPoll(),
+                    once=False,
+                    duration_seconds=0.1,
+                    sleep=lambda _seconds: None,
                 )
             records = _records(config)
             failures = [r for r in records if r.get("event") == "place_failed"]
@@ -359,6 +451,51 @@ class DaemonLiveTests(unittest.TestCase):
             )
             self.assertTrue(state["kill_switch"])
             self.assertEqual(state["kill_reason"], "consecutive_place_failed")
+
+    def test_ambiguous_place_failure_blocks_later_intent_in_same_cycle(self) -> None:
+        tools = load_tools()
+        client = FakeMcpClient(tools, place_error=RuntimeError("response lost"))
+        broker = Broker(client, tools)
+
+        class _TwoBuys:
+            def on_quote(self, quote: dict) -> list[OrderIntent]:
+                common = {
+                    "symbol": quote["symbol"],
+                    "side": Side.BUY,
+                    "quantity": Decimal("0.01"),
+                    "ref_price": quote["ask"],
+                    "reason": "test:ambiguous",
+                    "created_at": FIXED_NOW,
+                }
+                return [
+                    OrderIntent(decision_id="ambiguous-1", **common),
+                    OrderIntent(decision_id="ambiguous-2", **common),
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            config = load_config(
+                _write_config(
+                    Path(tmp_name),
+                    mode="live",
+                    extra=["max_orders_per_day = 2"],
+                )
+            )
+            with (
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
+                _run(config, broker, _TwoBuys(), _StubFeed([_quote()]))
+
+            self.assertEqual(len(client.calls_named("place_equity_order")), 1)
+            records = _records(config)
+            self.assertTrue(
+                any(
+                    row.get("decision_id") == "ambiguous-2"
+                    and row.get("event") == "decision_deferred"
+                    and row.get("reason") == "open_orders_read_failed"
+                    for row in records
+                )
+            )
 
     def test_review_failure_blocks_placement_and_is_journaled(self) -> None:
         tools = load_tools()
@@ -387,7 +524,10 @@ class DaemonLiveTests(unittest.TestCase):
             config = load_config(
                 _write_config(tmp, mode="live", extra=["max_orders_per_day = 1"])
             )
-            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+            with (
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
                 _run(
                     config,
                     broker,
@@ -428,7 +568,10 @@ class DaemonLiveTests(unittest.TestCase):
                     extra=['session_policy = "extended"'],
                 )
             )
-            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+            with (
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
                 _run(
                     config,
                     broker,
@@ -474,14 +617,9 @@ class DaemonLiveTests(unittest.TestCase):
                     session="premarket",
                 )
             records = _records(config)
-            deferred = [
-                r for r in records if r.get("event") == "decision_deferred"
-            ]
+            deferred = [r for r in records if r.get("event") == "decision_deferred"]
             self.assertTrue(
-                any(
-                    r.get("reason") == "session_closed_for_equities"
-                    for r in deferred
-                ),
+                any(r.get("reason") == "session_closed_for_equities" for r in deferred),
                 deferred,
             )
             self.assertFalse(
@@ -648,7 +786,9 @@ class StartupResilienceTests(unittest.TestCase):
             exc = type(name, (Exception,), {})("down")
             self.assertTrue(module._is_retryable_startup_error(exc), name)
         for exc in (FileNotFoundError("x"), ValueError("x"), TypeError("x")):
-            self.assertFalse(module._is_retryable_startup_error(exc), type(exc).__name__)
+            self.assertFalse(
+                module._is_retryable_startup_error(exc), type(exc).__name__
+            )
 
     def test_the_daemon_joins_workers_even_when_startup_fails(self) -> None:
         """The finally block must not reference a name the try never bound."""
@@ -659,7 +799,9 @@ class StartupResilienceTests(unittest.TestCase):
         broker = Broker(client, tools)
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
-            config_path = _write_config(tmp, mode="shadow", extra=['autonomy = "manual"'])
+            config_path = _write_config(
+                tmp, mode="shadow", extra=['autonomy = "manual"']
+            )
             config = load_config(config_path)
             boom = RuntimeError("startup exploded")
             with mock.patch(
@@ -702,9 +844,10 @@ class StartupBannerTests(unittest.TestCase):
             )
             config = load_config(config_path)
             buffer = io.StringIO()
-            with mock.patch(
-                "agentic_trading.runtime._start_with_retry"
-            ), contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch("agentic_trading.runtime._start_with_retry"),
+                contextlib.redirect_stdout(buffer),
+            ):
                 module.run_daemon(
                     config,
                     broker=broker,
@@ -729,7 +872,16 @@ class SmallAccountModeTests(unittest.TestCase):
     in the journal, and release it as soon as the account can stand on its own.
     """
 
-    def _loop(self, tmp: Path, *, floor: str, equity: str = "50"):
+    def _loop(
+        self,
+        tmp: Path,
+        *,
+        floor: str,
+        equity: str = "50",
+        target: str = "1.00",
+        ready: bool = True,
+        daily_floor: str = "0",
+    ):
         from agentic_trading.runtime import _Loop
 
         # A 1% cap is the real situation: $0.50 of a $50 account, below the
@@ -738,12 +890,62 @@ class SmallAccountModeTests(unittest.TestCase):
             tmp,
             mode="shadow",
             max_order_pct="0.01",
-            extra=['autonomy = "manual"', f'small_account_max_order_pct = "{floor}"'],
+            extra=[
+                'autonomy = "manual"',
+                f'small_account_target_notional = "{target}"',
+                f'small_account_max_order_pct = "{floor}"',
+                f'small_account_max_daily_pct = "{daily_floor}"',
+            ],
         )
         config = load_config(config_path)
         client = FakeMcpClient(load_tools())
         broker = Broker(client, load_tools())
         (tmp / "state").mkdir(parents=True, exist_ok=True)
+        from agentic_trading.evidence import (
+            effective_per_order_pct,
+            small_account_floor_spec,
+        )
+        from agentic_trading.execution import cost_model_for
+
+        generated = datetime.now(timezone.utc).isoformat()
+        costs = cost_model_for(config.state_dir)
+        floor_model = small_account_floor_spec(config)
+        evidence_report = {
+            "schema_version": 4,
+            "generated_at": generated,
+            "strategy": config.strategy,
+            "base_sizing": config.sizing,
+            "max_positions": config.max_open_positions,
+            "series": {"symbols": sorted(config.effective_whitelist)},
+            "starting_equity": 50.0,
+            "configs": {
+                "production": {"per_order_pct": effective_per_order_pct(config)}
+            },
+            "costs": {
+                "assumed_per_side_bps": float(costs.per_side_bps),
+                "assumed_fee_per_order_usd": float(costs.fee_per_order),
+            },
+        }
+        if floor_model is not None:
+            evidence_report["small_account_floor"] = floor_model.to_dict()
+        (tmp / "state" / "strategy_evidence.json").write_text(
+            json.dumps(evidence_report),
+            encoding="utf-8",
+        )
+        (tmp / "state" / "promotion.json").write_text(
+            json.dumps(
+                {
+                    "last_assessment": {
+                        "eligible": False,
+                        "evidence": {
+                            "retrospective_eligible": ready,
+                            "report_generated_at": generated,
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
         loop = _Loop(config, broker, FixtureStrategy())
         loop.guard.update_equity(Decimal(equity))
         return loop, config
@@ -774,6 +976,43 @@ class SmallAccountModeTests(unittest.TestCase):
             self.assertIsNone(loop.apply_size_floor())
         self.assertEqual(Decimal(loop.guard.max_order_pct), before)
 
+    def test_the_floor_waits_for_retrospective_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, _ = self._loop(tmp, floor="0.025", ready=False)
+            event = loop.apply_size_floor()
+            again = loop.apply_size_floor()
+        assert event is not None
+        self.assertFalse(event["engaged"])
+        self.assertFalse(event["forward_floor_ready"])
+        self.assertIn("held until", event["reason"])
+        self.assertEqual(Decimal(loop.guard.max_order_pct), Decimal("0.01"))
+        self.assertIsNone(again)
+
+    def test_old_smaller_size_evidence_cannot_authorize_the_five_dollar_floor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, config = self._loop(
+                tmp,
+                floor="0.11",
+                daily_floor="0.11",
+                target="5.00",
+            )
+            report_path = Path(config.state_dir) / "strategy_evidence.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["configs"]["production"]["per_order_pct"] = 0.01
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            event = loop.apply_size_floor()
+
+        assert event is not None
+        self.assertFalse(event["forward_floor_ready"])
+        self.assertFalse(event["engaged"])
+        self.assertIn("current floor size", event["readiness_blockers"][0])
+        self.assertEqual(Decimal(loop.guard.max_order_pct), Decimal("0.01"))
+
     def test_it_releases_the_cap_when_the_account_grows(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
@@ -793,9 +1032,10 @@ class SmallAccountModeTests(unittest.TestCase):
             loop, _ = self._loop(tmp, floor="0.02")
             event = loop.apply_size_floor()
         assert event is not None
-        self.assertTrue(event["engaged"])
+        self.assertFalse(event["engaged"])
         self.assertFalse(event["sufficient"])
         self.assertIn("raise small_account_max_order_pct", event["reason"])
+        self.assertEqual(Decimal(loop.guard.max_order_pct), Decimal("0.01"))
 
     def test_the_refused_entry_becomes_a_placeable_order(self) -> None:
         """End to end: the intent that produced `below_min_notional` is sized."""
@@ -830,3 +1070,72 @@ class SmallAccountModeTests(unittest.TestCase):
         self.assertGreaterEqual(
             Decimal(resized[0]["to_quantity"]) * Decimal("233.85"), Decimal("1")
         )
+
+    def test_five_dollar_floor_sizes_one_forward_entry_per_day(self) -> None:
+        """The requested production unit is tested and enforced end to end."""
+        from agentic_trading.types import OrderIntent, Side
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            loop, _ = self._loop(
+                tmp,
+                floor="0.11",
+                daily_floor="0.11",
+                target="5.00",
+            )
+            event = loop.apply_size_floor()
+            assert event is not None
+            intent = OrderIntent(
+                decision_id="floor-five",
+                symbol="BCH-USD",
+                side=Side.BUY,
+                quantity=Decimal("1"),
+                ref_price=Decimal("233.85"),
+                reason="trend_entry",
+                created_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+            )
+            loop.process_intent(intent)
+            records = _records(loop.config)
+            resized = next(row for row in records if row.get("event") == "resized")
+
+        notional = Decimal(resized["to_quantity"]) * Decimal("233.85")
+        self.assertTrue(event["forward_floor_ready"])
+        self.assertEqual(event["target_notional"], "5.00")
+        self.assertEqual(event["effective_max_order_pct"], "0.1020")
+        self.assertEqual(event["effective_daily_notional_pct"], "0.11")
+        self.assertGreaterEqual(notional, Decimal("5.00"))
+        self.assertLessEqual(notional, Decimal("5.10"))
+
+    def test_daily_floor_rejects_a_second_five_dollar_opening(self) -> None:
+        from agentic_trading.risk import PortfolioSnapshot
+        from agentic_trading.types import OrderIntent, Side
+
+        with tempfile.TemporaryDirectory() as name:
+            loop, _ = self._loop(
+                Path(name),
+                floor="0.11",
+                daily_floor="0.11",
+                target="5.00",
+            )
+            loop.apply_size_floor()
+            snapshot = PortfolioSnapshot(open_positions=0, held={})
+
+            def entry(decision_id: str) -> OrderIntent:
+                return OrderIntent(
+                    decision_id=decision_id,
+                    symbol="SPY",
+                    side=Side.BUY,
+                    quantity=Decimal("0.0505"),
+                    ref_price=Decimal("100"),
+                    reason="floor_daily_cap",
+                    created_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+                )
+
+            first = entry("floor-daily-1")
+            first_verdict = loop.guard.evaluate(first, snapshot)
+            loop.guard.record_accepted(first)
+            second_verdict = loop.guard.evaluate(entry("floor-daily-2"), snapshot)
+
+        self.assertTrue(first_verdict.allowed)
+        self.assertFalse(second_verdict.allowed)
+        self.assertEqual(second_verdict.reason, "over_daily_notional")

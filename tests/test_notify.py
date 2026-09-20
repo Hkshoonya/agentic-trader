@@ -57,7 +57,7 @@ class AlertContentTests(unittest.TestCase):
         )
         self.assertIn("BTC-USD", alert.body)
         self.assertIn("$1.61", alert.body)
-        self.assertIn("AGENTIC_ALLOW_LIVE", alert.body)
+        self.assertIn("workspace arm latch", alert.body)
 
     def test_routine_events_are_silent(self) -> None:
         for event in ("resized", "advisor", "rejected", "cycle_stats", "regime"):

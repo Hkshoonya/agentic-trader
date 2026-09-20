@@ -34,6 +34,11 @@ evolution_population = 24
 evolution_generations = 6
 promotion_cycles_required = 3     # consecutive passing assessments per stage
 min_oos_trades = 30               # out-of-sample sample floor for promotion
+# The trend portfolio also has to prove itself prospectively. Historical
+# walk-forward results may select a plausible rule; they do not substitute for
+# a live-tape shadow record that was unavailable when the rule was chosen.
+min_forward_trades = 30
+min_forward_days = 30
 # For Phase 1 SPY scalper (shadow by default):
 # strategy = "spy_scalper"
 # scalper_config = "config.json"
@@ -45,18 +50,18 @@ max_order_pct = "0.05"
 daily_notional_pct = "0.20"
 daily_loss_pct = "0.03"
 max_open_positions = 1
-# Small-account mode. A $1.00 minimum order is 2% of a $50 account, so a 1%
-# per-order ceiling can never place one: the agent refuses every entry with
-# `below_min_notional`. Setting this above zero authorises a temporary, larger
-# per-order cap — used only while the account is too small to place an
-# evidence-compliant order, released automatically once it is big enough, and
-# reported on the console with the drawdown the walk-forward measured at that
-# size. 0 disables the rule and the agent simply refuses to trade until the
-# account grows.
+# Small-account forward-research floor. If enabled, the exact target size must
+# pass retrospective return, cost-stress, current-regime and drawdown gates
+# before the cap rises in shadow. It does not bypass forward promotion or live
+# arming. Equal order/day ceilings permit at most one floor-sized opening daily.
+small_account_target_notional = "5.00"
 small_account_max_order_pct = "0"
+small_account_max_daily_pct = "0"
 # "flat" gives every entry the same dollars. "proportional" scales the budget by
-# the strategy's inverse-volatility weight (1.0 = a 20%-vol asset), which on this
-# universe earns the same bps per trade with roughly a third of the drawdown.
+# the strategy's inverse-volatility weight (1.0 = a 20%-vol asset). This changes
+# risk allocation; it is not evidence that either version is profitable. A
+# fixed-dollar small-account floor cannot be scaled below its minimum: there the
+# weight ranks which signal gets the limited daily budget instead.
 sizing = "flat"
 # --- The daily budget follows the account size ------------------------------
 # [ up_to_equity, share_at_full_confidence, share_at_zero_confidence ]
@@ -91,6 +96,10 @@ max_cost_share_of_order = "0.02"
 # to say so: with this false the promotion gate refuses to arm the book, and
 # with it true every assessment carries the mismatch as a visible note.
 accept_evidence_override = false
+# Promotion requires both of the newest walk-forward windows to be profitable,
+# with enough completed trades that one lucky exit cannot qualify as a regime.
+min_recent_positive_folds = 2
+min_recent_fold_trades = 10
 # --- Symbol scout: let the agent add and drop symbols from data --------------
 # Off by default: the whitelist you wrote is the set of instruments this account
 # is authorised to trade until you say otherwise. With it on, the scout reads

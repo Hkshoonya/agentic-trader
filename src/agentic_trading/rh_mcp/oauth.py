@@ -401,7 +401,8 @@ def run_desktop_oauth(
         if not code:
             raise AuthFailed("could not parse authorization code") from exc
 
-    assert code is not None
+    if code is None:  # Defensive even when Python runs with assertions disabled.
+        raise AuthFailed("authorization completed without a code")
     tokens = exchange_code(
         code=code,
         redirect_uri=redirect_uri,

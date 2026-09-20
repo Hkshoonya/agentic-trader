@@ -46,7 +46,7 @@ def _crypto_quote(second: int = 0) -> dict:
     return {
         "symbol": "BTCUSD",
         "observed_at": f"2026-09-16T14:00:{second:02d}Z",
-        "quote_at": f"2026-09-16T13:59:{second:02d}Z",
+        "quote_at": f"2026-09-16T14:00:{second:02d}Z",
         "bid": Decimal("118250.00"),
         "ask": Decimal("118280.00"),
     }
@@ -401,7 +401,7 @@ class CryptoDaemonGateTests(unittest.TestCase):
             self.assertTrue(accepted[0]["would_place"])
             self.assertFalse(accepted[0]["may_place"])
             self.assertEqual(
-                accepted[0]["order_request"]["rhs_account_number"], CRYPTO_ACCOUNT
+                accepted[0]["order_request"]["rhs_account_number"], "[redacted]"
             )
             self.assertEqual(client.calls_named("place_crypto_order"), [])
             self.assertEqual(client.calls_named("review_equity_order"), [])
@@ -413,7 +413,12 @@ class CryptoDaemonGateTests(unittest.TestCase):
                 broker, client = self._broker()
                 with tempfile.TemporaryDirectory() as name:
                     config = load_config(_write_config(Path(name), mode="live"))
-                    with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+                    with (
+                        mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                        mock.patch(
+                            "agentic_trading.arming.is_armed", return_value=True
+                        ),
+                    ):
                         _run(config, broker, stage=stage)
 
                     self.assertEqual(client.calls_named("place_crypto_order"), [])
@@ -430,7 +435,10 @@ class CryptoDaemonGateTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as name:
             config = load_config(_write_config(Path(name), mode="live"))
-            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+            with (
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
                 _run(config, broker, stage="live")
 
             calls = client.calls_named("place_crypto_order")
@@ -458,14 +466,19 @@ class CryptoDaemonGateTests(unittest.TestCase):
             # A proven-but-disarmed system must say so, not look like shadow.
             blocked = [r for r in records if r.get("event") == "live_gate_blocked"]
             self.assertEqual(len(blocked), 1, records)
-            self.assertEqual(blocked[0]["reason"], "AGENTIC_ALLOW_LIVE_not_set")
+            self.assertEqual(
+                blocked[0]["reason"], "submission_capability_not_enabled"
+            )
 
     def test_live_gate_state_is_published_for_the_console(self) -> None:
         broker, _ = self._broker()
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
             config = load_config(_write_config(tmp, mode="live"))
-            with mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}):
+            with (
+                mock.patch.dict(os.environ, {"AGENTIC_ALLOW_LIVE": "1"}),
+                mock.patch("agentic_trading.arming.is_armed", return_value=True),
+            ):
                 _run(config, broker, stage="live")
             gate = json.loads((Path(config.state_dir) / "live_gate.json").read_text())
 

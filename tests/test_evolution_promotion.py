@@ -109,7 +109,9 @@ class BacktestHonestyTests(unittest.TestCase):
         trade = metrics.trades_detail[0]
         self.assertEqual(metrics.trades_detail[0].exit_reason, "timeout")
         expected_entry = CostModel().buy_price(Decimal("95"))
-        self.assertAlmostEqual(float(trade.entry_price), float(expected_entry), places=6)
+        self.assertAlmostEqual(
+            float(trade.entry_price), float(expected_entry), places=6
+        )
 
     def test_stop_wins_when_a_bar_touches_both_levels(self) -> None:
         bars = [
@@ -296,6 +298,20 @@ class PromotionGateTests(unittest.TestCase):
         self.assertEqual(state.streak, 0)
         self.assertEqual(events[0]["event"], "promotion_streak_reset")
 
+    def test_failed_evidence_immediately_demotes_a_live_stage(self) -> None:
+        state = PromotionState(stage="live", stage_equity="100")
+
+        events = apply_assessment(
+            state,
+            self._assessment(eligible=False, reasons=["latest fold lost"]),
+            PromotionPolicy(required_cycles=2),
+        )
+
+        self.assertEqual(state.stage, "shadow")
+        demotion = next(event for event in events if event["event"] == "demotion")
+        self.assertEqual(demotion["reason"], "evidence_gate_failed")
+        self.assertEqual(demotion["reasons"], ["latest fold lost"])
+
     def test_stage_progression_stops_at_live(self) -> None:
         policy = PromotionPolicy(required_cycles=1)
         state = PromotionState()
@@ -392,26 +408,44 @@ class WalkForwardGateTests(unittest.TestCase):
             "per_order_pct": 0.01,
             "trades": 495,
             "expectancy_bps": 855.5,
+            "return_pct": 42.0,
             "max_drawdown_pct": 13.96,
             "bootstrap_p_value": 0.0005,
             "profit_factor": 3.69,
             "win_rate": 0.5,
             "eligible": True,
             "folds": [
-                {"index": 0, "expectancy_bps": 38769},
-                {"index": 1, "expectancy_bps": 4203},
-                {"index": 2, "expectancy_bps": 6590},
-                {"index": 3, "expectancy_bps": -186},
-                {"index": 4, "expectancy_bps": 154},
-                {"index": 5, "expectancy_bps": 46},
+                {"index": 0, "trades": 80, "expectancy_bps": 38769, "return_pct": 5.0},
+                {"index": 1, "trades": 80, "expectancy_bps": 4203, "return_pct": 3.0},
+                {"index": 2, "trades": 80, "expectancy_bps": 6590, "return_pct": 4.0},
+                {"index": 3, "trades": 80, "expectancy_bps": -186, "return_pct": -1.0},
+                {"index": 4, "trades": 80, "expectancy_bps": 154, "return_pct": 2.0},
+                {"index": 5, "trades": 80, "expectancy_bps": 46, "return_pct": 1.0},
             ],
         }
         production.update(overrides.pop("production", {}))
         report = {
+            "schema_version": 4,
             "generated_at": now,
+            "starting_equity": 50.0,
             "drawdown_ceiling_pct": 15.0,
             "series": {"symbols": ["SPY", "BTC-USD"], "bars": 1000},
+            "costs": {
+                "assumed_per_side_bps": 2.0,
+                "assumed_fee_per_order_usd": 0.0,
+            },
             "configs": {"production": production, "inverse_vol": {}},
+            "cost_stress": {
+                "multiplier": 2.0,
+                "trades": 495,
+                "expectancy_bps": 400.0,
+                "return_pct": 18.0,
+                "max_drawdown_pct": 14.0,
+                "folds": [
+                    {"index": 4, "trades": 80, "return_pct": 1.0},
+                    {"index": 5, "trades": 80, "return_pct": 0.5},
+                ],
+            },
             "gate_size": {
                 "per_order_pct": 0.01,
                 "max_drawdown_pct": 13.96,
@@ -461,6 +495,60 @@ class WalkForwardGateTests(unittest.TestCase):
         self.assertFalse(assessment.eligible)
         self.assertTrue(any("drawdown" in r for r in assessment.reasons))
 
+    def test_positive_trade_expectancy_cannot_hide_an_account_loss(self) -> None:
+        assessment = assess_walkforward(
+            self._report(production={"return_pct": -0.01}),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("account return" in r for r in assessment.reasons))
+
+    def test_recent_folds_must_each_have_a_real_sample_and_profit(self) -> None:
+        folds = [
+            {"index": index, "trades": 80, "return_pct": 1.0} for index in range(4)
+        ]
+        folds.extend(
+            [
+                {"index": 4, "trades": 1, "return_pct": 5.0},
+                {"index": 5, "trades": 80, "return_pct": -0.01},
+            ]
+        )
+        assessment = assess_walkforward(
+            self._report(production={"folds": folds}),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("fewer than" in r for r in assessment.reasons))
+        self.assertTrue(any("recent" in r for r in assessment.reasons))
+
+    def test_doubled_execution_costs_must_remain_profitable(self) -> None:
+        assessment = assess_walkforward(
+            self._report(
+                cost_stress={
+                    "multiplier": 2.0,
+                    "expectancy_bps": -2.0,
+                    "return_pct": -1.0,
+                    "max_drawdown_pct": 16.0,
+                    "folds": [{"trades": 80, "return_pct": -0.5}],
+                }
+            ),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("doubled-cost" in r for r in assessment.reasons))
+
+    def test_missing_cost_stress_cannot_promote(self) -> None:
+        report = self._report()
+        report.pop("cost_stress")
+        assessment = assess_walkforward(
+            report, PromotionPolicy(), live_per_order_pct=0.01
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("stress test" in r for r in assessment.reasons))
+
     def test_a_losing_fold_majority_blocks_promotion(self) -> None:
         assessment = assess_walkforward(
             self._report(
@@ -477,6 +565,143 @@ class WalkForwardGateTests(unittest.TestCase):
         )
         self.assertFalse(assessment.eligible)
         self.assertTrue(any("folds profitable" in r for r in assessment.reasons))
+
+    def test_fold_profitability_uses_account_return_not_mean_trade(self) -> None:
+        assessment = assess_walkforward(
+            self._report(
+                production={
+                    "folds": [
+                        {"index": 0, "expectancy_bps": 20, "return_pct": -2.0},
+                        {"index": 1, "expectancy_bps": 20, "return_pct": -1.0},
+                        {"index": 2, "expectancy_bps": 20, "return_pct": 1.0},
+                    ]
+                }
+            ),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertEqual(assessment.evidence["folds_positive"], 1)
+
+    def test_a_losing_latest_fold_blocks_promotion_despite_old_wins(self) -> None:
+        folds = [
+            {"index": index, "expectancy_bps": 20, "return_pct": 1.0}
+            for index in range(5)
+        ]
+        folds.append({"index": 5, "expectancy_bps": 20, "return_pct": -0.25})
+        assessment = assess_walkforward(
+            self._report(production={"folds": folds}),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(
+            any("latest walk-forward fold" in r for r in assessment.reasons)
+        )
+
+    def test_trend_promotion_requires_a_positive_forward_shadow_record(self) -> None:
+        policy = PromotionPolicy(min_forward_trades=2, min_forward_days=7)
+        thin = assess_walkforward(
+            self._report(
+                forward={
+                    "completed_trades": 1,
+                    "observed_days": 10,
+                    "realized_pnl": "1.00",
+                }
+            ),
+            policy,
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(thin.eligible)
+        self.assertTrue(any("forward shadow sample" in r for r in thin.reasons))
+        self.assertLess(thin.confidence, 0.5)
+        self.assertTrue(
+            thin.evidence["retrospective_eligible"],
+            "missing forward observations must not deadlock forward collection",
+        )
+        self.assertGreater(thin.evidence["retrospective_confidence"], 0.5)
+
+        proven = assess_walkforward(
+            self._report(
+                forward={
+                    "completed_trades": 2,
+                    "observed_days": 10,
+                    "realized_pnl": "1.00",
+                }
+            ),
+            policy,
+            live_per_order_pct=0.01,
+        )
+        self.assertTrue(proven.eligible, proven.reasons)
+        self.assertEqual(proven.evidence["forward_trades"], 2)
+
+    def test_a_historical_failure_cannot_unlock_the_forward_floor(self) -> None:
+        assessment = assess_walkforward(
+            self._report(
+                production={"return_pct": -1.0},
+                forward={
+                    "completed_trades": 0,
+                    "observed_days": 0,
+                    "realized_pnl": "0",
+                },
+            ),
+            PromotionPolicy(min_forward_trades=30, min_forward_days=30),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.evidence["retrospective_eligible"])
+        self.assertTrue(
+            any(
+                "account return" in reason
+                for reason in assessment.evidence["retrospective_reasons"]
+            )
+        )
+
+    def test_stale_floor_sizing_is_a_retrospective_blocker(self) -> None:
+        assessment = assess_walkforward(
+            self._report(
+                sizing_check={
+                    "current": False,
+                    "reported_per_order_pct": 0.01,
+                    "current_per_order_pct": 0.102,
+                }
+            ),
+            PromotionPolicy(min_forward_trades=30, min_forward_days=30),
+            live_per_order_pct=0.102,
+        )
+        self.assertFalse(assessment.evidence["retrospective_eligible"])
+        self.assertTrue(any("sizing is stale" in r for r in assessment.reasons))
+
+    def test_a_complete_but_losing_forward_record_still_blocks(self) -> None:
+        assessment = assess_walkforward(
+            self._report(
+                forward={
+                    "completed_trades": 30,
+                    "observed_days": 60,
+                    "realized_pnl": "-0.01",
+                }
+            ),
+            PromotionPolicy(min_forward_trades=30, min_forward_days=30),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("forward shadow P&L" in r for r in assessment.reasons))
+
+    def test_a_stale_cost_model_blocks_promotion(self) -> None:
+        assessment = assess_walkforward(
+            self._report(
+                cost_check={
+                    "current": False,
+                    "reported_per_side_bps": 2.0,
+                    "current_per_side_bps": 0.0,
+                    "reported_fee_per_order_usd": 0.0,
+                    "current_fee_per_order_usd": 0.05,
+                }
+            ),
+            PromotionPolicy(),
+            live_per_order_pct=0.01,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertTrue(any("cost model is stale" in r for r in assessment.reasons))
 
     def test_no_size_fits_the_ceiling_blocks_promotion(self) -> None:
         assessment = assess_walkforward(
@@ -551,9 +776,18 @@ class PrimaryEvidenceTests(unittest.TestCase):
             tmp = Path(name)
             config = self._config(tmp)
             report = WalkForwardGateTests()._report()
-            (tmp / "state" / "strategy_evidence.json").write_text(
-                _json.dumps(report)
+            report.update(
+                {
+                    "strategy": config.strategy,
+                    "base_sizing": config.sizing,
+                    "max_positions": config.max_open_positions,
+                    "series": {
+                        "symbols": sorted(config.effective_whitelist),
+                        "bars": 1000,
+                    },
+                }
             )
+            (tmp / "state" / "strategy_evidence.json").write_text(_json.dumps(report))
             # The ladder has to be inside the measured ceiling, or the gate
             # refuses on size regardless of how good the rule looks.
             from agentic_trading.limits import Limits, save_limits
@@ -588,18 +822,12 @@ class EvidenceKeyTests(unittest.TestCase):
         second = assess_walkforward(
             relabelled, PromotionPolicy(), live_per_order_pct=0.01
         )
-        self.assertEqual(
-            first.evidence["report_key"], second.evidence["report_key"]
-        )
+        self.assertEqual(first.evidence["report_key"], second.evidence["report_key"])
 
         # A different measurement is different evidence.
         changed = WalkForwardGateTests()._report(production={"trades": 496})
-        third = assess_walkforward(
-            changed, PromotionPolicy(), live_per_order_pct=0.01
-        )
-        self.assertNotEqual(
-            first.evidence["report_key"], third.evidence["report_key"]
-        )
+        third = assess_walkforward(changed, PromotionPolicy(), live_per_order_pct=0.01)
+        self.assertNotEqual(first.evidence["report_key"], third.evidence["report_key"])
 
     def test_a_lowered_ceiling_makes_the_size_claim_new_evidence(self) -> None:
         from agentic_trading.promotion import assess_walkforward

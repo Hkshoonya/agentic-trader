@@ -2,10 +2,10 @@
 # <workspace>/config/agentic.toml on first run; the workspace is the working
 # directory for every child process, so these relative paths stay inside it.
 #
-# Two switches are intentionally NOT in this file, because they are session
-# environment and not policy: AGENTIC_ALLOW_LIVE (submit real orders) and
-# AGENTIC_ALLOW_AUTONOMY (let the agent promote itself). The launcher sets them
-# per session, both off until you turn them on.
+# Machine capabilities are intentionally NOT in this file:
+# AGENTIC_ALLOW_LIVE and AGENTIC_ALLOW_AUTONOMY are per-session environment.
+# Submission additionally requires the revalidated workspace arm latch written
+# by the launcher/dashboard; neither half can submit on its own.
 
 mode = "shadow"  # shadow | live — the state file can raise this, never lower it
 strategy = "trend_crypto"
@@ -40,19 +40,19 @@ discovery_min_dollar_volume = "5000000"
 discovery_max_spread_bps = "25"
 discovery_max_correlation = "0.85"
 
-# Per-order ceiling comes from the walk-forward evidence, not from appetite:
-# 1% per order is the largest flat size whose marked-to-market drawdown stays
-# inside the 15% gate on 11 years of this universe.
+# Protective ordinary ceilings. A fresh install remains shadow-only; neither
+# value is a claim that the included strategy is profitable.
 max_order_pct = "0.01"
 daily_notional_pct = "0.04"
 daily_loss_pct = "0.03"
-# Small-account mode: if the account is too small for a $1.00 order at the 1%
-# ceiling, raise the cap to just enough to place one (never above this), and
-# drop back the moment the account is big enough. 0 = off, which means refusing
-# to trade rather than trading bigger than the evidence supports.
-small_account_max_order_pct = "0.025"
+# Small-account forward floor: test the exact $5 size first, then permit one
+# shadow opening per day while the full forward/live gates remain in force.
+small_account_target_notional = "5.00"
+small_account_max_order_pct = "0.11"
+small_account_max_daily_pct = "0.11"
 # Size entries in proportion to each symbol's inverse-volatility weight, so a
-# 60%-vol pair takes a third of the dollars a 20%-vol name takes.
+# 60%-vol pair normally takes a third of the dollars a 20%-vol name takes. At
+# the fixed $5 floor, rank chooses which signal receives the one daily slot.
 sizing = "proportional"
 min_order_notional = "1.00"
 max_open_positions = 4

@@ -45,6 +45,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.symbol_whitelist, frozenset({"SPY"}))
         self.assertEqual(cfg.strategy, "fixture")
         self.assertIsNone(cfg.scalper_config)
+        self.assertEqual(cfg.min_forward_trades, 30)
+        self.assertEqual(cfg.min_forward_days, 30.0)
+        self.assertEqual(cfg.small_account_target_notional, Decimal("5.00"))
+        self.assertEqual(cfg.small_account_max_order_pct, Decimal("0"))
+        self.assertEqual(cfg.small_account_max_daily_pct, Decimal("0"))
 
     def test_load_strategy_and_scalper_config(self):
         with tempfile.TemporaryDirectory() as tmp_name:
@@ -78,6 +83,60 @@ class ConfigTests(unittest.TestCase):
             cfg = load_config(cfg_path)
             self.assertEqual(cfg.strategy, "spy_scalper")
             self.assertEqual(cfg.scalper_config, Path("config.json"))
+
+    def test_quoted_boolean_cannot_enable_an_autonomy_switch(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "agentic.toml"
+            original = Path("config/agentic.example.toml").read_text(encoding="utf-8")
+            path.write_text(original + '\nauto_arm = "false"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "auto_arm must be a TOML boolean"):
+                load_config(path)
+
+    def test_risk_percentages_are_bounded_and_finite(self):
+        original = Path("config/agentic.example.toml").read_text(encoding="utf-8")
+        for field, value in (
+            ("max_order_pct", '"1.01"'),
+            ("daily_loss_pct", '"NaN"'),
+            ("max_cost_share_of_order", '"-0.01"'),
+            ("small_account_max_daily_pct", '"1.01"'),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp_name:
+                path = Path(tmp_name) / "agentic.toml"
+                lines = [
+                    f"{field} = {value}" if line.startswith(f"{field} = ") else line
+                    for line in original.splitlines()
+                ]
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, field):
+                    load_config(path)
+
+    def test_small_account_target_cannot_undercut_the_broker_minimum(self):
+        original = Path("config/agentic.example.toml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "agentic.toml"
+            path.write_text(
+                original.replace(
+                    'small_account_target_notional = "5.00"',
+                    'small_account_target_notional = "0.50"',
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "small_account_target_notional"):
+                load_config(path)
+
+    def test_remote_plain_http_broker_endpoint_is_rejected(self):
+        original = Path("config/agentic.example.toml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "agentic.toml"
+            path.write_text(
+                original.replace(
+                    'mcp_url = "https://agent.robinhood.com/mcp/trading"',
+                    'mcp_url = "http://broker.example/mcp"',
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "HTTPS"):
+                load_config(path)
 
 
 class StrategyFactoryTests(unittest.TestCase):

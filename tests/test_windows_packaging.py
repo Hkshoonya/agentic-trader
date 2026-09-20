@@ -67,9 +67,7 @@ class BootstrapTests(unittest.TestCase):
             config = workspace / "config" / "agentic.toml"
             config.write_text(config.read_text() + "\n# operator edit\n")
             again = bootstrap_workspace(workspace, payload=REPO)
-            self.assertEqual(
-                json.loads(marker.read_text())["stage"], "probation"
-            )
+            self.assertEqual(json.loads(marker.read_text())["stage"], "probation")
             self.assertIn("operator edit", config.read_text())
             self.assertEqual(again.created, [])
             self.assertEqual(again.copied_bars, 0)
@@ -98,16 +96,12 @@ class SwitchTests(unittest.TestCase):
     def test_arming_is_explicit_and_reversible(self) -> None:
         armed = child_env(Path("/tmp/ws"), arm_live=True, environ={})
         self.assertEqual(armed[ARM_SWITCH], "1")
-        disarmed = child_env(
-            Path("/tmp/ws"), arm_live=False, environ={ARM_SWITCH: "1"}
-        )
+        disarmed = child_env(Path("/tmp/ws"), arm_live=False, environ={ARM_SWITCH: "1"})
         self.assertNotIn(ARM_SWITCH, disarmed)
 
     def test_a_stale_environment_cannot_smuggle_the_switch_through(self) -> None:
         """A machine-wide AGENTIC_ALLOW_LIVE must not arm a copied install."""
-        env = child_env(
-            Path("/tmp/ws"), arm_live=False, environ={ARM_SWITCH: "1"}
-        )
+        env = child_env(Path("/tmp/ws"), arm_live=False, environ={ARM_SWITCH: "1"})
         self.assertNotIn(ARM_SWITCH, env)
 
     def test_the_workspace_dotenv_fills_in_the_llm_key(self) -> None:
@@ -202,7 +196,9 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(command[1], "status")
 
     def test_a_source_run_uses_the_module(self) -> None:
-        command = cli_command(Path("/tmp/ws"), ["status"], python=Path("/usr/bin/python3"))
+        command = cli_command(
+            Path("/tmp/ws"), ["status"], python=Path("/usr/bin/python3")
+        )
         self.assertEqual(
             command, ["/usr/bin/python3", "-m", "agentic_trading", "status"]
         )
@@ -287,8 +283,14 @@ class PathIsolationTests(unittest.TestCase):
         import tomllib
 
         parsed = tomllib.loads(text)
-        for key in ("state_dir", "journal_dir", "history_path", "token_path",
-                    "tools_snapshot_path", "quotes_path"):
+        for key in (
+            "state_dir",
+            "journal_dir",
+            "history_path",
+            "token_path",
+            "tools_snapshot_path",
+            "quotes_path",
+        ):
             self.assertTrue(
                 parsed[key].startswith(workspace.as_posix()),
                 f"{key} = {parsed[key]!r} escapes the workspace",
@@ -327,9 +329,7 @@ class PathIsolationTests(unittest.TestCase):
             bootstrap_workspace(workspace, payload=REPO)
             config = load_config(workspace / "config" / "agentic.toml")
         self.assertTrue(Path(config.state_dir).is_absolute())
-        self.assertTrue(
-            str(Path(config.state_dir)).startswith(workspace.as_posix())
-        )
+        self.assertTrue(str(Path(config.state_dir)).startswith(workspace.as_posix()))
 
 
 class TimezoneTests(unittest.TestCase):
@@ -395,7 +395,9 @@ class SmallAccountConfigTests(unittest.TestCase):
 
         with open(PACKAGE / "agentic.windows.toml", "rb") as handle:
             payload = tomllib.load(handle)
-        self.assertEqual(payload["small_account_max_order_pct"], "0.025")
+        self.assertEqual(payload["small_account_target_notional"], "5.00")
+        self.assertEqual(payload["small_account_max_order_pct"], "0.11")
+        self.assertEqual(payload["small_account_max_daily_pct"], "0.11")
         self.assertEqual(payload["min_order_notional"], "1.00")
 
     def test_the_example_config_leaves_it_off(self) -> None:
@@ -410,9 +412,10 @@ class SmallAccountConfigTests(unittest.TestCase):
         readme = (REPO / "README.md").read_text(encoding="utf-8")
         self.assertIn("## Trading a small account", readme)
         self.assertIn("small_account_max_order_pct", readme)
-        # The honest cost of the raised cap, and the real capacity at $50.
-        self.assertIn("8.8%", readme)
-        self.assertIn("one $1.02 entry a day", readme)
+        # The exact requested order and the gate that prevents a blind raise.
+        self.assertIn("$5.10", readme)
+        self.assertIn("shadow-only", readme)
+        self.assertIn("30 completed shadow round trips", readme)
         # And the sizing rule that produced those numbers.
         self.assertIn("## How positions are sized", readme)
         self.assertIn('sizing = "proportional"', readme)
@@ -438,10 +441,12 @@ class SizingModeTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('getattr(config, "sizing", "flat") == "proportional"', source)
+        self.assertIn("small_account_floor=floor_model", source)
         report = (REPO / "src" / "agentic_trading" / "walkforward.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"sizing": "proportional" if proportional else "flat"', report)
+        self.assertIn('"small_account_floor"', report)
+        self.assertIn('else ("proportional" if proportional else "flat")', report)
 
     def test_the_strategy_attaches_its_weight_to_entries(self) -> None:
         source = (

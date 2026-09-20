@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import tomllib
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -102,14 +104,37 @@ class Config:
     evolution_generations: int = 6
     promotion_cycles_required: int = 3
     min_oos_trades: int = 30
+    # Current-regime guard: promotion needs more than one recent lucky trade.
+    # These consecutive walk-forward folds must each be profitable at the
+    # account level and contain at least this many completed trades.
+    min_recent_positive_folds: int = 2
+    min_recent_fold_trades: int = 10
+    # The production trend rule declares its historical edge unestablished and
+    # runs in shadow to gather a genuinely forward record. Historical bars
+    # alone therefore cannot promote it: require this many completed simulated
+    # round trips spanning this many days. Other strategies keep their existing
+    # gate unless they opt into these fields in policy_from_config.
+    min_forward_trades: int = 30
+    min_forward_days: float = 30.0
     equity_sizing: bool = True
     min_order_notional: Decimal = Decimal("1.00")
+    # When small-account mode is explicitly enabled below, aim for an order
+    # large enough that a measured fixed round-trip cost is not the whole bet.
+    # $5 is also the forward-research unit requested for sub-$100 accounts. The
+    # runtime adds a small rounding/price-drift margin, so the actual target is
+    # normally $5.10. This value is inert while the percentage ceiling is 0.
+    small_account_target_notional: Decimal = Decimal("5.00")
     # Small-account mode. Below the equity where the per-order cap can clear
-    # ``min_order_notional``, the agent refuses every entry — correct, and
-    # useless on a $50 account. When this ceiling is positive the per-order cap
-    # is raised to just enough to place one order, never above this value, and it
-    # falls back the moment the account is big enough. 0 disables the rule.
+    # ``small_account_target_notional``, the agent normally refuses every entry.
+    # When this ceiling is positive, a retrospectively qualified strategy may
+    # raise the shadow/forward cap just enough to place the target order, never
+    # above this value. Live submission still needs the complete forward gate.
+    # 0 disables the rule.
     small_account_max_order_pct: Decimal = Decimal("0")
+    # Opening-notional ceiling while that floor is active. 0 means "use the
+    # order ceiling", which intentionally permits at most one floor-sized entry
+    # per day. It never changes the ordinary account's configured daily limit.
+    small_account_max_daily_pct: Decimal = Decimal("0")
     # "flat" gives every entry the same per-order budget; "proportional" scales
     # that budget by the strategy's inverse-volatility weight, so wilder symbols
     # take smaller positions. Measured on the current universe, proportional
@@ -211,12 +236,14 @@ class Config:
         return self.symbol_whitelist | self.discovered_symbols
 
     def __post_init__(self) -> None:
+        if not self.symbol_whitelist:
+            raise ValueError("symbol_whitelist must contain at least one symbol")
+        if any(not str(symbol).strip() for symbol in self.symbol_whitelist):
+            raise ValueError("symbol_whitelist cannot contain blank symbols")
         if self.mode not in ("shadow", "live"):
             raise ValueError("mode must be shadow|live")
         if self.strategy not in ("fixture", "spy_scalper", "llm", "trend_crypto"):
-            raise ValueError(
-                "strategy must be fixture|spy_scalper|llm|trend_crypto"
-            )
+            raise ValueError("strategy must be fixture|spy_scalper|llm|trend_crypto")
         if self.quote_source not in ("file", "mcp"):
             raise ValueError("quote_source must be file|mcp")
         if self.session_policy not in ("regular", "extended", "all", "any"):
@@ -243,11 +270,38 @@ class Config:
             raise ValueError("max_consecutive_errors must be >= 1")
         if self.max_open_positions < 1:
             raise ValueError("max_open_positions must be >= 1")
+        for name, value, allow_zero in (
+            ("max_order_pct", self.max_order_pct, False),
+            ("daily_notional_pct", self.daily_notional_pct, False),
+            ("daily_loss_pct", self.daily_loss_pct, False),
+            ("small_account_max_order_pct", self.small_account_max_order_pct, True),
+            ("small_account_max_daily_pct", self.small_account_max_daily_pct, True),
+            (
+                "daily_budget_confidence_floor",
+                self.daily_budget_confidence_floor,
+                True,
+            ),
+            ("max_order_hard_pct", self.max_order_hard_pct, False),
+            ("max_cost_share_of_order", self.max_cost_share_of_order, True),
+        ):
+            number = Decimal(str(value))
+            if not number.is_finite():
+                raise ValueError(f"{name} must be finite")
+            lower_ok = number >= 0 if allow_zero else number > 0
+            if not lower_ok or number > 1:
+                interval = "[0, 1]" if allow_zero else "(0, 1]"
+                raise ValueError(f"{name} must be in {interval}")
+        if self.equity_refresh_ticks < 1:
+            raise ValueError("equity_refresh_ticks must be >= 1")
+        if self.equity_refresh_seconds <= 0:
+            raise ValueError("equity_refresh_seconds must be positive")
         if (
             self.max_correlated_positions is not None
             and self.max_correlated_positions < 1
         ):
             raise ValueError("max_correlated_positions must be >= 1 when set")
+        if self.correlation_lookback_days < 2:
+            raise ValueError("correlation_lookback_days must be >= 2")
         if not 0.0 < self.correlation_threshold <= 1.0:
             raise ValueError("correlation_threshold must be in (0, 1]")
         if self.max_quote_age_seconds <= 0:
@@ -268,6 +322,10 @@ class Config:
             raise ValueError("evolution_interval_minutes must be >= 0")
         if self.evidence_refresh_days < 0:
             raise ValueError("evidence_refresh_days must be >= 0")
+        if self.evolution_agent_interval_hours < 0:
+            raise ValueError("evolution_agent_interval_hours must be >= 0")
+        if self.auto_arm_min_interval_hours < 0:
+            raise ValueError("auto_arm_min_interval_hours must be >= 0")
         if self.evolution_population < 2:
             raise ValueError("evolution_population must be >= 2")
         if self.evolution_generations < 1:
@@ -276,10 +334,24 @@ class Config:
             raise ValueError("promotion_cycles_required must be >= 1")
         if self.min_oos_trades < 1:
             raise ValueError("min_oos_trades must be >= 1")
-        if self.min_order_notional <= 0:
+        if self.min_recent_positive_folds < 1:
+            raise ValueError("min_recent_positive_folds must be >= 1")
+        if self.min_recent_fold_trades < 1:
+            raise ValueError("min_recent_fold_trades must be >= 1")
+        if self.min_forward_trades < 0:
+            raise ValueError("min_forward_trades must be >= 0")
+        if not math.isfinite(self.min_forward_days) or self.min_forward_days < 0:
+            raise ValueError("min_forward_days must be >= 0")
+        if not self.min_order_notional.is_finite() or self.min_order_notional <= 0:
             raise ValueError("min_order_notional must be positive")
-        if self.small_account_max_order_pct < 0:
-            raise ValueError("small_account_max_order_pct must be >= 0")
+        if (
+            not self.small_account_target_notional.is_finite()
+            or self.small_account_target_notional < self.min_order_notional
+        ):
+            raise ValueError(
+                "small_account_target_notional must be finite and at least "
+                "min_order_notional"
+            )
         if self.sizing not in ("flat", "proportional"):
             raise ValueError("sizing must be flat|proportional")
         if not 0 <= float(self.jev_chase_threshold) <= 1:
@@ -311,8 +383,6 @@ class Config:
             raise ValueError("deferred_max_age_seconds must be >= 0")
         if self.deferred_max_attempts < 0:
             raise ValueError("deferred_max_attempts must be >= 0")
-        if self.max_cost_share_of_order < 0:
-            raise ValueError("max_cost_share_of_order must be >= 0")
         if self.discovery_max_candidates < 0:
             raise ValueError("discovery_max_candidates must be >= 0")
         if float(self.discovery_max_spread_bps) < 0:
@@ -322,34 +392,82 @@ class Config:
         if self.discovery_min_hold_hours < 0:
             raise ValueError("discovery_min_hold_hours must be >= 0")
 
+        endpoint = urlparse(self.mcp_url)
+        if not endpoint.hostname or endpoint.username or endpoint.password:
+            raise ValueError("mcp_url must be an absolute URL without user info")
+        loopback = endpoint.hostname in ("127.0.0.1", "::1", "localhost")
+        if endpoint.scheme != "https" and not (endpoint.scheme == "http" and loopback):
+            raise ValueError(
+                "mcp_url must use HTTPS (HTTP is allowed only on loopback)"
+            )
+
 
 def _schedule(raw: Any) -> tuple[tuple[float, Decimal, Decimal], ...]:
     """Parse ``[[up_to_equity, share, floor?], ...]`` into ordered thresholds.
 
-    An unreadable row is dropped rather than guessed at: a malformed risk
-    schedule must not become a different risk schedule.
+    A malformed risk schedule is rejected. Silently dropping one bad row can
+    turn the operator's schedule into a materially different risk policy (or
+    into the flat fallback), which is not a safe interpretation.
     """
-    if not isinstance(raw, list):
+    if raw is None:
         return ()
+    if not isinstance(raw, list):
+        raise ValueError("daily_budget_schedule must be an array of rows")
     rows: list[tuple[float, Decimal, Decimal]] = []
-    for row in raw:
+    for index, row in enumerate(raw):
         if not isinstance(row, (list, tuple)) or len(row) not in (2, 3):
-            continue
+            raise ValueError(
+                f"daily_budget_schedule row {index} must have 2 or 3 values"
+            )
         try:
             threshold = float(row[0])
             share = Decimal(str(row[1]))
-            floor = (
-                Decimal(str(row[2])) if len(row) == 3 else Decimal("0")
+            floor = Decimal(str(row[2])) if len(row) == 3 else Decimal("0")
+        except (ArithmeticError, TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(
+                f"daily_budget_schedule row {index} contains a non-number"
+            ) from exc
+        if not math.isfinite(threshold) or threshold < 0:
+            raise ValueError(
+                f"daily_budget_schedule row {index} threshold must be finite and >= 0"
             )
-        except (ArithmeticError, TypeError, ValueError):
-            continue
-        if threshold < 0 or not 0 < share <= 1:
-            continue
-        if floor < 0 or floor > share:
-            floor = Decimal("0")
+        if not share.is_finite() or not 0 < share <= 1:
+            raise ValueError(
+                f"daily_budget_schedule row {index} share must be in (0, 1]"
+            )
+        if not floor.is_finite() or floor < 0 or floor > share:
+            raise ValueError(
+                f"daily_budget_schedule row {index} floor must be in [0, share]"
+            )
         rows.append((threshold, share, floor))
     rows.sort(key=lambda item: item[0])
+    if len({row[0] for row in rows}) != len(rows):
+        raise ValueError("daily_budget_schedule thresholds must be unique")
     return tuple(rows)
+
+
+def _boolean(raw: dict[str, object], name: str, default: bool) -> bool:
+    """Read a TOML boolean without Python's dangerous string truthiness.
+
+    ``bool("false")`` is ``True``. For switches such as auto-arm, discovery and
+    the evidence override, accepting a quoted value would invert the operator's
+    instruction, so only real TOML booleans are valid.
+    """
+    value = raw.get(name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a TOML boolean (true or false)")
+    return value
+
+
+def _symbols(raw: object) -> frozenset[str]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("symbol_whitelist must be a non-empty array")
+    symbols: set[str] = set()
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("symbol_whitelist entries must be non-empty strings")
+        symbols.add(value.strip().upper())
+    return frozenset(symbols)
 
 
 def _adopted_symbols(state_dir: Any) -> frozenset[str]:
@@ -382,7 +500,7 @@ def load_config(path: str | Path) -> Config:
     scalper_raw = raw.get("scalper_config")
     return Config(
         mode=raw["mode"],
-        symbol_whitelist=frozenset(s.upper() for s in raw["symbol_whitelist"]),
+        symbol_whitelist=_symbols(raw["symbol_whitelist"]),
         max_order_pct=Decimal(str(raw["max_order_pct"])),
         daily_notional_pct=Decimal(str(raw["daily_notional_pct"])),
         daily_loss_pct=Decimal(str(raw["daily_loss_pct"])),
@@ -429,10 +547,20 @@ def load_config(path: str | Path) -> Config:
         evolution_generations=int(raw.get("evolution_generations", 6)),
         promotion_cycles_required=int(raw.get("promotion_cycles_required", 3)),
         min_oos_trades=int(raw.get("min_oos_trades", 30)),
-        equity_sizing=bool(raw.get("equity_sizing", True)),
+        min_recent_positive_folds=int(raw.get("min_recent_positive_folds", 2)),
+        min_recent_fold_trades=int(raw.get("min_recent_fold_trades", 10)),
+        min_forward_trades=int(raw.get("min_forward_trades", 30)),
+        min_forward_days=float(raw.get("min_forward_days", 30.0)),
+        equity_sizing=_boolean(raw, "equity_sizing", True),
         min_order_notional=Decimal(str(raw.get("min_order_notional", "1.00"))),
+        small_account_target_notional=Decimal(
+            str(raw.get("small_account_target_notional", "5.00"))
+        ),
         small_account_max_order_pct=Decimal(
             str(raw.get("small_account_max_order_pct", "0"))
+        ),
+        small_account_max_daily_pct=Decimal(
+            str(raw.get("small_account_max_daily_pct", "0"))
         ),
         sizing=str(raw.get("sizing", "flat")),
         daily_budget_schedule=_schedule(raw.get("daily_budget_schedule")),
@@ -443,30 +571,23 @@ def load_config(path: str | Path) -> Config:
         evolution_agent_interval_hours=float(
             raw.get("evolution_agent_interval_hours", 24.0)
         ),
-        auto_arm=bool(raw.get("auto_arm", False)),
-        auto_arm_min_interval_hours=float(
-            raw.get("auto_arm_min_interval_hours", 6.0)
-        ),
-        jev_veto_chase=bool(raw.get("jev_veto_chase", False)),
+        auto_arm=_boolean(raw, "auto_arm", False),
+        auto_arm_min_interval_hours=float(raw.get("auto_arm_min_interval_hours", 6.0)),
+        jev_veto_chase=_boolean(raw, "jev_veto_chase", False),
         jev_chase_threshold=Decimal(str(raw.get("jev_chase_threshold", "0.75"))),
-        discovery_enabled=bool(raw.get("discovery_enabled", False)),
+        discovery_enabled=_boolean(raw, "discovery_enabled", False),
         discovery_interval_hours=float(raw.get("discovery_interval_hours", 6.0)),
         discovery_max_symbols=int(raw.get("discovery_max_symbols", 6)),
         discovery_min_bars=int(raw.get("discovery_min_bars", 260)),
-        discovery_enter_vote=Decimal(
-            str(raw.get("discovery_enter_vote", "0.75"))
-        ),
+        discovery_enter_vote=Decimal(str(raw.get("discovery_enter_vote", "0.75"))),
         discovery_exit_vote=Decimal(str(raw.get("discovery_exit_vote", "0.25"))),
         discovery_min_dollar_volume=Decimal(
             str(raw.get("discovery_min_dollar_volume", "5000000"))
         ),
         discovery_candidates=tuple(
-            str(symbol).upper()
-            for symbol in (raw.get("discovery_candidates") or [])
+            str(symbol).upper() for symbol in (raw.get("discovery_candidates") or [])
         ),
-        discovery_lists=tuple(
-            str(name) for name in (raw.get("discovery_lists") or [])
-        ),
+        discovery_lists=tuple(str(name) for name in (raw.get("discovery_lists") or [])),
         discovery_max_candidates=int(raw.get("discovery_max_candidates", 40)),
         discovery_max_spread_bps=Decimal(
             str(raw.get("discovery_max_spread_bps", "25"))
@@ -474,9 +595,7 @@ def load_config(path: str | Path) -> Config:
         discovery_max_correlation=Decimal(
             str(raw.get("discovery_max_correlation", "0.85"))
         ),
-        discovery_min_hold_hours=float(
-            raw.get("discovery_min_hold_hours", 48.0)
-        ),
+        discovery_min_hold_hours=float(raw.get("discovery_min_hold_hours", 48.0)),
         discovered_symbols=_adopted_symbols(raw.get("state_dir")),
         rebalance_retry_seconds=float(raw.get("rebalance_retry_seconds", 900.0)),
         rebalance_max_retries=int(raw.get("rebalance_max_retries", 6)),
@@ -485,5 +604,5 @@ def load_config(path: str | Path) -> Config:
         max_cost_share_of_order=Decimal(
             str(raw.get("max_cost_share_of_order", "0.02"))
         ),
-        accept_evidence_override=bool(raw.get("accept_evidence_override", False)),
+        accept_evidence_override=_boolean(raw, "accept_evidence_override", False),
     )

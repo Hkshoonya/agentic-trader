@@ -7,6 +7,38 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
+_SENSITIVE_FIELDS = frozenset(
+    {
+        "account_number",
+        "rhs_account_number",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "client_secret",
+        "authorization",
+    }
+)
+_REDACTED = "[redacted]"
+
+
+def _redact(value: Any) -> Any:
+    """Remove credentials and broker identifiers from durable audit records."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                _REDACTED
+                if str(key).lower() in _SENSITIVE_FIELDS
+                else _redact(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact(item) for item in value]
+    return value
+
+
 class DecisionJournal:
     def __init__(self, journal_dir: Path) -> None:
         self._journal_dir = journal_dir
@@ -15,8 +47,9 @@ class DecisionJournal:
         return self._journal_dir / f"{date.today().isoformat()}.jsonl"
 
     def append(self, record: dict[str, Any]) -> None:
-        self._journal_dir.mkdir(parents=True, exist_ok=True)
+        self._journal_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         path = self._today_path()
+        record = _redact(record)
         # Every record carries the time it happened. Without this, an advisor
         # call or a regime refresh is undated: you cannot measure how often the
         # model was consulted, and the console has to fall back to "now".
@@ -73,6 +106,39 @@ class DecisionJournal:
                 continue
             try:
                 text = file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+    def iter_all(self) -> Iterator[dict[str, Any]]:
+        """All date-named journals, oldest first.
+
+        Position state has no safe time-to-live: a quiet trend position can be
+        held longer than an arbitrary replay window. Only exact ISO date names
+        are included so archives or operator notes in the same directory never
+        become executable history.
+        """
+        if not self._journal_dir.is_dir():
+            return
+        dated: list[tuple[date, Path]] = []
+        for path in self._journal_dir.glob("*.jsonl"):
+            try:
+                parsed = date.fromisoformat(path.stem)
+            except ValueError:
+                continue
+            if parsed.isoformat() != path.stem:
+                continue
+            dated.append((parsed, path))
+        for _day, path in sorted(dated):
+            try:
+                text = path.read_text(encoding="utf-8")
             except OSError:
                 continue
             for line in text.splitlines():

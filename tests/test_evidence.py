@@ -14,8 +14,12 @@ from agentic_trading.config import load_config
 from agentic_trading.dashboard import _evidence_view
 from agentic_trading.evidence import (
     build_report,
+    effective_per_order_pct,
+    effective_small_account_target,
     load_series,
     read_report,
+    report_runtime_checks,
+    shadow_forward_stats,
     write_report,
 )
 from agentic_trading.limits import Limits, save_limits
@@ -103,10 +107,65 @@ class BuildReportTests(unittest.TestCase):
             report = self._report(Path(name))
         self.assertIn("generated_at", report)
         self.assertEqual(report["drawdown_ceiling_pct"], 15.0)
+        self.assertEqual(report["schema_version"], 4)
+        self.assertEqual(report["starting_equity"], 50.0)
         self.assertEqual(report["series"]["bars"], 800)
         self.assertIn("production", report["configs"])
         self.assertIn("inverse_vol", report["configs"])
+        self.assertEqual(report["cost_stress"]["multiplier"], 2.0)
+        self.assertIn("return_pct", report["cost_stress"])
         self.assertTrue(report["notes"], "the report must state its own limits")
+        self.assertEqual(report["strategy"], "fixture")
+        self.assertEqual(report["base_sizing"], "flat")
+        self.assertEqual(report["forward"]["completed_trades"], 0)
+
+    def test_report_identity_must_match_the_current_strategy_book(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY", "QQQ"], days=400)
+            report = build_report(
+                config,
+                folds=2,
+                grid=(0.01,),
+                max_positions=2,
+                per_order_pct=0.01,
+            )
+
+            self.assertTrue(
+                report_runtime_checks(config, report)["model_check"]["current"]
+            )
+            mutations = {
+                "strategy": lambda candidate: candidate.update(strategy="llm"),
+                "sizing": lambda candidate: candidate.update(
+                    base_sizing="proportional"
+                ),
+                "position limit": lambda candidate: candidate.update(max_positions=1),
+                "universe": lambda candidate: candidate["series"].update(
+                    symbols=["SPY"]
+                ),
+            }
+            for label, mutate in mutations.items():
+                with self.subTest(label=label):
+                    candidate = json.loads(json.dumps(report))
+                    mutate(candidate)
+                    check = report_runtime_checks(config, candidate)["model_check"]
+                    self.assertFalse(check["current"])
+
+    def test_report_uses_current_account_equity_for_fixed_cost_scale(self) -> None:
+        from agentic_trading import account
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY", "QQQ"], days=400)
+            account.note_equity(config.state_dir, Decimal("250.25"))
+            report = build_report(
+                config,
+                folds=2,
+                grid=(0.01,),
+                max_positions=2,
+                per_order_pct=0.01,
+            )
+        self.assertEqual(report["starting_equity"], 250.25)
 
     def test_gate_size_never_exceeds_the_drawdown_ceiling(self) -> None:
         with tempfile.TemporaryDirectory() as name:
@@ -124,6 +183,31 @@ class BuildReportTests(unittest.TestCase):
             (tmp / "bars" / "SPY_day.jsonl").unlink()
             with self.assertRaises(RuntimeError):
                 build_report(config, folds=2, grid=(0.01,), max_positions=1)
+
+    def test_report_uses_the_measured_fixed_execution_cost(self) -> None:
+        from agentic_trading.execution import record_round_trip
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY", "QQQ"], days=400)
+            record_round_trip(
+                config.state_dir,
+                symbol="SPY",
+                buy_notional=5.00,
+                sell_notional=4.90,
+            )
+            report = build_report(
+                config,
+                folds=2,
+                grid=(0.01,),
+                max_positions=2,
+                per_order_pct=0.01,
+            )
+
+        self.assertEqual(report["costs"]["source"], "measured_round_trip_fixed_fee")
+        self.assertAlmostEqual(
+            report["costs"]["assumed_round_trip_fixed_usd"], 0.10, places=6
+        )
 
 
 class EffectiveSizeTests(unittest.TestCase):
@@ -144,15 +228,94 @@ class EffectiveSizeTests(unittest.TestCase):
             report = build_report(config, folds=2, grid=(0.01,), max_positions=1)
         self.assertEqual(report["configs"]["production"]["per_order_pct"], 0.006)
 
+    def test_enabled_five_dollar_floor_is_the_tested_production_size(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            _config(tmp, symbols=["SPY", "QQQ"], days=400)
+            path = tmp / "agentic.toml"
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + 'small_account_target_notional = "5.00"\n'
+                + 'small_account_max_order_pct = "0.11"\n'
+                + 'small_account_max_daily_pct = "0.11"\n',
+                encoding="utf-8",
+            )
+            config = load_config(path)
+            report = build_report(
+                config,
+                folds=2,
+                grid=(0.005, 0.01),
+                max_positions=2,
+            )
+        production_size = report["configs"]["production"]["per_order_pct"]
+        frontier = [row["per_order_pct"] for row in report["size_frontier"]]
+        self.assertAlmostEqual(production_size, 0.102, places=9)
+        self.assertIn(production_size, frontier)
+        self.assertEqual(report["sizing"], "small_account_floor")
+        self.assertFalse(report["small_account_floor"]["proportional"])
+        self.assertAlmostEqual(
+            report["small_account_floor"]["sized_notional"], 5.10, places=9
+        )
+        production_point = next(
+            row
+            for row in report["size_frontier"]
+            if row["per_order_pct"] == production_size
+        )
+        self.assertEqual(production_point["sizing"], "small_account_floor")
+        self.assertTrue(
+            report_runtime_checks(config, report)["sizing_check"]["current"]
+        )
+
+    def test_percentage_override_cannot_authorize_a_fixed_dollar_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            _config(tmp, symbols=["SPY", "QQQ"], days=400)
+            path = tmp / "agentic.toml"
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + 'small_account_target_notional = "5.00"\n'
+                + 'small_account_max_order_pct = "0.11"\n'
+                + 'small_account_max_daily_pct = "0.11"\n',
+                encoding="utf-8",
+            )
+            config = load_config(path)
+            report = build_report(
+                config,
+                per_order_pct=0.11,
+                folds=2,
+                grid=(0.11,),
+                max_positions=2,
+            )
+
+        self.assertNotIn("small_account_floor", report)
+        check = report_runtime_checks(config, report)["sizing_check"]
+        self.assertFalse(check["current"])
+        self.assertFalse(check["floor_model_current"])
+
+    def test_measured_fixed_cost_can_raise_the_useful_target(self) -> None:
+        from agentic_trading.execution import record_round_trip
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"])
+            record_round_trip(
+                config.state_dir,
+                symbol="SPY",
+                buy_notional=10.0,
+                sell_notional=9.8,
+            )
+            target = effective_small_account_target(config)
+        # A $0.20 round trip capped at 2% needs a $10 order, even though the
+        # configured research floor is only $5.
+        self.assertAlmostEqual(float(target), 10.0, places=6)
+
 
 class RoundTripTests(unittest.TestCase):
     def test_write_then_read_and_no_temp_file_left_behind(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
             config = _config(tmp, symbols=["SPY"])
-            path = write_report(
-                config, {"generated_at": "2026-01-01T00:00:00+00:00"}
-            )
+            path = write_report(config, {"generated_at": "2026-01-01T00:00:00+00:00"})
             stored = read_report(config)
             leftovers = [p for p in path.parent.iterdir() if p.suffix == ".tmp"]
         assert stored is not None
@@ -165,6 +328,76 @@ class RoundTripTests(unittest.TestCase):
             config = _config(tmp, symbols=["SPY"])
             (tmp / "state" / "strategy_evidence.json").write_text("{not json")
             self.assertIsNone(read_report(config))
+
+
+class ForwardShadowEvidenceTests(unittest.TestCase):
+    def test_only_completed_shadow_round_trips_count(self) -> None:
+        from agentic_trading.journal import DecisionJournal
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"])
+            journal = DecisionJournal(Path(config.journal_dir))
+            journal.append(
+                {
+                    "event": "accepted",
+                    "mode": "shadow",
+                    "side": "buy",
+                    "symbol": "SPY",
+                    "quantity": "1",
+                    "ref_price": "100",
+                    "at": "2026-01-01T00:00:00+00:00",
+                    "intent": {
+                        "symbol": "SPY",
+                        "side": "buy",
+                        "quantity": "1",
+                        "ref_price": "100",
+                    },
+                }
+            )
+            journal.append(
+                {
+                    "event": "accepted",
+                    "mode": "shadow",
+                    "side": "sell",
+                    "symbol": "SPY",
+                    "quantity": "1",
+                    "ref_price": "110",
+                    "at": "2026-01-10T00:00:00+00:00",
+                    "intent": {
+                        "symbol": "SPY",
+                        "side": "sell",
+                        "quantity": "1",
+                        "ref_price": "110",
+                    },
+                }
+            )
+            # A live approval is not a fill and cannot improve the forward record.
+            journal.append(
+                {
+                    "event": "accepted",
+                    "mode": "live",
+                    "side": "sell",
+                    "symbol": "SPY",
+                    "quantity": "1",
+                    "ref_price": "999",
+                    "intent": {
+                        "symbol": "SPY",
+                        "side": "sell",
+                        "quantity": "1",
+                        "ref_price": "999",
+                    },
+                }
+            )
+
+            stats = shadow_forward_stats(
+                config, now=datetime(2026, 1, 11, tzinfo=timezone.utc)
+            )
+
+        self.assertEqual(stats["completed_trades"], 1)
+        self.assertEqual(stats["wins"], 1)
+        self.assertEqual(stats["observed_days"], 10.0)
+        self.assertAlmostEqual(float(stats["realized_pnl"]), 9.958, places=3)
 
 
 class EvidenceViewTests(unittest.TestCase):
@@ -206,14 +439,26 @@ if __name__ == "__main__":
 class StalenessTests(unittest.TestCase):
     """The gate refuses a stale report; something has to notice that."""
 
-    def _at(self, days_ago: float) -> dict:
+    def _at(self, days_ago: float, *, config=None) -> dict:
         from datetime import datetime, timedelta, timezone
 
-        return {
+        report = {
+            "schema_version": 4,
             "generated_at": (
                 datetime.now(timezone.utc) - timedelta(days=days_ago)
-            ).isoformat()
+            ).isoformat(),
+            "configs": {"production": {"per_order_pct": 0.01}},
         }
+        if config is not None:
+            report.update(
+                {
+                    "strategy": config.strategy,
+                    "base_sizing": config.sizing,
+                    "max_positions": config.max_open_positions,
+                    "series": {"symbols": sorted(config.effective_whitelist)},
+                }
+            )
+        return report
 
     def test_age_is_measured_from_the_timestamp(self) -> None:
         from agentic_trading.evidence import report_age_days
@@ -236,7 +481,7 @@ class StalenessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
             config = _config(tmp, symbols=["SPY"])
-            write_report(config, {"generated_at": self._at(1)["generated_at"]})
+            write_report(config, self._at(1, config=config))
             with mock.patch.object(module, "build_report") as builder:
                 out = module.refresh_if_stale(config, max_age_days=7)
         self.assertIsNone(out)
@@ -276,6 +521,60 @@ class StalenessTests(unittest.TestCase):
                 module.refresh_if_stale(config, max_age_days=7)
         builder.assert_called_once()
 
+    def test_a_report_below_the_new_floor_size_is_rebuilt(self) -> None:
+        from unittest import mock
+
+        from agentic_trading import evidence as module
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            _config(tmp, symbols=["SPY"])
+            path = tmp / "agentic.toml"
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + 'small_account_max_order_pct = "0.11"\n'
+                + 'small_account_max_daily_pct = "0.11"\n',
+                encoding="utf-8",
+            )
+            config = load_config(path)
+            write_report(config, self._at(1, config=config))
+            fresh = {
+                "schema_version": 4,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "configs": {
+                    "production": {"per_order_pct": effective_per_order_pct(config)}
+                },
+            }
+            with mock.patch.object(
+                module, "build_report", return_value=fresh
+            ) as builder:
+                rebuilt = module.refresh_if_stale(config, max_age_days=7)
+        builder.assert_called_once()
+        assert rebuilt is not None
+        self.assertTrue(rebuilt["sizing_refresh"])
+
+    def test_a_changed_strategy_book_is_rebuilt(self) -> None:
+        from unittest import mock
+
+        from agentic_trading import evidence as module
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"])
+            existing = self._at(1, config=config)
+            existing["base_sizing"] = "proportional"
+            write_report(config, existing)
+            with mock.patch.object(
+                module,
+                "build_report",
+                return_value={"generated_at": "fresh"},
+            ) as builder:
+                rebuilt = module.refresh_if_stale(config, max_age_days=7)
+
+        builder.assert_called_once()
+        assert rebuilt is not None
+        self.assertTrue(rebuilt["model_refresh"])
+
 
 class _FakeLoop:
     """Just enough of the loop for the worker paths: equity and the roster."""
@@ -292,11 +591,10 @@ class DaemonRefreshTests(unittest.TestCase):
     """The daemon has to refresh it without being asked."""
 
     def _config(self, tmp: Path, *, days: float):
-        config = _config(tmp, symbols=["SPY"])
+        _config(tmp, symbols=["SPY"])
         path = tmp / "agentic.toml"
         path.write_text(
-            path.read_text(encoding="utf-8")
-            + f"evidence_refresh_days = {days}\n",
+            path.read_text(encoding="utf-8") + f"evidence_refresh_days = {days}\n",
             encoding="utf-8",
         )
         return load_config(path)
@@ -310,9 +608,7 @@ class DaemonRefreshTests(unittest.TestCase):
             config = self._config(Path(name), days=0)
             loop = _FakeLoop()
             journal = mock.Mock()
-            with mock.patch(
-                "agentic_trading.evidence.refresh_if_stale"
-            ) as refresh:
+            with mock.patch("agentic_trading.evidence.refresh_if_stale") as refresh:
                 module._refresh_evidence(config, loop, journal)
         refresh.assert_not_called()
         journal.append.assert_not_called()

@@ -98,6 +98,32 @@ class AccumulationTests(unittest.TestCase):
         self.assertEqual(book.realized_total, Decimal("20"))
         self.assertEqual(book.held, {})
 
+    def test_restart_replay_has_no_arbitrary_thirty_day_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            journal = DecisionJournal(Path(name))
+            old = date.today() - timedelta(days=90)
+            (Path(name) / f"{old.isoformat()}.jsonl").write_text(
+                json.dumps(accept("BTC-USD", Side.BUY, "0.01", "100", old)) + "\n"
+            )
+            (Path(name) / "archive.jsonl").write_text(
+                json.dumps(accept("ETH-USD", Side.BUY, "1", "10", old)) + "\n"
+            )
+
+            book = ShadowBook.from_journal(journal, days=None)
+
+        self.assertEqual(book.held, {"BTC-USD": Decimal("0.01")})
+
+    def test_live_approval_is_not_replayed_as_a_shadow_fill(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            journal = DecisionJournal(Path(name))
+            record = accept("BTC-USD", Side.BUY, "0.01", "100", date.today())
+            record["mode"] = "live"
+            journal.append(record)
+
+            book = ShadowBook.from_journal(journal, days=None)
+
+        self.assertEqual(book.held, {})
+
     def test_iter_recent_is_oldest_first_and_tolerates_missing_days(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             journal = DecisionJournal(Path(name))

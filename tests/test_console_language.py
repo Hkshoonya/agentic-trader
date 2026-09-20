@@ -15,6 +15,12 @@ from agentic_trading.dashboard_js import SCRIPT
 
 
 class ConsoleLanguageTests(unittest.TestCase):
+    def test_rendered_script_contains_no_python_escape_control_bytes(self) -> None:
+        # A single ``\b`` in the Python template becomes a backspace before the
+        # browser sees it and silently breaks the JavaScript word-boundary
+        # expression. JavaScript escapes in this template must be doubled.
+        self.assertNotIn("\b", SCRIPT)
+
     def test_the_column_headers_are_sentences(self) -> None:
         # The script is embedded in the page; its regexes still name the old
         # journal vocabulary, so only the markup before it is the screen.

@@ -267,6 +267,25 @@ class EvidenceCheckTests(unittest.TestCase):
             check = check_evidence(config)
         self.assertEqual(check.status, OK)
 
+    def test_known_execution_cost_missing_from_evidence_fails(self) -> None:
+        from agentic_trading.execution import record_round_trip
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"], bars={"SPY": 400})
+            self._write(config, age_days=1, gate_pct=0.05)
+            record_round_trip(
+                config.state_dir,
+                symbol="SPY",
+                buy_notional=5.00,
+                sell_notional=4.90,
+            )
+
+            check = check_evidence(config)
+
+        self.assertEqual(check.status, FAIL)
+        self.assertIn("execution measured $0.10", check.detail)
+
 
 class ReportTests(unittest.TestCase):
     def test_offline_report_covers_state_data_and_analysis(self) -> None:

@@ -343,7 +343,7 @@ function plainReason(reason) {
   // rather than only when the reason starts with a code this file knows.
   if (/(trend_up|trend_down|chop|panic)/.test(detail)) {
     const read = detail.replace(
-      /\b(trend_up|trend_down|chop|panic)\b\s*([\d.]+)?/g,
+      /\\b(trend_up|trend_down|chop|panic)\\b\\s*([\\d.]+)?/g,
       (match, name, value) =>
         plainRegime(name) + (value === undefined ? '' : ' ' + value)
     );
@@ -910,12 +910,10 @@ async function refresh() {
   // Call out the case where the account cannot afford the size the evidence
   // allows: the guard refuses every entry, and five identical rejects are a bad
   // way to learn that.
-  // Small-account mode: the cap has been raised above what the evidence supports
-  // so that an order can be placed at all. It says so, and it says what that
-  // costs in drawdown, because the operator authorised it but should not have to
-  // remember it.
+  // Small-account mode is tested at the exact floor size before it activates.
+  // It gathers forward shadow evidence; it never bypasses the live gate.
   const floor = risk.size_floor_active
-    ? '<div class="row"><span>small-account mode</span><b class="sell">cap raised</b></div>'
+    ? '<div class="row"><span>small-account mode</span><b>forward floor qualified</b></div>'
       + '<div class="sub">' + num(Number(risk.max_order_pct || 0) * 100) + '% per order is '
       + num(Number(risk.order_at_ceiling || 0)) + ', below the '
       + num(Number(risk.min_order_notional || 0)) + ' minimum, so the cap is raised to '
@@ -926,10 +924,17 @@ async function refresh() {
           + '% max drawdown at that size'
           + (Number(risk.drawdown_at_effective_pct) <= 15
             ? ' (inside the 15% gate)'
-            : ' (above the 15% gate — this is the trade you authorised)')
+            : ' (above the 15% gate — entries remain blocked)')
         : '')
-      + '. It drops back to ' + num(Number(risk.max_order_pct || 0) * 100)
+      + '. One floor-sized opening uses the daily budget; live trading still requires '
+      + 'the full forward gate and arming. It drops back to '
+      + num(Number(risk.max_order_pct || 0) * 100)
       + '% at $' + num(Number(risk.equity_needed || 0)) + ' equity.</div>'
+    : (risk.small_account_enabled && risk.too_small_to_trade && !risk.forward_floor_ready
+      ? '<div class="row"><span>$5 forward floor</span><b class="sell">waiting for proof</b></div>'
+        + '<div class="sub">The exact $' + num(Number(risk.small_account_target_notional || 0))
+        + ' size must pass retrospective return, cost-stress and drawdown checks before '
+        + 'the cap can rise. No undersized entry is substituted.</div>'
     : (risk.too_small_to_trade
       ? '<div class="row"><span>account</span><b class="sell">too small to trade</b></div>'
         + '<div class="sub">a ' + num(Number(risk.min_order_notional || 0))
@@ -937,7 +942,7 @@ async function refresh() {
         + ' at the current ' + num(Number(risk.max_order_pct || 0) * 100) + '% ceiling — '
         + 'entries are refused until equity reaches $'
         + num(Number(risk.equity_needed || 0)) + '</div>'
-      : '');
+      : ''));
   const tooSmall = floor;
   document.getElementById('gate').innerHTML = (a.eligible === undefined)
     ? budget + tooSmall + '<div class="sub">no assessment yet — run: agentic-trading evolve</div>'

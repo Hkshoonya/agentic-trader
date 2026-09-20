@@ -18,7 +18,9 @@ from agentic_trading.promotion import PromotionPolicy, assess_walkforward
 
 def _report(*, gate_pct: float = 0.03, bars: int = 30_000) -> dict:
     return {
+        "schema_version": 4,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "starting_equity": 50.0,
         "drawdown_ceiling_pct": 15.0,
         "series": {"symbols": ["SPY", "BTC-USD"], "bars": bars},
         "configs": {
@@ -26,6 +28,7 @@ def _report(*, gate_pct: float = 0.03, bars: int = 30_000) -> dict:
                 "per_order_pct": 0.2226,
                 "trades": 495,
                 "expectancy_bps": 856.0,
+                "return_pct": 40.0,
                 "win_rate": 0.5,
                 "profit_factor": 3.7,
                 "max_drawdown_pct": 4.1,
@@ -36,10 +39,26 @@ def _report(*, gate_pct: float = 0.03, bars: int = 30_000) -> dict:
                 # Folds live inside the production config, the way the real
                 # report writes them.
                 "folds": [
-                    {"trades": 80, "expectancy_bps": 120.0, "max_drawdown_pct": 3.0}
+                    {
+                        "trades": 80,
+                        "expectancy_bps": 120.0,
+                        "return_pct": 2.0,
+                        "max_drawdown_pct": 3.0,
+                    }
                 ]
                 * 6,
             }
+        },
+        "cost_stress": {
+            "multiplier": 2.0,
+            "trades": 495,
+            "expectancy_bps": 100.0,
+            "return_pct": 10.0,
+            "max_drawdown_pct": 8.0,
+            "folds": [
+                {"trades": 80, "return_pct": 1.0},
+                {"trades": 80, "return_pct": 1.0},
+            ],
         },
         "gate_size": {"per_order_pct": gate_pct},
     }

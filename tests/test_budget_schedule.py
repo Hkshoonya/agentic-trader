@@ -208,20 +208,33 @@ class ReconcileUnderScheduleTests(unittest.TestCase):
             self.assertEqual(money(updated.daily_notional_pct), money("0.0500"))
             self.assertEqual(money(updated.max_order_pct), money("0.0125"))
 
-    def test_an_unreadable_schedule_row_is_dropped_not_guessed(self) -> None:
+    def test_an_unreadable_schedule_row_rejects_the_config(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
-            first = _config(tmp)
+            _config(tmp)
             (tmp / "agentic.toml").write_text(
                 (tmp / "agentic.toml").read_text(encoding="utf-8")
                 + 'daily_budget_schedule = [[200, "0.9"], ["x", "1"], [500, "0.5", "0.3"]]\n',
                 encoding="utf-8",
             )
-            cfg = load_config(tmp / "agentic.toml")
-            self.assertEqual(cfg.symbol_whitelist, first.symbol_whitelist)
-            self.assertEqual(len(cfg.daily_budget_schedule), 2)
-            ceiling, _floor = scheduled_daily_bounds(cfg, 100)
-            self.assertAlmostEqual(float(ceiling), 0.90, places=4)
+            with self.assertRaisesRegex(ValueError, "schedule row 1"):
+                load_config(tmp / "agentic.toml")
+
+    def test_non_finite_or_duplicate_schedule_thresholds_are_rejected(self) -> None:
+        for schedule in (
+            '[[nan, "0.9"]]',
+            '[[200, "0.9"], [200, "0.5"]]',
+        ):
+            with self.subTest(schedule=schedule), tempfile.TemporaryDirectory() as name:
+                tmp = Path(name)
+                _config(tmp)
+                (tmp / "agentic.toml").write_text(
+                    (tmp / "agentic.toml").read_text(encoding="utf-8")
+                    + f"daily_budget_schedule = {schedule}\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(ValueError):
+                    load_config(tmp / "agentic.toml")
 
 
 if __name__ == "__main__":

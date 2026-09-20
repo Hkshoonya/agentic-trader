@@ -269,7 +269,8 @@ class EquityOrderRequest:
         """Worst-case notional for a pre-trade cap check."""
         if self.dollar_amount is not None:
             return self.dollar_amount
-        assert self.quantity is not None
+        if self.quantity is None:
+            raise OrderValidationError("order needs quantity or dollar amount")
         reference = self.limit_price or self.stop_price
         if reference is None:
             raise OrderValidationError("quantity orders need a reference price")
