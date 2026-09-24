@@ -148,6 +148,7 @@ const STRATEGY_TEXT = {
   spy_scalper: 'S&P 500 scalper',
   llm: 'AI multi-asset',
   trend_crypto: 'crypto trend following',
+  momentum_rotation: 'weekly momentum rotation',
 };
 
 const SESSION_TEXT = {

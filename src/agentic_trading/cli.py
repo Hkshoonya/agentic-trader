@@ -263,7 +263,10 @@ def build_strategy(
             whitelist=config.effective_whitelist,
             max_quote_age_seconds=config.max_quote_age_seconds,
         )
-    if name == "trend_crypto":
+    if name in ("trend_crypto", "momentum_rotation"):
+        from agentic_trading.strategies.momentum_rotation import (
+            MomentumRotationStrategy,
+        )
         from agentic_trading.strategies.trend_crypto import TrendCryptoStrategy
 
         bar_dir = (
@@ -285,8 +288,13 @@ def build_strategy(
             for symbol in sorted(config.effective_whitelist)
         ]
         if not symbols:
-            raise ValueError(
-                "trend_crypto needs symbols in symbol_whitelist, e.g. BTC-USD"
+            raise ValueError(f"{name} needs symbols in symbol_whitelist, e.g. BTC-USD")
+        if name == "momentum_rotation":
+            return MomentumRotationStrategy(
+                bar_dir=bar_dir,
+                symbols=symbols,
+                max_positions=config.max_open_positions,
+                state_path=Path(config.state_dir) / "strategy_momentum_rotation.json",
             )
         return TrendCryptoStrategy(
             bar_dir=bar_dir,
@@ -713,6 +721,22 @@ def cmd_evolve(
     return 0
 
 
+def cmd_trial(config_path: str, *, start: bool = False, as_json: bool = False) -> int:
+    from agentic_trading import trial
+    from agentic_trading.evidence import _current_equity
+
+    config = load_config(config_path)
+    if start:
+        equity = _current_equity(config.state_dir)
+        if equity <= 0:
+            print("cannot start a trial before the account value is known", file=sys.stderr)
+            return 1
+        trial.start_trial(config, starting_equity=equity)
+    result = trial.score_trial(config)
+    print(json.dumps(result, indent=2) if as_json else trial.format_trial(result))
+    return 0
+
+
 def cmd_walkforward(
     config_path: str,
     *,
@@ -1022,6 +1046,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     wf_p.add_argument("--folds", type=int, default=6)
     wf_p.add_argument("--out", default=None, help="Where to write the report")
 
+    trial_p = sub.add_parser(
+        "trial",
+        help="Score the 30-day shadow trial against buy-and-hold (or start one)",
+    )
+    trial_p.add_argument("--config", required=True)
+    trial_p.add_argument(
+        "--start", action="store_true", help="Start (or restart) the trial now"
+    )
+    trial_p.add_argument("--json", action="store_true", help="Print the raw result")
+
     promote_p = sub.add_parser(
         "promote", help="Operator override: set promotion stage"
     )
@@ -1111,6 +1145,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             folds=args.folds,
             out=args.out,
         )
+    if args.command == "trial":
+        return cmd_trial(args.config, start=args.start, as_json=args.json)
     if args.command == "promote":
         return cmd_promote(args.config, args.stage)
     if args.command == "propose":

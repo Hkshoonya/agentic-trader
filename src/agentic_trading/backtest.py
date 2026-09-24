@@ -91,10 +91,31 @@ class CostModel:
     spread_bps: Decimal = Decimal("2")
     slippage_bps: Decimal = Decimal("1")
     fee_per_order: Decimal = Decimal("0")
+    # Crypto and equities do not cost the same to trade: Robinhood's crypto
+    # spread markup is a different venue charge from a commission-free equity
+    # fill. When set, crypto symbols are charged this model instead.
+    crypto: Optional["CostModel"] = None
 
     @property
     def per_side_bps(self) -> Decimal:
         return self.spread_bps / 2 + self.slippage_bps
+
+    def for_symbol(self, symbol: str) -> "CostModel":
+        """The model that applies to ``symbol``'s asset class."""
+        from agentic_trading.orders import is_crypto_symbol
+
+        if self.crypto is not None and is_crypto_symbol(symbol):
+            return self.crypto
+        return CostModel(self.spread_bps, self.slippage_bps, self.fee_per_order)
+
+    def scaled(self, multiplier: Decimal) -> "CostModel":
+        """Every cost times ``multiplier``, both asset classes."""
+        return CostModel(
+            spread_bps=self.spread_bps * multiplier,
+            slippage_bps=self.slippage_bps * multiplier,
+            fee_per_order=self.fee_per_order * multiplier,
+            crypto=None if self.crypto is None else self.crypto.scaled(multiplier),
+        )
 
     def buy_price(self, price: Decimal) -> Decimal:
         return price * (1 + self.per_side_bps / BPS)
@@ -215,6 +236,8 @@ def run_backtest(
 ) -> Metrics:
     """Simulate ``genome`` over ``bars`` and return honest performance metrics."""
     costs = costs or CostModel()
+    if bars:
+        costs = costs.for_symbol(bars[0].symbol)
     if len(bars) <= genome.warmup + 2:
         return Metrics(final_equity=starting_cash)
 

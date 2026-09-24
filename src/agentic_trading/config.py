@@ -117,6 +117,11 @@ class Config:
     min_forward_trades: int = 30
     min_forward_days: float = 30.0
     equity_sizing: bool = True
+    # Dry-run trial sizing: while the book is in shadow (mode *and* promotion
+    # stage), size paper orders at the operator ceilings instead of the
+    # confidence ladder, so a new rule records a forward trial at the size it
+    # would actually trade. It never applies to live orders.
+    shadow_full_size: bool = False
     min_order_notional: Decimal = Decimal("1.00")
     # When small-account mode is explicitly enabled below, aim for an order
     # large enough that a measured fixed round-trip cost is not the whole bet.
@@ -242,8 +247,16 @@ class Config:
             raise ValueError("symbol_whitelist cannot contain blank symbols")
         if self.mode not in ("shadow", "live"):
             raise ValueError("mode must be shadow|live")
-        if self.strategy not in ("fixture", "spy_scalper", "llm", "trend_crypto"):
-            raise ValueError("strategy must be fixture|spy_scalper|llm|trend_crypto")
+        if self.strategy not in (
+            "fixture",
+            "spy_scalper",
+            "llm",
+            "trend_crypto",
+            "momentum_rotation",
+        ):
+            raise ValueError(
+                "strategy must be fixture|spy_scalper|llm|trend_crypto|momentum_rotation"
+            )
         if self.quote_source not in ("file", "mcp"):
             raise ValueError("quote_source must be file|mcp")
         if self.session_policy not in ("regular", "extended", "all", "any"):
@@ -552,6 +565,7 @@ def load_config(path: str | Path) -> Config:
         min_forward_trades=int(raw.get("min_forward_trades", 30)),
         min_forward_days=float(raw.get("min_forward_days", 30.0)),
         equity_sizing=_boolean(raw, "equity_sizing", True),
+        shadow_full_size=_boolean(raw, "shadow_full_size", False),
         min_order_notional=Decimal(str(raw.get("min_order_notional", "1.00"))),
         small_account_target_notional=Decimal(
             str(raw.get("small_account_target_notional", "5.00"))

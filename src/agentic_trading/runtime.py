@@ -408,6 +408,12 @@ class _Loop:
         # unchanged, which is most days.
         reconcile(view)
         apply_to_guard(self.guard, view)
+        if self.shadow_full_size_active():
+            # A dry-run trial is paper: the confidence ladder protects money,
+            # and there is none at stake, so paper orders use the ceilings the
+            # operator set. Live orders never reach this branch.
+            self.guard.max_order_pct = view.max_order_pct
+            self.guard.daily_notional_pct = view.daily_notional_pct
         # Caps the evidence/confidence ladder currently justifies, before the
         # small-account floor is considered. Keep both separately so the floor
         # is re-derived rather than ratcheting its own previous result. These
@@ -427,6 +433,13 @@ class _Loop:
         self.apply_correlation_policy()
         self.apply_size_floor()
         self.reconcile_stage_mode()
+
+    def shadow_full_size_active(self) -> bool:
+        return bool(
+            getattr(self.config, "shadow_full_size", False)
+            and self.guard.mode == "shadow"
+            and getattr(self, "stage", "shadow") == "shadow"
+        )
 
     def risk_view(self) -> Config:
         """The operator's ceilings for *this* account size and confidence.
@@ -1645,11 +1658,14 @@ class _Loop:
 
             share = float(getattr(self.config, "max_cost_share_of_order", 0) or 0)
             required = required_notional_for_cost(
-                self.config.state_dir, max_share=share
+                self.config.state_dir, max_share=share, symbol=intent.symbol
             )
             notional = intent.resolved_notional()
             if required and notional < Decimal(str(required)):
-                cost = measured_cost_usd(self.config.state_dir) or 0.0
+                cost = (
+                    measured_cost_usd(self.config.state_dir, symbol=intent.symbol)
+                    or 0.0
+                )
                 self._journal_rejected(
                     intent,
                     "cost_too_high_for_size: "
@@ -1874,20 +1890,32 @@ class _Loop:
         try:
             review = self.broker.review_order(request)
         except Exception as exc:  # noqa: BLE001 — no review, no placement
-            self.journal.append(
-                {
-                    "decision_id": intent.decision_id,
-                    "event": "review_failed",
-                    "error": str(exc),
-                    "order_request": request.to_mcp_args(),
-                }
-            )
-            self.note_error("review_failed", exc)
-            # The judgement is done and the guard said yes; only the broker call
-            # failed. Hold it rather than making the strategy re-decide.
-            if deferred_root is None:
-                self.defer_intent(intent, session=session, why="review_failed")
-            return RETRY
+            if (
+                self.mode == "shadow"
+                and side is Side.SELL
+                and "invalid_request" in str(exc)
+            ):
+                # A paper position has no real counterpart, so the broker
+                # refusing to preview selling it ("you can only sell up to 0")
+                # says nothing about the paper exit. Record the exit with the
+                # broker's answer attached rather than counting it towards the
+                # kill switch. Transport failures still take the path below.
+                review = {"shadow_only_position": True, "broker_error": str(exc)[:500]}
+            else:
+                self.journal.append(
+                    {
+                        "decision_id": intent.decision_id,
+                        "event": "review_failed",
+                        "error": str(exc),
+                        "order_request": request.to_mcp_args(),
+                    }
+                )
+                self.note_error("review_failed", exc)
+                # The judgement is done and the guard said yes; only the broker
+                # call failed. Hold it rather than making the strategy re-decide.
+                if deferred_root is None:
+                    self.defer_intent(intent, session=session, why="review_failed")
+                return RETRY
         self.journal.append(
             {
                 "decision_id": intent.decision_id,
@@ -3426,6 +3454,9 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                         "errors": errors,
                     }
                 )
+                reload_history = getattr(loop.strategy, "reload_history", None)
+                if callable(reload_history):
+                    reload_history()
                 # Success heartbeat: the data agent's health comes from the sync
                 # that just returned. (This line was previously inside the try
                 # before `except`, so `exc` was unbound on the success path and

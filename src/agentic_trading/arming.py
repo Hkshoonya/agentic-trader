@@ -115,20 +115,14 @@ def _eligible_to_arm(state_dir: Path | str) -> tuple[bool, str]:
     assessed = assessed if isinstance(assessed, dict) else {}
     if str(assessed.get("report_generated_at") or "") != stamp:
         return False, "the current walk-forward report has not been assessed"
-    from agentic_trading.execution import measured_cost_usd
+    from agentic_trading.execution import unmodeled_round_trip
 
-    measured_round_trip = measured_cost_usd(state_dir)
-    modeled_fee = float(
-        ((evidence.get("costs") or {}).get("assumed_fee_per_order_usd") or 0.0)
-    )
-    if (
-        measured_round_trip is not None
-        and measured_round_trip > 0
-        and modeled_fee * 2 + 1e-9 < measured_round_trip
-    ):
+    gap = unmodeled_round_trip(state_dir, evidence.get("costs"))
+    if gap is not None:
+        asset, modeled, measured = gap
         return False, (
-            f"the evidence models ${modeled_fee * 2:.2f} per round trip but "
-            f"execution measured ${measured_round_trip:.2f}"
+            f"the evidence models ${modeled:.2f} per {asset} round trip but "
+            f"execution measured ${measured:.2f}"
         )
     guard = read("risk_guard.json")
     if guard.get("kill_switch"):

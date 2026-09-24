@@ -278,7 +278,7 @@ def check_evidence(config: Any, *, max_age_days: int = 30) -> Check:
 
     def run() -> tuple[str, str]:
         from agentic_trading.evidence import read_report
-        from agentic_trading.execution import measured_cost_usd
+        from agentic_trading.execution import unmodeled_round_trip
         from agentic_trading.limits import load_limits
 
         report = read_report(config)
@@ -296,18 +296,12 @@ def check_evidence(config: Any, *, max_age_days: int = 30) -> Check:
                 f"evidence report is {age_days:.0f} days old "
                 f"(refresh: agentic-trading walkforward)"
             )
-        measured_round_trip = measured_cost_usd(config.state_dir)
-        modeled_fee = float(
-            ((report.get("costs") or {}).get("assumed_fee_per_order_usd") or 0.0)
-        )
-        if (
-            measured_round_trip is not None
-            and measured_round_trip > 0
-            and modeled_fee * 2 + 1e-9 < measured_round_trip
-        ):
+        gap = unmodeled_round_trip(config.state_dir, report.get("costs"))
+        if gap is not None:
+            asset, modeled, measured = gap
             return FAIL, (
-                f"evidence models ${modeled_fee * 2:.2f} fixed cost per round trip "
-                f"but execution measured ${measured_round_trip:.2f}; refresh with "
+                f"evidence models ${modeled:.2f} fixed cost per {asset} round trip "
+                f"but execution measured ${measured:.2f}; refresh with "
                 "agentic-trading walkforward before arming"
             )
         gate = report.get("gate_size") or {}

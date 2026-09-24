@@ -51,15 +51,7 @@ class TrendCryptoStrategy:
         self.min_vote = min_vote
         self.state_path = Path(state_path) if state_path else None
         self.history: dict[str, list[Bar]] = {}
-        for symbol in self.symbols:
-            # Bar files are named without the dash (BTCUSD_day.jsonl) while the
-            # broker symbol keeps it (BTC-USD); history is keyed by the former.
-            key = symbol.replace("-", "").upper()
-            path = self.bar_dir / f"{key}_day.jsonl"
-            if path.is_file():
-                bars = load_bars(path)
-                if bars:
-                    self.history[key] = bars
+        self.reload_history()
         # Holdings are keyed the way the bar files are (BTCUSD), and are only
         # ever changed by a *reported fill* — never by emitting an intent.
         self._quantities: dict[str, Decimal] = {}
@@ -71,6 +63,34 @@ class TrendCryptoStrategy:
         # be acted on for a technical reason (see ``release_decision``).
         self.last_decided_day = ""
         self._load_state()
+
+    def reload_history(self) -> int:
+        """Re-read the bar files; return how many symbols gained a newer bar.
+
+        The daemon syncs history on a schedule, but a strategy that only read
+        its bars at start-up would keep ranking the day it was launched — and a
+        weekly rotation would silently become a static hold. The runtime calls
+        this after every successful sync.
+        """
+        refreshed = 0
+        for symbol in self.symbols:
+            # Bar files are named without the dash (BTCUSD_day.jsonl) while the
+            # broker symbol keeps it (BTC-USD); history is keyed by the former.
+            key = symbol.replace("-", "").upper()
+            path = self.bar_dir / f"{key}_day.jsonl"
+            if not path.is_file():
+                continue
+            try:
+                bars = load_bars(path)
+            except Exception:  # noqa: BLE001 — keep the bars we already have
+                continue
+            if not bars:
+                continue
+            previous = self.history.get(key)
+            if previous is None or bars[-1].start > previous[-1].start:
+                refreshed += 1
+            self.history[key] = bars
+        return refreshed
 
     # -- position bookkeeping --------------------------------------------
 

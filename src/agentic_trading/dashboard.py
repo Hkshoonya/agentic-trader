@@ -523,7 +523,11 @@ class DashboardState:
             "next_decision_local": next_at.astimezone().strftime("%Y-%m-%d %H:%M %Z"),
             "held": held,
             "explanation": (
-                f"{self.config.strategy} rebalances once per UTC day, on the "
+                "momentum_rotation re-ranks once a week on bars before Monday "
+                "00:00 UTC; entries follow on the first quote of each book's day "
+                "(crypto at 00:00 UTC, equities at the regular-session open)."
+                if self.config.strategy == "momentum_rotation"
+                else f"{self.config.strategy} rebalances once per UTC day, on the "
                 "first quote after 00:00 UTC; between rebalances the order "
                 "table is static by design while the cycle stream keeps running."
             ),
@@ -541,7 +545,7 @@ class DashboardState:
         if cache is not None and (now - cache[0]).total_seconds() < 60:
             return cache[1]
         from agentic_trading.evidence import load_series
-        from agentic_trading.walkforward import rank_targets
+        from agentic_trading.walkforward import rank_targets, rule_for_strategy
 
         try:
             series = load_series(self.config)
@@ -549,6 +553,7 @@ class DashboardState:
                 series,
                 now,
                 max_positions=self.config.max_open_positions,
+                rule=rule_for_strategy(self.config.strategy),
             )
         except Exception as exc:  # noqa: BLE001 — the console must still render
             payload: dict[str, Any] = {"rows": [], "error": str(exc)[:200]}

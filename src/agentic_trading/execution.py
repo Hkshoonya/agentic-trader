@@ -165,15 +165,30 @@ def record_round_trip(
     return report
 
 
-def measured_cost_usd(state_dir: Path | str) -> Optional[float]:
-    """Median dollars a completed round trip cost, or ``None`` if never measured."""
+def _asset_class(symbol: str) -> str:
+    from agentic_trading.orders import is_crypto_symbol
+
+    return "crypto" if is_crypto_symbol(symbol) else "equity"
+
+
+def measured_cost_usd(
+    state_dir: Path | str, *, symbol: Optional[str] = None
+) -> Optional[float]:
+    """Median dollars a completed round trip cost, or ``None`` if never measured.
+
+    With ``symbol``, only round trips in that symbol's asset class count: a
+    crypto spread markup measured on XLM says nothing about what a
+    commission-free SPY fill costs.
+    """
     report = load_report(state_dir)
     if report is None or not report.round_trips:
         return None
+    wanted = None if symbol is None else _asset_class(symbol)
     values = [
         float(row["cost_usd"])
         for row in report.round_trips
         if isinstance(row.get("cost_usd"), (int, float))
+        and (wanted is None or _asset_class(str(row.get("symbol") or "")) == wanted)
     ]
     if not values:
         return None
@@ -187,8 +202,32 @@ def measured_cost_usd(state_dir: Path | str) -> Optional[float]:
     return max(0.0, median)
 
 
+def unmodeled_round_trip(
+    state_dir: Path | str, report_costs: Any
+) -> Optional[tuple[str, float, float]]:
+    """``(asset class, modeled, measured)`` for the first class whose measured
+    round trip costs more than the evidence report modeled, else ``None``.
+
+    A report older than the per-class split carries only the top-level fee,
+    which it charged to every symbol; that fee stands in for both classes.
+    """
+    costs = report_costs if isinstance(report_costs, dict) else {}
+    equity_fee = float(costs.get("assumed_fee_per_order_usd") or 0.0)
+    crypto_fee = float(
+        costs.get("assumed_crypto_fee_per_order_usd", equity_fee) or 0.0
+    )
+    for asset, probe, fee in (
+        ("equity", "SPY", equity_fee),
+        ("crypto", "BTC-USD", crypto_fee),
+    ):
+        measured = measured_cost_usd(state_dir, symbol=probe)
+        if measured is not None and measured > 0 and fee * 2 + 1e-9 < measured:
+            return asset, fee * 2, measured
+    return None
+
+
 def required_notional_for_cost(
-    state_dir: Path | str, *, max_share: float
+    state_dir: Path | str, *, max_share: float, symbol: Optional[str] = None
 ) -> Optional[float]:
     """The smallest order whose measured round-trip cost stays inside ``max_share``.
 
@@ -198,7 +237,7 @@ def required_notional_for_cost(
     deliberately refuses rather than scaling the order up: the strategy asked
     for a size, and answering with five times as much is a different decision.
     """
-    cost = measured_cost_usd(state_dir)
+    cost = measured_cost_usd(state_dir, symbol=symbol)
     if cost is None or max_share <= 0:
         return None
     return cost / max_share
@@ -383,6 +422,10 @@ def cost_model_for(state_dir: Path | str, base: Any = None) -> Any:
     median dollar loss is modeled as a fixed fee split across entry and exit;
     percentage slippage samples need the larger fill floor before replacing the
     default. A profitable/noisy trip never makes the model free.
+
+    Round trips are measured per asset class and applied only to that class:
+    a crypto trip prices the crypto book, an equity trip the equity book, and
+    a class with no trip of its own keeps the default assumption.
     """
     from agentic_trading.backtest import CostModel
 
@@ -390,13 +433,28 @@ def cost_model_for(state_dir: Path | str, base: Any = None) -> Any:
     report = load_report(state_dir)
     if report is None:
         return model
-    fixed_round_trip = measured_cost_usd(state_dir)
-    if fixed_round_trip is not None and fixed_round_trip > 0:
-        kind = type(model.fee_per_order)
+    kind = type(model.fee_per_order)
+
+    def fixed(round_trip: float) -> Any:
         return CostModel(
             spread_bps=type(model.spread_bps)("0"),
             slippage_bps=type(model.slippage_bps)("0"),
-            fee_per_order=kind(str(round(fixed_round_trip / 2, 6))),
+            fee_per_order=kind(str(round(round_trip / 2, 6))),
+        )
+
+    equity_trip = measured_cost_usd(state_dir, symbol="SPY")
+    crypto_trip = measured_cost_usd(state_dir, symbol="BTC-USD")
+    if (equity_trip or 0) > 0 or (crypto_trip or 0) > 0:
+        equity_model = (
+            fixed(equity_trip)
+            if equity_trip
+            else CostModel(model.spread_bps, model.slippage_bps, model.fee_per_order)
+        )
+        return CostModel(
+            spread_bps=equity_model.spread_bps,
+            slippage_bps=equity_model.slippage_bps,
+            fee_per_order=equity_model.fee_per_order,
+            crypto=fixed(crypto_trip) if crypto_trip else None,
         )
     if not report.usable:
         return model
