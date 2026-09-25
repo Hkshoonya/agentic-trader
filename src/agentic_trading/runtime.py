@@ -297,6 +297,10 @@ class _Loop:
         self.config = config
         self.broker = broker
         self.strategy = strategy or FixtureStrategy()
+
+        from agentic_trading.tape import QuoteTape
+
+        self.tape = QuoteTape(config.tape_dir) if config.tape_enabled else None
         # Used to rebuild the strategy when the scout changes the universe: a
         # strategy that was constructed for one symbol list cannot price another,
         # and re-seeding its book is not enough.
@@ -2982,6 +2986,10 @@ def run_daemon(
             except Exception as exc:  # noqa: BLE001 — feed errors must not crash
                 journal.append({"event": "quote_read_failed", "error": str(exc)})
                 quotes = []
+            if loop.tape is not None and quotes:
+                tape_error = loop.tape.record(quotes)
+                if tape_error:
+                    journal.append({"event": "tape_write_failed", "error": tape_error})
             if crypto_session:
                 # The equity market is closed: only the pairs are actionable,
                 # and reporting stock quotes as stale here would be noise.

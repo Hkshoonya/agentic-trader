@@ -1,0 +1,99 @@
+"""The quote tape: clean intraday data banked from every poll."""
+
+from __future__ import annotations
+
+import gzip
+import json
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+from agentic_trading.tape import QuoteTape
+
+T0 = datetime(2026, 9, 24, 1, 0, 1, tzinfo=timezone.utc)
+
+
+def _quote(bid: str, observed: str = "2026-09-24T01:00:01Z") -> dict:
+    return {
+        "symbol": "BTC-USD",
+        "bid": Decimal(bid),
+        "ask": Decimal(bid) + Decimal("0.2"),
+        "quote_at": observed,
+        "observed_at": observed,
+    }
+
+
+def _rows(path: Path) -> list[dict]:
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle]
+
+
+class QuoteTapeTests(unittest.TestCase):
+    def test_quotes_append_to_a_daily_gzip_file(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tape = QuoteTape(Path(name))
+            self.assertIsNone(tape.record([_quote("100.5")], now=T0))
+            self.assertIsNone(tape.record([_quote("101")], now=T0))
+            rows = _rows(Path(name) / "BTC-USD" / "2026-09-24.jsonl.gz")
+        self.assertEqual([row["bid"] for row in rows], ["100.5", "101"])
+        self.assertEqual(
+            set(rows[0]), {"symbol", "bid", "ask", "quote_at", "observed_at"}
+        )
+
+    def test_the_file_is_named_by_the_quote_day_not_the_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tape = QuoteTape(Path(name))
+            tape.record([_quote("1", observed="2026-09-25T00:00:02Z")], now=T0)
+            self.assertTrue(
+                (Path(name) / "BTC-USD" / "2026-09-25.jsonl.gz").is_file()
+            )
+
+    def test_a_write_error_is_reported_once_per_hour_and_never_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            blocker = Path(name) / "not-a-dir"
+            blocker.write_text("x", encoding="utf-8")
+            tape = QuoteTape(blocker)
+            first = tape.record([_quote("1")], now=T0)
+            second = tape.record([_quote("1")], now=T0 + timedelta(minutes=10))
+            third = tape.record([_quote("1")], now=T0 + timedelta(minutes=61))
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertIsNotNone(third)
+
+    def test_quotes_without_a_usable_symbol_are_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tape = QuoteTape(Path(name))
+            tape.record([{**_quote("1"), "symbol": "../evil"}, {"bid": 1}], now=T0)
+            self.assertEqual(list(Path(name).iterdir()), [])
+
+
+class TapeDaemonTests(unittest.TestCase):
+    def test_the_daemon_records_every_polled_quote(self) -> None:
+        from agentic_trading.broker import Broker
+        from agentic_trading.config import load_config
+        from agentic_trading.strategies.fixture import FixtureStrategy
+        from tests.fakes import FakeMcpClient
+        from tests.test_runtime_daemon import (
+            _quote as daemon_quote,
+            _run,
+            _StubFeed,
+            _write_config,
+            load_tools,
+        )
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = load_config(
+                _write_config(tmp, extra=[f'tape_dir = "{tmp / "tape"}"'])
+            )
+            tools = load_tools()
+            _run(
+                config,
+                Broker(FakeMcpClient(tools), tools),
+                FixtureStrategy(),
+                _StubFeed([daemon_quote()]),
+            )
+            rows = _rows(tmp / "tape" / "SPY" / "2026-09-16.jsonl.gz")
+        self.assertEqual(rows[0]["symbol"], "SPY")

@@ -122,6 +122,10 @@ class Config:
     # confidence ladder, so a new rule records a forward trial at the size it
     # would actually trade. It never applies to live orders.
     shadow_full_size: bool = False
+    # Record every polled quote to <tape_dir>/<SYMBOL>/<date>.jsonl.gz: the
+    # clean intraday data the fast lane will be designed on.
+    tape_enabled: bool = True
+    tape_dir: str = "data/tape"
     min_order_notional: Decimal = Decimal("1.00")
     # When small-account mode is explicitly enabled below, aim for an order
     # large enough that a measured fixed round-trip cost is not the whole bet.
@@ -566,6 +570,8 @@ def load_config(path: str | Path) -> Config:
         min_forward_days=float(raw.get("min_forward_days", 30.0)),
         equity_sizing=_boolean(raw, "equity_sizing", True),
         shadow_full_size=_boolean(raw, "shadow_full_size", False),
+        tape_enabled=_boolean(raw, "tape_enabled", True),
+        tape_dir=str(raw.get("tape_dir", "data/tape")),
         min_order_notional=Decimal(str(raw.get("min_order_notional", "1.00"))),
         small_account_target_notional=Decimal(
             str(raw.get("small_account_target_notional", "5.00"))
