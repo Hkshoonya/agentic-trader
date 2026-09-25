@@ -34,6 +34,9 @@ class MemberBook:
         self.path = Path(path) if path else None
         self.starting_equity = Decimal(str(starting_equity))
         self.cash = self.starting_equity
+        # The lowest cash the book has held: the trial reports it so a paper
+        # return that briefly spent more than it had cannot pass unnoticed.
+        self.lowest_cash = self.starting_equity
         self.positions: dict[str, Decimal] = {}
         self.prices: dict[str, Decimal] = {}
         self.samples: list[tuple[str, str]] = []
@@ -107,6 +110,7 @@ class MemberBook:
         if qty <= 0:
             return ZERO
         self.cash -= qty * price * (1 + per_side) + fee
+        self.lowest_cash = min(self.lowest_cash, self.cash)
         self.positions[symbol] = self.positions.get(symbol, ZERO) + qty
         self.prices.setdefault(symbol, price)
         self.entries += 1
@@ -177,9 +181,13 @@ class MemberBook:
         starting_equity: Decimal,
         entries: int,
         exits: int,
+        lowest_cash: Optional[Decimal] = None,
     ) -> None:
         """Take over an existing paper record (the rotation trial's) wholesale."""
         self.cash = Decimal(str(cash))
+        self.lowest_cash = min(
+            self.cash, Decimal(str(lowest_cash)) if lowest_cash is not None else self.cash
+        )
         self.positions = {s.upper(): Decimal(str(q)) for s, q in positions.items()}
         self.prices = {s.upper(): Decimal(str(p)) for s, p in prices.items()}
         self.starting_equity = Decimal(str(starting_equity))
@@ -194,6 +202,7 @@ class MemberBook:
             "name": self.name,
             "starting_equity": str(self.starting_equity),
             "cash": str(self.cash),
+            "lowest_cash": str(self.lowest_cash),
             "cash_pending": self.cash_pending,
             "positions": {s: str(q) for s, q in self.positions.items()},
             "prices": {s: str(p) for s, p in self.prices.items()},
@@ -223,6 +232,7 @@ class MemberBook:
             raw = json.loads(path.read_text(encoding="utf-8"))
             book.starting_equity = Decimal(str(raw["starting_equity"]))
             book.cash = Decimal(str(raw["cash"]))
+            book.lowest_cash = Decimal(str(raw.get("lowest_cash", raw["cash"])))
             book.cash_pending = bool(raw.get("cash_pending", False))
             book.positions = {s: Decimal(str(q)) for s, q in raw["positions"].items()}
             book.prices = {s: Decimal(str(p)) for s, p in raw["prices"].items()}

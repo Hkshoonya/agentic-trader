@@ -142,3 +142,72 @@ class MemberStateTests(unittest.TestCase):
             )
             rotation = build_strategy(config).members[0].strategy
         self.assertEqual(rotation._last_decision_dates, {"equity": "2026-09-25"})
+
+
+class DeskGateAndTrialTests(unittest.TestCase):
+    def test_the_desk_needs_forward_evidence_before_any_promotion(self) -> None:
+        from agentic_trading.promotion import policy_from_config
+
+        with tempfile.TemporaryDirectory() as name:
+            policy = policy_from_config(_config(Path(name)))
+        self.assertEqual(policy.min_forward_trades, 30)
+
+    def test_a_rolled_back_trial_ignores_the_desks_account_orders(self) -> None:
+        from agentic_trading import trial
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp)
+            started = datetime(2026, 9, 23, 23, 20, tzinfo=timezone.utc)
+            Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+            trial.start_trial(config, starting_equity=Decimal("50"), now=started)
+            journal = Path(config.journal_dir)
+            journal.mkdir(parents=True)
+            desk_order = {
+                "event": "accepted",
+                "mode": "shadow",
+                "at": (started + timedelta(days=1)).isoformat(),
+                "intent": {
+                    "symbol": "QQQ",
+                    "side": "buy",
+                    "quantity": "0.04",
+                    "ref_price": "740",
+                    "reason": "desk_rebalance",
+                },
+            }
+            (journal / "2026-09-24.jsonl").write_text(
+                json.dumps(desk_order) + "\n", encoding="utf-8"
+            )
+            rolled_back = load_config(
+                _write_config(tmp, extra=[f'history_path = "{tmp / "bars"}"'])
+            )
+            scored = trial.score_trial(rolled_back, now=started + timedelta(days=2))
+        self.assertEqual(scored["entries"], 0)
+        self.assertEqual(scored["positions"], [])
+
+    def test_the_desk_reports_the_rotation_books_lowest_cash(self) -> None:
+        from agentic_trading import trial
+        from agentic_trading.backtest import CostModel
+        from agentic_trading.desk.book import MemberBook
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp)
+            started = datetime(2026, 9, 23, 23, 20, tzinfo=timezone.utc)
+            Path(config.state_dir).mkdir(parents=True, exist_ok=True)
+            trial.start_trial(config, starting_equity=Decimal("50"), now=started)
+            path = Path(config.state_dir) / "trial.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["strategy"] = "momentum_rotation"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            free = CostModel(Decimal("0"), Decimal("0"), Decimal("0"))
+            book = MemberBook(
+                "momentum_rotation",
+                starting_equity=Decimal("50"),
+                path=Path(config.state_dir) / "desk" / "momentum_rotation.json",
+            )
+            book.buy("MSFT", Decimal("40"), Decimal("10"), free)  # cash 10
+            book.sell("MSFT", Decimal("4"), Decimal("10"), free)  # cash back to 50
+            book.save()
+            scored = trial.score_trial(config, now=started + timedelta(days=1))
+        self.assertEqual(scored["lowest_cash"], 10.0)

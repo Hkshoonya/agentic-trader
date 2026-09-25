@@ -110,6 +110,8 @@ def _replay(config: Any, started: datetime) -> dict[str, Any]:
         ):
             continue
         intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+        if intent.get("reason") == "desk_rebalance":
+            continue  # the desk's account orders are not the trial strategy's
         stamp = _stamp(record.get("at") or intent.get("created_at"))
         if stamp is None or stamp < started:
             continue
@@ -183,6 +185,7 @@ def seed_member_book(config: Any, book: Any) -> bool:
         starting_equity=Decimal(str(trial["starting_equity"])),
         entries=replay["entries"],
         exits=replay["exits"],
+        lowest_cash=replay["lowest_cash"],
     )
     book.save()
     return True
@@ -203,7 +206,7 @@ def score_trial(config: Any, *, now: Optional[datetime] = None) -> dict[str, Any
         # The desk runs the trial's strategy as a member: its book is the record,
         # marked at the live prices the desk last saw.
         cash = member.cash
-        lowest_cash = member.cash
+        lowest_cash = member.lowest_cash
         entries, exits = member.entries, member.exits
         book = cash
         for symbol, quantity in sorted(member.positions.items()):
