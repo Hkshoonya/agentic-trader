@@ -10,6 +10,9 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 
+DESK_MEMBER_NAMES = ("momentum_rotation", "trend_crypto", "benchmark")
+
+
 @dataclass(frozen=True)
 class Config:
     mode: str
@@ -126,6 +129,10 @@ class Config:
     # clean intraday data the fast lane will be designed on.
     tape_enabled: bool = True
     tape_dir: str = "data/tape"
+    # The strategy desk: which strategies compete, and each member's per-order
+    # share of its own paper book (the rotation was tested at 19%).
+    desk_members: tuple[str, ...] = DESK_MEMBER_NAMES
+    desk_member_order_pct: Decimal = Decimal("0.19")
     min_order_notional: Decimal = Decimal("1.00")
     # When small-account mode is explicitly enabled below, aim for an order
     # large enough that a measured fixed round-trip cost is not the whole bet.
@@ -257,10 +264,22 @@ class Config:
             "llm",
             "trend_crypto",
             "momentum_rotation",
+            "desk",
         ):
             raise ValueError(
-                "strategy must be fixture|spy_scalper|llm|trend_crypto|momentum_rotation"
+                "strategy must be "
+                "fixture|spy_scalper|llm|trend_crypto|momentum_rotation|desk"
             )
+        unknown = [m for m in self.desk_members if m not in DESK_MEMBER_NAMES]
+        if unknown:
+            raise ValueError(
+                f"desk_members has unknown members {unknown}; "
+                f"choose from {list(DESK_MEMBER_NAMES)}"
+            )
+        if "benchmark" not in self.desk_members:
+            raise ValueError("desk_members must include benchmark (the fallback)")
+        if not (Decimal("0") < self.desk_member_order_pct <= Decimal("1")):
+            raise ValueError("desk_member_order_pct must be in (0, 1]")
         if self.quote_source not in ("file", "mcp"):
             raise ValueError("quote_source must be file|mcp")
         if self.session_policy not in ("regular", "extended", "all", "any"):
@@ -572,6 +591,10 @@ def load_config(path: str | Path) -> Config:
         shadow_full_size=_boolean(raw, "shadow_full_size", False),
         tape_enabled=_boolean(raw, "tape_enabled", True),
         tape_dir=str(raw.get("tape_dir", "data/tape")),
+        desk_members=tuple(
+            str(name) for name in (raw.get("desk_members") or DESK_MEMBER_NAMES)
+        ),
+        desk_member_order_pct=Decimal(str(raw.get("desk_member_order_pct", "0.19"))),
         min_order_notional=Decimal(str(raw.get("min_order_notional", "1.00"))),
         small_account_target_notional=Decimal(
             str(raw.get("small_account_target_notional", "5.00"))

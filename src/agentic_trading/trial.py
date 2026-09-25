@@ -90,16 +90,12 @@ def _close_before(
     return known[-1] if known else None
 
 
-def score_trial(config: Any, *, now: Optional[datetime] = None) -> dict[str, Any]:
+def _replay(config: Any, started: datetime) -> dict[str, Any]:
+    """Cash, holdings and counts from accepted shadow decisions since ``started``."""
     from agentic_trading.journal import DecisionJournal
 
-    trial = load_trial(config)
-    if trial is None:
-        return {"started": False, "note": "no trial running; start one with --start"}
-    started = _stamp(trial["started_at"])
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    starting = Decimal(str(trial.get("starting_equity") or "0"))
-    cash = starting
+    trial = load_trial(config) or {}
+    cash = Decimal(str(trial.get("starting_equity") or "0"))
     held: dict[str, Decimal] = {}
     last_price: dict[str, Decimal] = {}
     entries = exits = 0
@@ -115,7 +111,7 @@ def score_trial(config: Any, *, now: Optional[datetime] = None) -> dict[str, Any
             continue
         intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
         stamp = _stamp(record.get("at") or intent.get("created_at"))
-        if stamp is None or started is None or stamp < started:
+        if stamp is None or stamp < started:
             continue
         symbol = str(intent.get("symbol") or "").upper()
         side = str(intent.get("side") or "").lower()
@@ -144,21 +140,96 @@ def score_trial(config: Any, *, now: Optional[datetime] = None) -> dict[str, Any
             if held[symbol] <= 0:
                 held.pop(symbol)
             exits += 1
+    return {
+        "cash": cash,
+        "held": held,
+        "last_price": last_price,
+        "entries": entries,
+        "exits": exits,
+        "lowest_cash": lowest_cash,
+    }
 
-    positions = []
-    book = cash
-    for symbol, quantity in sorted(held.items()):
+
+def _member_book(config: Any, name: str) -> Any:
+    """The desk member book that carries the trial, when the desk runs it."""
+    if str(getattr(config, "strategy", "")) != "desk":
+        return None
+    from agentic_trading.desk.book import MemberBook
+
+    path = Path(config.state_dir) / "desk" / f"{name}.json"
+    if not path.is_file():
+        return None
+    book, reset = MemberBook.load(path, name=name, starting_equity=Decimal("0"))
+    return None if reset else book
+
+
+def seed_member_book(config: Any, book: Any) -> bool:
+    """Hand the running trial's paper record to its desk member, once."""
+    trial = load_trial(config)
+    started = _stamp(trial.get("started_at")) if trial else None
+    if trial is None or started is None or trial.get("strategy") != book.name:
+        return False
+    replay = _replay(config, started)
+    prices: dict[str, Decimal] = {}
+    for symbol in replay["held"]:
         closes = _closes(config, symbol)
-        mark = closes[-1][1] if closes else last_price.get(symbol, Decimal("0"))
-        value = quantity * mark
-        book += value
-        positions.append(
-            {
-                "symbol": symbol,
-                "quantity": str(quantity),
-                "value": round(float(value), 2),
-            }
+        prices[symbol] = (
+            closes[-1][1] if closes else replay["last_price"].get(symbol, Decimal("0"))
         )
+    book.adopt(
+        cash=replay["cash"],
+        positions=replay["held"],
+        prices=prices,
+        starting_equity=Decimal(str(trial["starting_equity"])),
+        entries=replay["entries"],
+        exits=replay["exits"],
+    )
+    book.save()
+    return True
+
+
+def score_trial(config: Any, *, now: Optional[datetime] = None) -> dict[str, Any]:
+    trial = load_trial(config)
+    if trial is None:
+        return {"started": False, "note": "no trial running; start one with --start"}
+    started = _stamp(trial["started_at"])
+    if started is None:
+        return {"started": False, "note": "trial state has no usable start time"}
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    starting = Decimal(str(trial.get("starting_equity") or "0"))
+    positions: list[dict[str, Any]] = []
+    member = _member_book(config, str(trial.get("strategy") or ""))
+    if member is not None:
+        # The desk runs the trial's strategy as a member: its book is the record,
+        # marked at the live prices the desk last saw.
+        cash = member.cash
+        lowest_cash = member.cash
+        entries, exits = member.entries, member.exits
+        book = cash
+        for symbol, quantity in sorted(member.positions.items()):
+            value = quantity * member.prices.get(symbol, Decimal("0"))
+            book += value
+            positions.append(
+                {"symbol": symbol, "quantity": str(quantity), "value": round(float(value), 2)}
+            )
+    else:
+        replay = _replay(config, started)
+        cash = replay["cash"]
+        lowest_cash = replay["lowest_cash"]
+        entries, exits = replay["entries"], replay["exits"]
+        book = cash
+        for symbol, quantity in sorted(replay["held"].items()):
+            closes = _closes(config, symbol)
+            mark = (
+                closes[-1][1]
+                if closes
+                else replay["last_price"].get(symbol, Decimal("0"))
+            )
+            value = quantity * mark
+            book += value
+            positions.append(
+                {"symbol": symbol, "quantity": str(quantity), "value": round(float(value), 2)}
+            )
 
     benchmark_return = 0.0
     benchmark_parts = {}

@@ -243,6 +243,8 @@ def build_strategy(
 ) -> FixtureStrategy | SpyScalperStrategy | LlmMultiAssetStrategy:
     """Select strategy plugin from config / CLI override."""
     name = (strategy_name or config.strategy or "fixture").strip().lower()
+    if name == "desk":
+        return build_desk(config)
     if name == "fixture":
         return FixtureStrategy()
     if name == "spy_scalper":
@@ -304,6 +306,50 @@ def build_strategy(
         )
     raise ValueError(f"unknown strategy: {name}")
 
+
+
+def build_desk(config: Config) -> Any:
+    """The strategy desk, with every member's book and state under state/desk."""
+    from agentic_trading import trial
+    from agentic_trading.desk.benchmark import BenchmarkStrategy
+    from agentic_trading.desk.book import MemberBook
+    from agentic_trading.desk.desk import StrategyDesk
+    from agentic_trading.desk.member import Member
+    from agentic_trading.evidence import _current_equity
+    from agentic_trading.execution import cost_model_for
+    from agentic_trading.journal import DecisionJournal
+
+    desk_dir = Path(config.state_dir) / "desk"
+    journal = DecisionJournal(Path(config.journal_dir))
+    equity = _current_equity(config.state_dir)
+    members = []
+    for name in config.desk_members:
+        if name == "benchmark":
+            strategy: Any = BenchmarkStrategy()
+        else:
+            strategy = build_strategy(config, name)
+            strategy.state_path = desk_dir / f"{name}_strategy.json"
+        book, reset = MemberBook.load(
+            desk_dir / f"{name}.json", name=name, starting_equity=equity
+        )
+        if reset:
+            journal.append({"event": "desk_member_reset", "member": name})
+        if book.is_new and trial.seed_member_book(config, book):
+            journal.append({"event": "desk_trial_adopted", "member": name})
+        members.append(
+            Member(name, strategy, book, order_pct=config.desk_member_order_pct)
+        )
+    account, _ = MemberBook.load(
+        desk_dir / "account.json", name="account", starting_equity=equity
+    )
+    return StrategyDesk(
+        members=members,
+        account=account,
+        costs=lambda: cost_model_for(config.state_dir),
+        journal=journal.append,
+        state_path=desk_dir / "desk.json",
+        retry_seconds=config.rebalance_retry_seconds,
+    )
 
 def cmd_run(
     config_path: str,

@@ -46,8 +46,14 @@ ROTATION_BOOKS = {
 }
 
 # Which ranking each strategy trades, so the evidence gate and the console
-# grade the rule the daemon actually runs.
-STRATEGY_RULES = {"trend_crypto": "trend", "momentum_rotation": "rotation"}
+# grade the rule the daemon actually runs. The desk has no single rule: its
+# members are judged by their live books, so the walk-forward grades nothing
+# (zero trades keeps the promotion gate shut).
+STRATEGY_RULES = {
+    "trend_crypto": "trend",
+    "momentum_rotation": "rotation",
+    "desk": "none",
+}
 
 
 # Configurations examined before each rule was fixed. The trend rule came from
@@ -188,6 +194,8 @@ def rank_targets(
     nothing has traded. Both read the same numbers, so the explanation cannot
     drift from the decision.
     """
+    if rule == "none":
+        return []
     if rule == "rotation":
         return rank_rotation(series, when, max_positions=max_positions)
     rows: list[dict[str, Any]] = []
