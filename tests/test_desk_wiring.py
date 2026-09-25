@@ -113,3 +113,32 @@ class TrialHandoverTests(unittest.TestCase):
             scored = trial.score_trial(config, now=started + timedelta(days=1))
         self.assertEqual(scored["entries"], 1)
         self.assertEqual([p["symbol"] for p in scored["positions"]], ["SOL-USD"])
+
+
+class MemberStateTests(unittest.TestCase):
+    def test_member_strategies_resume_from_their_desk_state(self) -> None:
+        """A restart must not re-run a day's entries the member already decided."""
+        from agentic_trading.cli import build_strategy
+
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name))
+            desk = build_strategy(config)
+            rotation = desk.members[0].strategy
+            rotation._last_decision_dates = {"crypto": "2026-09-28"}
+            rotation._save_state()
+            rebuilt = build_strategy(config).members[0].strategy
+        self.assertEqual(rebuilt._last_decision_dates, {"crypto": "2026-09-28"})
+
+    def test_a_first_launch_inherits_the_live_strategys_decisions(self) -> None:
+        from agentic_trading.cli import build_strategy
+
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name))
+            live = Path(config.state_dir) / "strategy_momentum_rotation.json"
+            live.parent.mkdir(parents=True, exist_ok=True)
+            live.write_text(
+                json.dumps({"last_decision_dates": {"equity": "2026-09-25"}}),
+                encoding="utf-8",
+            )
+            rotation = build_strategy(config).members[0].strategy
+        self.assertEqual(rotation._last_decision_dates, {"equity": "2026-09-25"})

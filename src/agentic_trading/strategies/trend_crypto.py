@@ -144,6 +144,22 @@ class TrendCryptoStrategy:
                     "equity": legacy,
                 }
 
+    def use_state_path(self, path: Path | str) -> None:
+        """Persist to ``path`` from now on, resuming from it when it exists.
+
+        The desk gives each member its own state file. Without the reload, a
+        member built from the operator's strategy file would keep that file's
+        decision dates on every restart and re-run a day it had already decided.
+        When the file does not exist yet (first launch) the state already loaded
+        stands, so the member inherits the running strategy's decisions.
+        """
+        self.state_path = Path(path)
+        if self.state_path.is_file():
+            self._quantities = {}
+            self._last_decision_dates = {}
+            self._last_decision_date = ""
+            self._load_state()
+
     def _save_state(self) -> None:
         if self.state_path is None:
             return

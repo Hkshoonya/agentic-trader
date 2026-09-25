@@ -328,7 +328,7 @@ def build_desk(config: Config) -> Any:
             strategy: Any = BenchmarkStrategy()
         else:
             strategy = build_strategy(config, name)
-            strategy.state_path = desk_dir / f"{name}_strategy.json"
+            strategy.use_state_path(desk_dir / f"{name}_strategy.json")
         book, reset = MemberBook.load(
             desk_dir / f"{name}.json", name=name, starting_equity=equity
         )
