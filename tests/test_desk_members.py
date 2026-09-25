@@ -167,6 +167,20 @@ class MemberMinimumTests(unittest.TestCase):
             min_notional=lambda symbol: D("5"),
         )
         quotes = {"SOL-USD": quote("SOL-USD", "99", "100")}
-        # 50 * 0.19 * 0.3 = $2.85: under the $5 floor.
-        self.assertEqual(member.on_quote(quotes["SOL-USD"], quotes, FREE), [])
+        # 50 * 0.19 * 0.3 = $2.85: under the $5 floor, so skipped (and said so).
+        events = member.on_quote(quotes["SOL-USD"], quotes, FREE)
+        self.assertEqual([e["event"] for e in events], ["member_skipped"])
+        self.assertEqual(events[0]["minimum"], "5")
         self.assertEqual(member.book.positions, {})
+
+
+class MemberSkipTests(unittest.TestCase):
+    def test_an_entry_skipped_for_cash_is_journaled(self) -> None:
+        book = MemberBook("m", starting_equity=D("50"))
+        book.buy("MSFT", D("50"), D("10"), FREE)  # all cash spent
+        strategy = _Scripted([_intent("AAPL", Side.BUY)])
+        member = Member("m", strategy, book, order_pct=D("0.19"))
+        q = quote("AAPL", "99", "100")
+        [event] = member.on_quote(q, {"AAPL": q}, FREE)
+        self.assertEqual(event["event"], "member_skipped")
+        self.assertEqual(event["symbol"], "AAPL")

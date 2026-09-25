@@ -153,3 +153,57 @@ class DeskTests(unittest.TestCase):
         self.assertEqual(desk.allocations, {"benchmark": 1.0, "broken": 0.0})
         self.assertIn("desk_member_failed", [e["event"] for e in log])
         self.assertEqual(len(intents), 1)  # the benchmark still trades
+
+
+COSTS = CostModel(D("0"), D("0"), D("0"), crypto=CostModel(D("0"), D("0"), D("0.05")))
+
+
+class DeskHardeningTests(unittest.TestCase):
+    def test_price_moves_do_not_retarget_while_a_symbol_waits_for_a_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            desk, _ = build(tmp)
+            [qqq] = desk.on_quote(quote("QQQ", "500", "500"))
+            desk.note_fill("QQQ", qqq.quantity)
+            [btc] = desk.on_quote(quote("BTC-USD", "99", "100"))
+            desk.note_fill("BTC-USD", btc.quantity)
+            # Restart over the weekend: the benchmark holds QQQ, but no QQQ
+            # quote arrives until Monday. BTC keeps moving.
+            events: list[dict] = []
+            restarted, _ = build(tmp, events=events)
+            restarted.seed_positions(dict(desk.account.positions))
+            for price in ("110", "120", "130", "140"):
+                restarted.on_quote(quote("BTC-USD", price, price, at=FRI))
+        retargets = [e for e in events if e["event"] == "desk_targets"]
+        self.assertLessEqual(len(retargets), 1)
+
+    def test_a_save_failure_is_journaled_not_raised(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            desk, log = build(tmp)
+            blocker = tmp / "blocked"
+            blocker.write_text("x", encoding="utf-8")
+            desk.state_path = blocker / "desk.json"  # parent is a file
+            desk.on_quote(quote("BTC-USD", "99", "100"))
+        self.assertIn("desk_save_failed", [e["event"] for e in log])
+
+    def test_the_daily_sample_is_taken_before_the_new_days_trades(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            desk_dir = tmp / "desk"
+            book, _ = MemberBook.load(desk_dir / "benchmark.json", name="benchmark", starting_equity=D("50"))
+            account, _ = MemberBook.load(desk_dir / "account.json", name="account", starting_equity=D("50"))
+            desk = StrategyDesk(
+                members=[Member("benchmark", BenchmarkStrategy(), book, order_pct=D("0.19"))],
+                account=account,
+                costs=lambda: COSTS,
+                journal=[].append,
+                state_path=desk_dir / "desk.json",
+                monotonic=_Clock(),
+            )
+            desk.on_quote(quote("MSFT", "10", "10", at=THU))  # day 1: no trade
+            desk.on_quote(quote("BTC-USD", "99", "100", at=FRI))  # day 2 buys BTC
+        # Day 1's closing equity is untouched by day 2's $0.05 crypto fee.
+        self.assertEqual(
+            [(day, D(value)) for day, value in book.samples], [("2026-09-24", D("50"))]
+        )

@@ -82,6 +82,11 @@ class StrategyDesk:
         self.targets: dict[str, Decimal] = {}
         self.quotes: dict[str, dict[str, Any]] = {}
         self._pending = True
+        # Symbols a member holds that had no quote at the last retarget: only
+        # their arrival (or another event) may retarget again, so price moves
+        # elsewhere cannot re-size targets while one symbol waits.
+        self._awaiting: set[str] = set()
+        self._save_error_at = -math.inf
         self._last_emit: dict[str, tuple[float, Decimal]] = {}
         self._costs: Any = None
         self._costs_at = -math.inf
@@ -108,7 +113,10 @@ class StrategyDesk:
         }
         self.account.set_holdings(cleaned)
         self._pending = True
-        self._save()
+        events: list[dict[str, Any]] = []
+        self._persist(self._save, events)
+        for event in events:
+            self.journal(event)
         return len(cleaned)
 
     def note_fill(self, symbol: str, quantity: Any) -> None:
@@ -119,7 +127,10 @@ class StrategyDesk:
         if price is None:
             return
         self.account.apply_fill(key, signed, price, self.costs())
-        self.account.save()
+        events: list[dict[str, Any]] = []
+        self._persist(self.account.save, events)
+        for event in events:
+            self.journal(event)
 
     def on_quote(self, quote: dict[str, Any]) -> list[OrderIntent]:
         symbol = broker_symbol(str(quote.get("symbol") or ""))
@@ -128,7 +139,17 @@ class StrategyDesk:
         stamp = _stamp(quote.get("observed_at"))
         quote = {**quote, "symbol": symbol}
         self.quotes[symbol] = quote
+        if symbol in self._awaiting:
+            self._pending = True
         costs = self.costs()
+
+        # Mark first: a new UTC day's closing sample must be yesterday's equity,
+        # not yesterday's equity minus the costs of today's first trades.
+        mid = _mid(quote)
+        sampled = False
+        for book in [member.book for member in self.members] + [self.account]:
+            if book.mark({symbol: mid} if mid is not None else {}, stamp):
+                sampled = True
 
         events: list[dict[str, Any]] = []
         for member in self.members:
@@ -136,19 +157,13 @@ class StrategyDesk:
         if any(event["event"] == "member_fill" for event in events):
             self._pending = True
 
-        mid = _mid(quote)
-        sampled = False
-        for book in [member.book for member in self.members] + [self.account]:
-            if book.mark({symbol: mid} if mid is not None else {}, stamp):
-                sampled = True
-
         events.extend(self._reallocate(stamp))
         if self._pending:
             events.extend(self._retarget())
+        if events or sampled:
+            self._persist(self._save, events)
         for event in events:
             self.journal(event)
-        if events or sampled:
-            self._save()
         return self._emit(symbol, quote, stamp)
 
     # -- internals --------------------------------------------------------
@@ -215,7 +230,8 @@ class StrategyDesk:
         for symbol in unpriced:
             if symbol in self.targets:
                 targets[symbol] = self.targets[symbol]
-        self._pending = bool(unpriced)
+        self._pending = False
+        self._awaiting = set(unpriced)
         if targets == self.targets:
             return []
         self.targets = targets
@@ -250,6 +266,22 @@ class StrategyDesk:
             return []  # same holdings, same gap: a veto or rejection is not retried every quote
         self._last_emit[symbol] = (now, held)
         return [intent]
+
+    def _persist(self, save: Callable[[], None], events: list[dict[str, Any]]) -> None:
+        """Run ``save``; a disk error is journaled (hourly), never raised.
+
+        An exception escaping ``on_quote`` counts toward the runtime's
+        consecutive-error kill switch; a full disk must not halt paper trading.
+        """
+        try:
+            save()
+        except OSError as exc:
+            now = self._monotonic()
+            if now - self._save_error_at >= 3600:
+                self._save_error_at = now
+                events.append(
+                    {"event": "desk_save_failed", "error": f"{type(exc).__name__}: {exc}"[:200]}
+                )
 
     def _save(self) -> None:
         from agentic_trading import jsonio

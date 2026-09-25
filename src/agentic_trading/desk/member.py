@@ -51,6 +51,7 @@ class Member:
         self.book = book
         self.order_pct = Decimal(str(order_pct))
         self.failed = ""
+        self._skips_journaled: set[tuple[str, str]] = set()
         seed = getattr(strategy, "seed_positions", None)
         if callable(seed):
             seed({symbol: str(qty) for symbol, qty in book.positions.items()})
@@ -86,6 +87,24 @@ class Member:
                     symbol, notional, price, costs, minimum=self.min_notional(symbol)
                 )
                 signed = filled
+                if filled <= 0:
+                    # Journaled once per symbol and day: the benchmark re-asks for
+                    # an unheld symbol on every quote.
+                    key = (symbol, intent.created_at.date().isoformat())
+                    if key not in self._skips_journaled:
+                        self._skips_journaled.add(key)
+                        events.append(
+                            {
+                                "event": "member_skipped",
+                                "member": self.name,
+                                "symbol": symbol,
+                                "reason": intent.reason,
+                                "wanted": str(round(notional, 2)),
+                                "cash": str(round(self.book.cash, 2)),
+                                "minimum": str(self.min_notional(symbol)),
+                            }
+                        )
+                    continue
             else:
                 price = _price(seen.get("bid"), intent.ref_price)
                 if price is None or intent.quantity is None:
