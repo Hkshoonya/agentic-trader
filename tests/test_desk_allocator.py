@@ -98,3 +98,13 @@ class AllocatorTests(unittest.TestCase):
         # The new weights would be 0.4 / 0.6, a 5-point move: under hysteresis.
         self.assertEqual(result.weights, previous)
         self.assertFalse(result.changed)
+
+    def test_an_exact_ten_point_move_counts_as_a_change(self) -> None:
+        # 0.5 -> 0.6 is exactly the 10-point hysteresis bar (the spec says >=).
+        result = allocate(
+            [BENCH, MemberRecord("rot", series(WINNER), entries=3)],
+            benchmark="benchmark",
+            previous={"benchmark": 0.5, "rot": 0.5},
+        )
+        self.assertEqual(result.weights, {"benchmark": 0.4, "rot": 0.6})
+        self.assertTrue(result.changed)

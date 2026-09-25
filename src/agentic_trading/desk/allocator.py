@@ -89,6 +89,8 @@ def allocate(
     if previous:
         keys = set(weights) | set(previous)
         moved = max(abs(weights.get(k, 0.0) - previous.get(k, 0.0)) for k in keys)
-        if moved < HYSTERESIS:
+        # Weights are floats: 0.6 - 0.5 is 0.0999…, which must still count as
+        # the 10-point move the rule names.
+        if moved < HYSTERESIS - 1e-9:
             return Allocation(dict(previous), False, reasons, stats)
     return Allocation(weights, weights != previous, reasons, stats)
