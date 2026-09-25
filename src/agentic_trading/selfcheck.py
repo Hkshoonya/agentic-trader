@@ -281,6 +281,16 @@ def check_evidence(config: Any, *, max_age_days: int = 30) -> Check:
         from agentic_trading.execution import unmodeled_round_trip
         from agentic_trading.limits import load_limits
 
+        if str(getattr(config, "strategy", "")) == "desk":
+            # The desk has no single rule for a walk-forward to size: each
+            # member is judged by its live paper book, capital follows the
+            # weekly allocator, and the desk's evidence rule ("none") keeps the
+            # promotion gate shut, so there is no live size here to justify.
+            return WARN, (
+                "the desk's members are judged by their live paper books; the "
+                "single-rule walk-forward sizing gate does not apply and "
+                "promotion stays shut"
+            )
         report = read_report(config)
         if not report:
             return WARN, "no strategy_evidence.json yet (run: agentic-trading walkforward)"

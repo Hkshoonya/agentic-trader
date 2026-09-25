@@ -248,6 +248,29 @@ class EvidenceCheckTests(unittest.TestCase):
         self.assertEqual(check.status, FAIL)
         self.assertIn("drawdown ceiling", check.detail)
 
+    def test_the_desk_is_not_graded_against_a_single_rule_gate(self) -> None:
+        """Desk members are judged by their live books; promotion stays shut."""
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"], bars={"SPY": 400})
+            self._write(config, age_days=1, gate_pct=0.01)
+            from agentic_trading.limits import Limits, save_limits
+
+            save_limits(
+                config.state_dir,
+                Limits(
+                    max_order_pct="0.05",
+                    daily_notional_pct="0.20",
+                    reason="test",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            check = check_evidence(replace(config, strategy="desk"))
+        self.assertEqual(check.status, WARN)
+        self.assertIn("live paper books", check.detail)
+
     def test_size_inside_the_gate_passes(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
