@@ -3121,6 +3121,10 @@ def run_daemon(
         for worker in workers:
             if worker.is_alive():
                 worker.join(timeout=10)
+        if loop.tape is not None:
+            tape_error = loop.tape.flush()
+            if tape_error:
+                journal.append({"event": "tape_write_failed", "error": tape_error})
         loop.finish()
 
 

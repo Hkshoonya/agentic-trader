@@ -33,7 +33,7 @@ def _rows(path: Path) -> list[dict]:
 class QuoteTapeTests(unittest.TestCase):
     def test_quotes_append_to_a_daily_gzip_file(self) -> None:
         with tempfile.TemporaryDirectory() as name:
-            tape = QuoteTape(Path(name))
+            tape = QuoteTape(Path(name), flush_seconds=0)
             self.assertIsNone(tape.record([_quote("100.5")], now=T0))
             self.assertIsNone(tape.record([_quote("101")], now=T0))
             rows = _rows(Path(name) / "BTC-USD" / "2026-09-24.jsonl.gz")
@@ -44,7 +44,7 @@ class QuoteTapeTests(unittest.TestCase):
 
     def test_the_file_is_named_by_the_quote_day_not_the_clock(self) -> None:
         with tempfile.TemporaryDirectory() as name:
-            tape = QuoteTape(Path(name))
+            tape = QuoteTape(Path(name), flush_seconds=0)
             tape.record([_quote("1", observed="2026-09-25T00:00:02Z")], now=T0)
             self.assertTrue(
                 (Path(name) / "BTC-USD" / "2026-09-25.jsonl.gz").is_file()
@@ -54,7 +54,7 @@ class QuoteTapeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             blocker = Path(name) / "not-a-dir"
             blocker.write_text("x", encoding="utf-8")
-            tape = QuoteTape(blocker)
+            tape = QuoteTape(blocker, flush_seconds=0)
             first = tape.record([_quote("1")], now=T0)
             second = tape.record([_quote("1")], now=T0 + timedelta(minutes=10))
             third = tape.record([_quote("1")], now=T0 + timedelta(minutes=61))
@@ -64,7 +64,7 @@ class QuoteTapeTests(unittest.TestCase):
 
     def test_quotes_without_a_usable_symbol_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as name:
-            tape = QuoteTape(Path(name))
+            tape = QuoteTape(Path(name), flush_seconds=0)
             tape.record([{**_quote("1"), "symbol": "../evil"}, {"bid": 1}], now=T0)
             self.assertEqual(list(Path(name).iterdir()), [])
 
@@ -104,7 +104,7 @@ class TapeIsolationTests(unittest.TestCase):
 
     def test_a_quote_without_an_observed_time_is_not_filed(self) -> None:
         with tempfile.TemporaryDirectory() as name:
-            tape = QuoteTape(Path(name))
+            tape = QuoteTape(Path(name), flush_seconds=0)
             tape.record([{**_quote("1"), "observed_at": None}], now=T0)
             self.assertEqual(list(Path(name).iterdir()), [])
 
@@ -123,3 +123,38 @@ class TapeIsolationTests(unittest.TestCase):
             tools = load_tools()
             loop = _Loop(config, Broker(FakeMcpClient(tools), tools), FixtureStrategy())
         self.assertEqual(loop.tape.directory, tmp / "tape")
+
+
+class TapeBufferingTests(unittest.TestCase):
+    """A minute of rows per write: one gzip member per poll barely compresses."""
+
+    def test_rows_wait_for_the_flush_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tape = QuoteTape(Path(name))
+            path = Path(name) / "BTC-USD" / "2026-09-24.jsonl.gz"
+            tape.record([_quote("1")], now=T0)
+            tape.record([_quote("2")], now=T0 + timedelta(seconds=30))
+            self.assertFalse(path.exists())
+            tape.record([_quote("3")], now=T0 + timedelta(seconds=61))
+            self.assertEqual([row["bid"] for row in _rows(path)], ["1", "2", "3"])
+
+    def test_flush_writes_whatever_is_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tape = QuoteTape(Path(name))
+            tape.record([_quote("7")], now=T0)
+            self.assertIsNone(tape.flush())
+            rows = _rows(Path(name) / "BTC-USD" / "2026-09-24.jsonl.gz")
+        self.assertEqual([row["bid"] for row in rows], ["7"])
+
+    def test_a_minute_of_rows_compresses_well(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tape = QuoteTape(Path(name))
+            for step in range(200):
+                tape.record(
+                    [_quote(str(100 + step / 100))],
+                    now=T0 + timedelta(seconds=step * 0.25),
+                )
+            tape.flush()
+            path = Path(name) / "BTC-USD" / "2026-09-24.jsonl.gz"
+            raw = sum(len(json.dumps(row)) + 1 for row in _rows(path))
+            self.assertLess(path.stat().st_size * 3, raw)

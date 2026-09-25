@@ -22,16 +22,26 @@ _REPORT_EVERY = timedelta(hours=1)
 
 
 class QuoteTape:
-    def __init__(self, directory: Path | str) -> None:
+    """Buffer quotes in memory and append them in chunks of ``flush_seconds``.
+
+    One gzip member per poll barely compresses (a poll holds one row per
+    symbol), which put the tape at ~35 MB a day. A minute of rows per member
+    compresses several-fold; the cost is that a crash loses at most the last
+    ``flush_seconds`` of quotes. The daemon flushes on the way out.
+    """
+
+    def __init__(self, directory: Path | str, *, flush_seconds: float = 60.0) -> None:
         self.directory = Path(directory)
+        self.flush_seconds = float(flush_seconds)
+        self._pending: dict[Path, list[str]] = {}
+        self._last_flush_at: Optional[datetime] = None
         self._last_error_at: Optional[datetime] = None
 
     def record(
         self, quotes: list[dict[str, Any]], *, now: Optional[datetime] = None
     ) -> Optional[str]:
-        """Append ``quotes``; return an error message at most once an hour."""
+        """Buffer ``quotes``; flush when due. Returns an error at most once an hour."""
         current = now or datetime.now(timezone.utc)
-        batches: dict[Path, list[str]] = {}
         for quote in quotes:
             symbol = str(quote.get("symbol") or "").upper()
             if not _SYMBOL.match(symbol):
@@ -42,17 +52,30 @@ class QuoteTape:
             row = {name: _text(quote.get(name)) for name in FIELDS}
             row["symbol"] = symbol
             path = self.directory / symbol / f"{day}.jsonl.gz"
-            batches.setdefault(path, []).append(
+            self._pending.setdefault(path, []).append(
                 json.dumps(row, separators=(",", ":")) + "\n"
             )
+        if self._last_flush_at is None:
+            self._last_flush_at = current
+        if (current - self._last_flush_at).total_seconds() >= self.flush_seconds:
+            return self.flush(now=current)
+        return None
+
+    def flush(self, *, now: Optional[datetime] = None) -> Optional[str]:
+        """Write every buffered row now. Returns an error at most once an hour."""
+        current = now or datetime.now(timezone.utc)
+        self._last_flush_at = current
+        pending, self._pending = self._pending, {}
         try:
-            for path, lines in batches.items():
+            for path, lines in pending.items():
                 path.parent.mkdir(parents=True, exist_ok=True)
-                # One gzip member per batch: a crash can truncate at most the
-                # batch being written, and gzip readers concatenate members.
+                # One gzip member per chunk: a crash can truncate at most the
+                # chunk being written, and gzip readers concatenate members.
                 with gzip.open(path, "at", encoding="utf-8") as handle:
                     handle.writelines(lines)
         except OSError as exc:
+            # The rows are dropped rather than retried: a disk that refuses
+            # writes must not also grow the daemon's memory without bound.
             if (
                 self._last_error_at is None
                 or current - self._last_error_at >= _REPORT_EVERY
