@@ -319,8 +319,22 @@ def build_desk(config: Config) -> Any:
     from agentic_trading.execution import cost_model_for
     from agentic_trading.journal import DecisionJournal
 
+    from decimal import Decimal
+
+    from agentic_trading.execution import required_notional_for_cost
+
     desk_dir = Path(config.state_dir) / "desk"
     journal = DecisionJournal(Path(config.journal_dir))
+    floor = Decimal(str(config.min_order_notional))
+    share = float(getattr(config, "max_cost_share_of_order", 0) or 0)
+
+    def min_notional(symbol: str) -> Decimal:
+        """The smallest buy the runtime accepts for ``symbol`` (cost floor included)."""
+        required = required_notional_for_cost(
+            config.state_dir, max_share=share, symbol=symbol
+        )
+        return max(floor, Decimal(str(required))) if required else floor
+
     equity = _current_equity(config.state_dir)
     members = []
     for name in config.desk_members:
@@ -337,7 +351,13 @@ def build_desk(config: Config) -> Any:
         if book.is_new and trial.seed_member_book(config, book):
             journal.append({"event": "desk_trial_adopted", "member": name})
         members.append(
-            Member(name, strategy, book, order_pct=config.desk_member_order_pct)
+            Member(
+                name,
+                strategy,
+                book,
+                order_pct=config.desk_member_order_pct,
+                min_notional=min_notional,
+            )
         )
     account, _ = MemberBook.load(
         desk_dir / "account.json", name="account", starting_equity=equity
@@ -349,6 +369,7 @@ def build_desk(config: Config) -> Any:
         journal=journal.append,
         state_path=desk_dir / "desk.json",
         retry_seconds=config.rebalance_retry_seconds,
+        min_notional=min_notional,
     )
 
 def cmd_run(

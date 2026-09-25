@@ -63,7 +63,14 @@ def gap_intent(
     held: Decimal,
     quote: dict[str, Any],
     created_at: datetime,
+    min_buy_usd: Decimal = MIN_USD,
 ) -> Optional[OrderIntent]:
+    """The order that closes ``symbol``'s gap, or None when none should be sent.
+
+    ``min_buy_usd`` is the smallest buy the runtime will accept for this
+    symbol (the broker minimum, or the measured-cost floor for crypto). A buy
+    under it would be refused every retry window forever, so it is not sent.
+    """
     symbol = broker_symbol(symbol)
     if not is_crypto_symbol(symbol) and quote.get("market_session") != "regular":
         return None
@@ -84,6 +91,8 @@ def gap_intent(
         side = Side.SELL
         quantity = held if selling_out else min(-gap, held).quantize(STEP, rounding=ROUND_DOWN)
     if quantity <= 0:
+        return None
+    if side is Side.BUY and quantity * price < min_buy_usd:
         return None
     return OrderIntent(
         decision_id=new_decision_id(),

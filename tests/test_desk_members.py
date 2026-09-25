@@ -154,3 +154,19 @@ class MemberTests(unittest.TestCase):
         strategy = _Scripted([])
         Member("m", strategy, book, order_pct=D("0.19"))
         self.assertEqual(strategy.seeded, {"MSFT": "1.000000"})
+
+
+class MemberMinimumTests(unittest.TestCase):
+    def test_a_member_cannot_fill_an_entry_the_account_could_not_copy(self) -> None:
+        strategy = _Scripted([_intent("SOL-USD", Side.BUY, weight=D("0.3"))])
+        member = Member(
+            "m",
+            strategy,
+            MemberBook("m", starting_equity=D("50")),
+            order_pct=D("0.19"),
+            min_notional=lambda symbol: D("5"),
+        )
+        quotes = {"SOL-USD": quote("SOL-USD", "99", "100")}
+        # 50 * 0.19 * 0.3 = $2.85: under the $5 floor.
+        self.assertEqual(member.on_quote(quotes["SOL-USD"], quotes, FREE), [])
+        self.assertEqual(member.book.positions, {})

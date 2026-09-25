@@ -88,3 +88,25 @@ class GapTests(unittest.TestCase):
         self.assertIsNone(
             gap_intent("MSFT", target=D("2"), held=D("2"), quote=quote("MSFT", "10", "10"), created_at=NOW)
         )
+
+
+class MinimumOrderTests(unittest.TestCase):
+    """A buy the runtime will always refuse (the crypto cost floor) is not sent."""
+
+    def test_a_buy_gap_under_the_symbols_minimum_is_not_sent(self) -> None:
+        self.assertIsNone(
+            gap_intent(
+                "SOL-USD", target=D("0.03"), held=D("0"),
+                quote=quote("SOL-USD", "100", "100"), created_at=NOW,
+                min_buy_usd=D("5"),
+            )
+        )
+
+    def test_sells_are_never_held_back_by_the_minimum(self) -> None:
+        intent = gap_intent(
+            "SOL-USD", target=D("0.01"), held=D("0.04"),
+            quote=quote("SOL-USD", "100", "100"), created_at=NOW,
+            min_buy_usd=D("5"),
+        )
+        assert intent is not None
+        self.assertEqual(intent.side, Side.SELL)

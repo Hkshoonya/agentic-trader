@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 from agentic_trading.desk.allocator import MemberRecord, allocate
 from agentic_trading.desk.book import ZERO, MemberBook
 from agentic_trading.desk.member import Member, broker_symbol
-from agentic_trading.desk.netting import gap_intent, target_quantities
+from agentic_trading.desk.netting import MIN_USD, gap_intent, target_quantities
 from agentic_trading.types import OrderIntent
 
 COSTS_REFRESH_SECONDS = 60.0
@@ -64,6 +64,7 @@ class StrategyDesk:
         benchmark: str = "benchmark",
         retry_seconds: float = 900.0,
         monotonic: Callable[[], float] = time.monotonic,
+        min_notional: Optional[Callable[[str], Decimal]] = None,
     ) -> None:
         self.members = list(members)
         self.account = account
@@ -73,6 +74,7 @@ class StrategyDesk:
         self.benchmark = benchmark
         self.retry_seconds = float(retry_seconds)
         self._monotonic = monotonic
+        self._min_notional = min_notional or (lambda symbol: MIN_USD)
         self.allocations: dict[str, float] = {
             member.name: (1.0 if member.name == benchmark else 0.0) for member in self.members
         }
@@ -238,6 +240,7 @@ class StrategyDesk:
             held=held,
             quote=quote,
             created_at=stamp,
+            min_buy_usd=self._min_notional(symbol),
         )
         if intent is None:
             return []

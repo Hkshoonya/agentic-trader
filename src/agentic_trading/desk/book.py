@@ -85,12 +85,23 @@ class MemberBook:
 
     # -- fills -----------------------------------------------------------
 
-    def buy(self, symbol: str, notional: Decimal, price: Decimal, costs: Any) -> Decimal:
-        """Spend up to ``notional`` (never more than cash); return the quantity."""
+    def buy(
+        self,
+        symbol: str,
+        notional: Decimal,
+        price: Decimal,
+        costs: Any,
+        minimum: Decimal = MIN_NOTIONAL,
+    ) -> Decimal:
+        """Spend up to ``notional`` (never more than cash); return the quantity.
+
+        ``minimum`` is the smallest order the account could actually place for
+        this symbol: a member must not score trades the account cannot copy.
+        """
         symbol = symbol.upper()
         per_side, fee = _charges(costs, symbol)
         budget = min(Decimal(str(notional)), self.cash)
-        if budget < MIN_NOTIONAL or price <= 0 or budget <= fee:
+        if budget < minimum or price <= 0 or budget <= fee:
             return ZERO
         qty = ((budget - fee) / (price * (1 + per_side))).quantize(STEP, rounding=ROUND_DOWN)
         if qty <= 0:

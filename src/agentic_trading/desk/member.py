@@ -9,9 +9,9 @@ true. A strategy that raises is disabled; the rest of the desk carries on.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from agentic_trading.desk.book import ZERO, MemberBook
+from agentic_trading.desk.book import MIN_NOTIONAL, ZERO, MemberBook
 from agentic_trading.orders import is_crypto_symbol
 from agentic_trading.types import Side
 
@@ -37,9 +37,16 @@ def _price(raw: Any, fallback: Any) -> Optional[Decimal]:
 
 class Member:
     def __init__(
-        self, name: str, strategy: Any, book: MemberBook, *, order_pct: Decimal
+        self,
+        name: str,
+        strategy: Any,
+        book: MemberBook,
+        *,
+        order_pct: Decimal,
+        min_notional: Optional[Callable[[str], Decimal]] = None,
     ) -> None:
         self.name = name
+        self.min_notional = min_notional or (lambda symbol: MIN_NOTIONAL)
         self.strategy = strategy
         self.book = book
         self.order_pct = Decimal(str(order_pct))
@@ -75,7 +82,9 @@ class Member:
                 else:
                     weight = Decimal(str(intent.weight)) if intent.weight is not None else Decimal("1")
                     notional = self.book.equity * self.order_pct * min(Decimal("1"), max(ZERO, weight))
-                filled = self.book.buy(symbol, notional, price, costs)
+                filled = self.book.buy(
+                    symbol, notional, price, costs, minimum=self.min_notional(symbol)
+                )
                 signed = filled
             else:
                 price = _price(seen.get("bid"), intent.ref_price)
