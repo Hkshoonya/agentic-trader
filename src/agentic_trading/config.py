@@ -126,9 +126,11 @@ class Config:
     # would actually trade. It never applies to live orders.
     shadow_full_size: bool = False
     # Record every polled quote to <tape_dir>/<SYMBOL>/<date>.jsonl.gz: the
-    # clean intraday data the fast lane will be designed on.
+    # clean intraday data the fast lane will be designed on. Empty means the
+    # "tape" directory beside state_dir, so a test's temporary state directory
+    # also gets its own temporary tape instead of writing into the live one.
     tape_enabled: bool = True
-    tape_dir: str = "data/tape"
+    tape_dir: str = ""
     # The strategy desk: which strategies compete, and each member's per-order
     # share of its own paper book (the rotation was tested at 19%).
     desk_members: tuple[str, ...] = DESK_MEMBER_NAMES
@@ -590,7 +592,7 @@ def load_config(path: str | Path) -> Config:
         equity_sizing=_boolean(raw, "equity_sizing", True),
         shadow_full_size=_boolean(raw, "shadow_full_size", False),
         tape_enabled=_boolean(raw, "tape_enabled", True),
-        tape_dir=str(raw.get("tape_dir", "data/tape")),
+        tape_dir=str(raw.get("tape_dir", "")),
         desk_members=tuple(
             str(name) for name in (raw.get("desk_members") or DESK_MEMBER_NAMES)
         ),

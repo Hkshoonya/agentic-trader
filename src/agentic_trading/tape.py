@@ -36,7 +36,9 @@ class QuoteTape:
             symbol = str(quote.get("symbol") or "").upper()
             if not _SYMBOL.match(symbol):
                 continue
-            day = _day(quote.get("observed_at"), current)
+            day = _day(quote.get("observed_at"))
+            if day is None:
+                continue  # an untimed quote cannot be placed on the tape honestly
             row = {name: _text(quote.get(name)) for name in FIELDS}
             row["symbol"] = symbol
             path = self.directory / symbol / f"{day}.jsonl.gz"
@@ -64,11 +66,13 @@ def _text(value: Any) -> Optional[str]:
     return None if value is None else str(value)
 
 
-def _day(raw: Any, fallback: datetime) -> str:
+def _day(raw: Any) -> Optional[str]:
+    if raw is None:
+        return None
     try:
         stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except (TypeError, ValueError):
-        stamp = fallback
+        return None
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
     return stamp.astimezone(timezone.utc).date().isoformat()

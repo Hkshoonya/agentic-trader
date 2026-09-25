@@ -300,7 +300,10 @@ class _Loop:
 
         from agentic_trading.tape import QuoteTape
 
-        self.tape = QuoteTape(config.tape_dir) if config.tape_enabled else None
+        tape_dir = (
+            Path(config.tape_dir) if config.tape_dir else Path(config.state_dir).parent / "tape"
+        )
+        self.tape = QuoteTape(tape_dir) if config.tape_enabled else None
         # Used to rebuild the strategy when the scout changes the universe: a
         # strategy that was constructed for one symbol list cannot price another,
         # and re-seeding its book is not enough.

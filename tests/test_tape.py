@@ -97,3 +97,29 @@ class TapeDaemonTests(unittest.TestCase):
             )
             rows = _rows(tmp / "tape" / "SPY" / "2026-09-16.jsonl.gz")
         self.assertEqual(rows[0]["symbol"], "SPY")
+
+
+class TapeIsolationTests(unittest.TestCase):
+    """Tests and fixtures must never write into the live tape."""
+
+    def test_a_quote_without_an_observed_time_is_not_filed(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tape = QuoteTape(Path(name))
+            tape.record([{**_quote("1"), "observed_at": None}], now=T0)
+            self.assertEqual(list(Path(name).iterdir()), [])
+
+    def test_the_default_tape_lives_beside_the_state_directory(self) -> None:
+        from agentic_trading.broker import Broker
+        from agentic_trading.config import load_config
+        from agentic_trading.runtime import _Loop
+        from agentic_trading.strategies.fixture import FixtureStrategy
+        from tests.fakes import FakeMcpClient
+        from tests.test_runtime_daemon import _write_config, load_tools
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = load_config(_write_config(tmp))
+            (tmp / "state").mkdir(parents=True, exist_ok=True)
+            tools = load_tools()
+            loop = _Loop(config, Broker(FakeMcpClient(tools), tools), FixtureStrategy())
+        self.assertEqual(loop.tape.directory, tmp / "tape")
