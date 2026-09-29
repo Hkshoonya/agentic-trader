@@ -655,11 +655,14 @@ def simulate(
             daily_opening_notional += notional
             budget_left = max(0.0, book_equity * gross_budget_pct - gross)
 
-    # Close whatever is still open at the end of the window.
+    # Close whatever is still open at the end of the window, at its last close.
+    # The window's last day is often one only coins trade on (a weekend), so a
+    # stock has no bar that day; skipping it would drop the position from the
+    # account, which is how held equities once vanished at every window end.
     last = dates[-1]
     for symbol in list(held):
         table = closes.get(symbol) or {}
-        price = table.get(last)
+        price = table.get(last) or last_seen.get(symbol)
         if price is None:
             continue
         units = held.pop(symbol)
