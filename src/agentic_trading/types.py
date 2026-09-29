@@ -51,5 +51,10 @@ class OrderIntent:
         return n
 
 
+# Marks the strategy desk's account orders, which net the members' books into
+# the account. Trial scoring skips them and advisory layers only watch them.
+DESK_ORDER_REASON = "desk_rebalance"
+
+
 def new_decision_id() -> str:
     return str(uuid4())

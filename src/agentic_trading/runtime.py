@@ -46,7 +46,12 @@ from agentic_trading.session import (
     session_for,
 )
 from agentic_trading.strategies.fixture import FixtureStrategy
-from agentic_trading.types import OrderIntent, Side, new_decision_id
+from agentic_trading.types import (
+    DESK_ORDER_REASON,
+    OrderIntent,
+    Side,
+    new_decision_id,
+)
 
 
 class Strategy(Protocol):
@@ -1744,24 +1749,21 @@ class _Loop:
                 self.config.jev_veto_chase
                 and chase is not None
                 and chase >= self.config.jev_chase_threshold
-            ):
-                self._journal_rejected(
-                    intent,
-                    f"jev_chase: p={float(chase):.2f}",
-                    intent.resolved_notional(),
+                and self._advisory_refuses(
+                    intent, "jev", f"jev_chase: p={float(chase):.2f}"
                 )
+            ):
                 return
 
         # Regime gate: a bad regime may refuse entries, never create them. It
         # reads a cached classification, so this costs nothing on the order path.
         if is_entry and self.regime_gate is not None and not advised:
             blocked = self.regime_gate.blocks(intent.symbol)
-            if blocked is not None:
-                self._journal_rejected(
-                    intent,
-                    f"regime_block: {blocked.regime} c={blocked.confidence:.2f}"[:120],
-                    intent.resolved_notional(),
-                )
+            if blocked is not None and self._advisory_refuses(
+                intent,
+                "regime",
+                f"regime_block: {blocked.regime} c={blocked.confidence:.2f}"[:120],
+            ):
                 return
 
         # Advisory veto: the model may refuse an entry (reduce risk) and its
@@ -1804,15 +1806,18 @@ class _Loop:
                         **decision.to_dict(),
                     }
                 )
-                if decision.vetoes and is_entry:
-                    self._journal_rejected(
+                if (
+                    decision.vetoes
+                    and is_entry
+                    and self._advisory_refuses(
                         intent,
+                        "llm",
                         f"llm_veto: {decision.reason}"
                         if decision.reason
                         else "llm_veto",
-                        intent.resolved_notional(),
                         advisor=advisor_payload,
                     )
+                ):
                     return
             elif getattr(self.advisor, "last_error", ""):
                 # An advisor that fails silently is indistinguishable from one
@@ -2274,6 +2279,42 @@ class _Loop:
         if self.consecutive_errors >= self.config.max_consecutive_errors:
             self.guard.trip_kill_switch(f"consecutive_{event}")
         self.guard.persist(self.config.state_dir)
+
+    def _advisory_refuses(
+        self,
+        intent: OrderIntent,
+        layer: str,
+        opinion: str,
+        *,
+        advisor: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Apply an advisory refusal, except to the desk's own account orders.
+
+        The desk funds members whose paper books, traded without any veto, beat
+        buy-and-hold. Refusing their account orders would leave the money in
+        something other than what earned it, and would hide whether the veto
+        helps. So a desk order is let through and the opinion journaled, to be
+        scored later; every other entry is refused as before. RiskGuard, the
+        caps and the cost floor are not advisory and still apply to both.
+        """
+        if intent.reason == DESK_ORDER_REASON:
+            self.journal.append(
+                {
+                    "decision_id": intent.decision_id,
+                    "event": "advisory_overruled",
+                    "layer": layer,
+                    "symbol": intent.symbol,
+                    "side": intent.side.value,
+                    "ref_price": str(intent.ref_price or ""),
+                    "opinion": opinion,
+                    "note": "desk orders follow member evidence; opinion recorded only",
+                }
+            )
+            return False
+        self._journal_rejected(
+            intent, opinion, intent.resolved_notional(), advisor=advisor
+        )
+        return True
 
     def _journal_rejected(
         self,

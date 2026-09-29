@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from agentic_trading.desk.member import broker_symbol
 from agentic_trading.orders import is_crypto_symbol
-from agentic_trading.types import OrderIntent, Side, new_decision_id
+from agentic_trading.types import DESK_ORDER_REASON, OrderIntent, Side, new_decision_id
 
 MIN_USD = Decimal("1.00")
 GAP_PCT = Decimal("0.05")
@@ -98,7 +98,7 @@ def gap_intent(
         decision_id=new_decision_id(),
         symbol=symbol,
         side=side,
-        reason="desk_rebalance",
+        reason=DESK_ORDER_REASON,
         created_at=created_at,
         quantity=quantity,
         ref_price=price,

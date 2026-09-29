@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from agentic_trading.orders import is_crypto_symbol
+from agentic_trading.types import DESK_ORDER_REASON
 
 TRIAL_DAYS = 30
 FILE_NAME = "trial.json"
@@ -110,7 +111,7 @@ def _replay(config: Any, started: datetime) -> dict[str, Any]:
         ):
             continue
         intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
-        if intent.get("reason") == "desk_rebalance":
+        if intent.get("reason") == DESK_ORDER_REASON:
             continue  # the desk's account orders are not the trial strategy's
         stamp = _stamp(record.get("at") or intent.get("created_at"))
         if stamp is None or stamp < started:
