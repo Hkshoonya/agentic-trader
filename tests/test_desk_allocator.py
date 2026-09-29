@@ -108,3 +108,36 @@ class AllocatorTests(unittest.TestCase):
         )
         self.assertEqual(result.weights, {"benchmark": 0.4, "rot": 0.6})
         self.assertTrue(result.changed)
+
+
+# Beats the benchmark with t ≈ 1.15 on 20 samples: enough when two members
+# compete, not when four do.
+MARGINAL = [0.001 + (0.0132 if i % 2 else -0.0068) for i in range(19)]
+
+
+class LookElsewhereTests(unittest.TestCase):
+    """More members means more chances for luck to look like an edge."""
+
+    def test_the_bar_is_unchanged_for_two_members_and_rises_with_more(self) -> None:
+        from agentic_trading.desk.allocator import MIN_T, min_t
+
+        self.assertEqual(min_t(2), MIN_T)
+        self.assertEqual(min_t(1), MIN_T)  # never looser than today
+        self.assertAlmostEqual(min_t(3), 1.23, places=2)
+        self.assertAlmostEqual(min_t(4), 1.39, places=2)
+
+    def _allocate(self, idle: int):
+        records = [BENCH, MemberRecord("rot", series(MARGINAL), entries=3)]
+        records += [MemberRecord(f"idle{i}", series([]), entries=0) for i in range(idle)]
+        return allocate(records, benchmark="benchmark", previous={"benchmark": 1.0})
+
+    def test_a_marginal_edge_qualifies_among_two(self) -> None:
+        result = self._allocate(idle=1)
+        self.assertGreater(result.stats["rot"]["t"], 1.0)
+        self.assertLess(result.stats["rot"]["t"], 1.23)
+        self.assertGreater(result.weights["rot"], 0.0)
+
+    def test_the_same_edge_does_not_qualify_among_four(self) -> None:
+        result = self._allocate(idle=3)
+        self.assertEqual(result.weights.get("rot", 0.0), 0.0)
+        self.assertIn("4 members compete", result.reasons["rot"])

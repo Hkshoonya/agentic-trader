@@ -3,8 +3,10 @@
 Weekly re-allocation on thin live data is a noise-chasing machine unless the
 bar is explicit. A member needs 20 daily samples, at least one entry, a total
 return above the benchmark's over the same days, and a t-statistic of daily
-excess returns above 1.0. Weight follows that t (the edge's reliability, not
-its size), capped at 60%; whatever nobody earned holds the benchmark.
+excess returns above :func:`min_t` — 1.0 when two members compete, higher
+with more, so adding members does not add lucky winners. Weight follows that t
+(the edge's reliability, not its size), capped at 60%; whatever nobody earned
+holds the benchmark.
 """
 
 from __future__ import annotations
@@ -12,12 +14,24 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, field
+from statistics import NormalDist
 from typing import Any
 
 MIN_SAMPLES = 20
 MIN_T = 1.0
 MAX_WEIGHT = 0.60
 HYSTERESIS = 0.10
+# The desk launched with two competing members at t > 1.0. Under no edge each
+# clears that ~16% of the time, so ~29% of weeks at least one of two looks like
+# a winner by luck. min_t holds that family-wide rate as members are added.
+BASE_MEMBERS = 2
+
+
+def min_t(members: int) -> float:
+    """The t a member must beat when ``members`` non-benchmark members compete."""
+    normal = NormalDist()
+    keep = normal.cdf(MIN_T) ** (BASE_MEMBERS / max(1, members))
+    return max(MIN_T, normal.inv_cdf(keep))
 
 
 @dataclass(frozen=True)
@@ -43,6 +57,8 @@ def allocate(
     scores: dict[str, float] = {}
     reasons: dict[str, str] = {}
     stats: dict[str, dict[str, Any]] = {}
+    competing = sum(1 for record in records if record.name != benchmark)
+    bar = min_t(competing)
     for record in records:
         if record.name == benchmark:
             continue
@@ -73,8 +89,10 @@ def allocate(
             continue
         t = statistics.mean(excess) / (spread / math.sqrt(len(excess)))
         stats[record.name]["t"] = round(t, 3)
-        if t <= MIN_T:
-            reasons[record.name] = f"t={t:.2f} is not above {MIN_T:.1f}"
+        if t <= bar:
+            reasons[record.name] = (
+                f"t={t:.2f} is not above {bar:.2f} ({competing} members compete)"
+            )
             continue
         scores[record.name] = t
         reasons[record.name] = f"qualifies: t={t:.2f}"
