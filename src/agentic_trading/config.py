@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 
 DESK_MEMBER_NAMES = ("momentum_rotation", "trend_crypto", "benchmark")
+# Every member the desk can run; the default above is the launch line-up.
+DESK_MEMBER_CHOICES = DESK_MEMBER_NAMES + ("dip_reversal",)
 
 
 @dataclass(frozen=True)
@@ -266,17 +268,18 @@ class Config:
             "llm",
             "trend_crypto",
             "momentum_rotation",
+            "dip_reversal",
             "desk",
         ):
             raise ValueError(
-                "strategy must be "
-                "fixture|spy_scalper|llm|trend_crypto|momentum_rotation|desk"
+                "strategy must be fixture|spy_scalper|llm|trend_crypto|"
+                "momentum_rotation|dip_reversal|desk"
             )
-        unknown = [m for m in self.desk_members if m not in DESK_MEMBER_NAMES]
+        unknown = [m for m in self.desk_members if m not in DESK_MEMBER_CHOICES]
         if unknown:
             raise ValueError(
                 f"desk_members has unknown members {unknown}; "
-                f"choose from {list(DESK_MEMBER_NAMES)}"
+                f"choose from {list(DESK_MEMBER_CHOICES)}"
             )
         if "benchmark" not in self.desk_members:
             raise ValueError("desk_members must include benchmark (the fallback)")

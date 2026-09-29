@@ -265,7 +265,7 @@ def build_strategy(
             whitelist=config.effective_whitelist,
             max_quote_age_seconds=config.max_quote_age_seconds,
         )
-    if name in ("trend_crypto", "momentum_rotation"):
+    if name in ("trend_crypto", "momentum_rotation", "dip_reversal"):
         from agentic_trading.strategies.momentum_rotation import (
             MomentumRotationStrategy,
         )
@@ -291,6 +291,15 @@ def build_strategy(
         ]
         if not symbols:
             raise ValueError(f"{name} needs symbols in symbol_whitelist, e.g. BTC-USD")
+        if name == "dip_reversal":
+            from agentic_trading.strategies.dip_reversal import DipReversalStrategy
+
+            return DipReversalStrategy(
+                bar_dir=bar_dir,
+                symbols=symbols,
+                max_positions=config.max_open_positions,
+                state_path=Path(config.state_dir) / "strategy_dip_reversal.json",
+            )
         if name == "momentum_rotation":
             return MomentumRotationStrategy(
                 bar_dir=bar_dir,

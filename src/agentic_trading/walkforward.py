@@ -45,6 +45,13 @@ ROTATION_BOOKS = {
     "crypto": ("BTCUSD", 100, 60, 2),
 }
 
+# The dip reversal's specification, fixed on design grounds on 2026-09-29
+# before any backtest of it was run: the regime symbol and its moving average,
+# the moving average each name must itself be above, the pullback lookback in
+# bars, and how many names the book holds. Equities only: weekly turnover at the
+# crypto spread (~60 bps a side) would cost more than a bounce pays.
+REVERSAL_BOOK = ("SPY", 200, 200, 5, 3)
+
 # Which ranking each strategy trades, so the evidence gate and the console
 # grade the rule the daemon actually runs. The desk has no single rule: its
 # members are judged by their live books, so the walk-forward grades nothing
@@ -52,6 +59,7 @@ ROTATION_BOOKS = {
 STRATEGY_RULES = {
     "trend_crypto": "trend",
     "momentum_rotation": "rotation",
+    "dip_reversal": "reversal",
     "desk": "none",
 }
 
@@ -60,7 +68,7 @@ STRATEGY_RULES = {
 # its specification; the rotation was chosen from ~40 variants (6 candidates,
 # two 15-cell parameter grids and robustness runs), so its significance bar is
 # divided by that count rather than pretending it was the only idea tried.
-RULE_HYPOTHESES = {"trend": 1, "rotation": 40}
+RULE_HYPOTHESES = {"trend": 1, "rotation": 40, "reversal": 1}
 
 
 def rule_for_strategy(strategy: str) -> str:
@@ -198,6 +206,8 @@ def rank_targets(
         return []
     if rule == "rotation":
         return rank_rotation(series, when, max_positions=max_positions)
+    if rule == "reversal":
+        return rank_reversal(series, when, max_positions=max_positions)
     rows: list[dict[str, Any]] = []
     for symbol, bars in series.items():
         closes = [float(bar.close) for bar in bars if bar.start < when]
@@ -362,6 +372,93 @@ def rank_rotation(
             row["reason"] = f"ranked {position + 1}, only {max_positions} slots"
     rows.sort(
         key=lambda row: (not row["selected"], -float(row["vote"]), str(row["symbol"]))
+    )
+    return rows
+
+
+def rank_reversal(
+    series: dict[str, list[Bar]],
+    when: datetime,
+    *,
+    max_positions: int = 5,
+) -> list[dict[str, Any]]:
+    """Weekly dip reversal: hold last week's deepest pullbacks in rising names.
+
+    On bars strictly before this week's anchor: while SPY closes above its
+    200-day average, rank the equities that close above their own 200-day
+    average by their 5-bar return, and hold the most negative few. A name
+    that rose, a name in a downtrend and every coin are left out. Each
+    selected name has weight 1.0, one full per-order budget, like the rotation.
+    """
+    regime_symbol, regime_bars, trend_bars, lookback, top = REVERSAL_BOOK
+    anchor = rotation_anchor(when)
+    closes = {
+        symbol: [float(bar.close) for bar in bars if bar.start < anchor]
+        for symbol, bars in series.items()
+    }
+    regime = next(
+        (
+            values
+            for symbol, values in closes.items()
+            if symbol.replace("-", "").upper() == regime_symbol
+        ),
+        None,
+    )
+    risk_on = (
+        regime is not None
+        and len(regime) >= regime_bars
+        and regime[-1] > sum(regime[-regime_bars:]) / regime_bars
+    )
+    rows: list[dict[str, Any]] = []
+    ranked: list[dict[str, Any]] = []
+    for symbol, values in closes.items():
+        if is_crypto_symbol(symbol):
+            continue
+        row: dict[str, Any] = {
+            "symbol": symbol,
+            "bars": len(values),
+            "vote": 0.0,
+            "vol_pct": None,
+            "weight": 0.0,
+            "selected": False,
+            "book": "equity",
+        }
+        rows.append(row)
+        needed = max(trend_bars, lookback + 1)
+        if len(values) < needed or values[-1 - lookback] <= 0:
+            row["reason"] = f"only {len(values)} bars (needs {needed})"
+            continue
+        pullback = values[-1] / values[-1 - lookback] - 1
+        row["vote"] = round(pullback, 4)
+        if not risk_on:
+            row["reason"] = (
+                f"{regime_symbol} is not above its {regime_bars}-day average, "
+                "so the dip book holds cash"
+            )
+        elif values[-1] <= sum(values[-trend_bars:]) / trend_bars:
+            row["reason"] = (
+                f"below its own {trend_bars}-day average: a fall, not a dip"
+            )
+        elif pullback >= 0:
+            row["reason"] = f"{lookback}-day return {pullback:+.1%} is no pullback"
+        else:
+            ranked.append(row)
+    ranked.sort(key=lambda row: (float(row["vote"]), str(row["symbol"])))
+    for position, row in enumerate(ranked):
+        if position < min(top, max_positions):
+            row["selected"] = True
+            row["weight"] = 1.0
+            row["reason"] = (
+                f"#{position + 1} pullback: {lookback}-day return "
+                f"{float(row['vote']):+.1%} in an uptrend"
+            )
+        else:
+            row["reason"] = (
+                f"{lookback}-day pullback {float(row['vote']):+.1%} ranks "
+                f"{position + 1}; the dip book holds {top}"
+            )
+    rows.sort(
+        key=lambda row: (not row["selected"], float(row["vote"]), str(row["symbol"]))
     )
     return rows
 

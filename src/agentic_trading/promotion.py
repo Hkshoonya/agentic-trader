@@ -831,6 +831,7 @@ def policy_from_config(config: Any) -> PromotionPolicy:
     requires_forward = str(getattr(config, "strategy", "")) in (
         "trend_crypto",
         "momentum_rotation",
+        "dip_reversal",
         "desk",
     )
     return PromotionPolicy(

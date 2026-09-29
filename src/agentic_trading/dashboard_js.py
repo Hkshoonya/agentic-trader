@@ -149,6 +149,8 @@ const STRATEGY_TEXT = {
   llm: 'AI multi-asset',
   trend_crypto: 'crypto trend following',
   momentum_rotation: 'weekly momentum rotation',
+  dip_reversal: 'weekly dip buying in uptrends',
+  desk: 'strategy desk',
 };
 
 const SESSION_TEXT = {

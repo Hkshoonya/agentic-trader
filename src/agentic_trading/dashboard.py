@@ -523,10 +523,11 @@ class DashboardState:
             "next_decision_local": next_at.astimezone().strftime("%Y-%m-%d %H:%M %Z"),
             "held": held,
             "explanation": (
-                "momentum_rotation re-ranks once a week on bars before Monday "
-                "00:00 UTC; entries follow on the first quote of each book's day "
-                "(crypto at 00:00 UTC, equities at the regular-session open)."
-                if self.config.strategy == "momentum_rotation"
+                f"{self.config.strategy} re-ranks once a week on bars before "
+                "Monday 00:00 UTC; entries follow on the first quote of each "
+                "book's day (crypto at 00:00 UTC, equities at the regular-session "
+                "open)."
+                if self.config.strategy in ("momentum_rotation", "dip_reversal")
                 else f"{self.config.strategy} rebalances once per UTC day, on the "
                 "first quote after 00:00 UTC; between rebalances the order "
                 "table is static by design while the cycle stream keeps running."
