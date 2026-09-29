@@ -105,3 +105,30 @@ class DeskDaemonTests(unittest.TestCase):
                 for r in records
             )
         )
+
+
+class DeskDaemonAdvisoryTests(unittest.TestCase):
+    def test_a_vetoing_advisor_does_not_stop_the_desk_in_the_real_loop(self) -> None:
+        """End to end: the desk's own leg reaches the ledger through run_daemon
+        even when every advisory layer would refuse it, and each opinion is kept."""
+        from unittest import mock
+
+        from tests.test_desk_advisory import _ChopGate, _VetoAdvisor
+
+        with tempfile.TemporaryDirectory() as name:
+            config = _desk_config(Path(name), equity="50")
+            with mock.patch(
+                "agentic_trading.llm.advisor.build_advisor", return_value=_VetoAdvisor()
+            ), mock.patch(
+                "agentic_trading.llm.advisor.build_regime_gate", return_value=_ChopGate()
+            ):
+                _run(config, FakeMcpClient(_tools()))
+            records = _records(config)
+        desk = [
+            r
+            for r in records
+            if (r.get("intent") or {}).get("reason") == "desk_rebalance"
+        ]
+        self.assertEqual([r["event"] for r in desk], ["accepted"])
+        overruled = {r["layer"] for r in records if r.get("event") == "advisory_overruled"}
+        self.assertEqual(overruled, {"regime", "llm"})

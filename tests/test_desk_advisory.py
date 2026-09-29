@@ -59,6 +59,12 @@ class _VetoAdvisor:
 class _ChopGate:
     model = "stub"
 
+    def views(self) -> dict:
+        return {}
+
+    def refresh_due(self, symbols, features_for, *, max_per_pass=2) -> list:
+        return []
+
     def blocks(self, symbol: str) -> RegimeView:
         return RegimeView(
             symbol=symbol,
