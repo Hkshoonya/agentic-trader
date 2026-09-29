@@ -453,11 +453,12 @@ def run_checks(
     *,
     port: Optional[int] = None,
     include_broker: bool = True,
+    max_bar_age_days: int = MAX_BAR_AGE_DAYS,
 ) -> HealthReport:
     """Run every check. ``include_broker=False`` keeps it offline (tests)."""
     report = HealthReport(started_at=datetime.now(timezone.utc).isoformat())
     report.checks.append(check_state_files(config))
-    report.checks.append(check_data(config))
+    report.checks.append(check_data(config, max_bar_age_days=max_bar_age_days))
     report.checks.append(check_analysis(config))
     report.checks.append(check_evidence(config))
     if include_broker and broker is not None:

@@ -915,9 +915,11 @@ def cmd_dashboard(
     return 0
 
 
-def cmd_selfcheck(config_path: str, *, offline: bool = False) -> int:
+def cmd_selfcheck(
+    config_path: str, *, offline: bool = False, max_bar_age_days: Optional[int] = None
+) -> int:
     """Read-only: verify state, data, analysis path, broker and plumbing."""
-    from agentic_trading.selfcheck import run_checks, write_report
+    from agentic_trading.selfcheck import MAX_BAR_AGE_DAYS, run_checks, write_report
 
     config = load_config(config_path)
     broker = None
@@ -926,7 +928,14 @@ def cmd_selfcheck(config_path: str, *, offline: bool = False) -> int:
             broker, _ = build_broker(config)
         except Exception as exc:  # noqa: BLE001 — report rather than crash
             print(f"broker unavailable ({exc}); running the offline checks only")
-    report = run_checks(config, broker, include_broker=broker is not None)
+    report = run_checks(
+        config,
+        broker,
+        include_broker=broker is not None,
+        max_bar_age_days=(
+            MAX_BAR_AGE_DAYS if max_bar_age_days is None else max_bar_age_days
+        ),
+    )
     for check in report.checks:
         print(f"{check.status.upper():5s} {check.name:9s} {check.ms:7.0f}ms  {check.detail}")
     write_report(config, report)
@@ -1033,6 +1042,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--offline",
         action="store_true",
         help="Skip the broker round trips (no network)",
+    )
+    check_p.add_argument(
+        "--max-bar-age-days",
+        type=int,
+        default=None,
+        help="How old the newest bar may be before the data check fails "
+        "(for checking a bundled snapshot, e.g. a build smoke test)",
     )
 
     auth_p = sub.add_parser("auth", help="OAuth 2.1 PKCE desktop flow; save tokens")
@@ -1276,7 +1292,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "reset-kill-switch":
         return cmd_reset_kill_switch(args.config)
     if args.command == "selfcheck":
-        return cmd_selfcheck(args.config, offline=args.offline)
+        return cmd_selfcheck(
+            args.config, offline=args.offline, max_bar_age_days=args.max_bar_age_days
+        )
     if args.command == "auth":
         return cmd_auth(args.config, profile=args.profile)
     if args.command == "snapshot-tools":
