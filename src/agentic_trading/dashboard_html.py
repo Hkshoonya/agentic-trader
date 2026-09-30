@@ -1,6 +1,7 @@
 """Embedded dashboard UI (no external assets, no CDN)."""
 
 from agentic_trading.dashboard_charts_js import CHARTS
+from agentic_trading.dashboard_cockpit_js import COCKPIT, COCKPIT_BOOT
 from agentic_trading.dashboard_css import CSS
 from agentic_trading.dashboard_js import SCRIPT
 
@@ -192,5 +193,5 @@ __SCRIPT__
 """
 
 HTML = _TEMPLATE.replace("__COCKPIT_CSS__", CSS).replace(
-    "__SCRIPT__", CHARTS + "\n" + SCRIPT
+    "__SCRIPT__", "\n".join((CHARTS, SCRIPT, COCKPIT, COCKPIT_BOOT))
 )
