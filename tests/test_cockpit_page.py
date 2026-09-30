@@ -66,11 +66,18 @@ class CockpitPageTests(unittest.TestCase):
             for element in elements:
                 self.assertIn(f'id="{element}"', _section(tab), f"{element} in {tab}")
 
-    def test_the_arm_control_and_link_dot_live_in_the_header(self) -> None:
+    def test_the_header_shows_armed_state_and_the_arm_card_keeps_its_checklist(self) -> None:
+        # The arm control renders its whole pre-flight checklist; in the top bar
+        # it pushed the cockpit off one screen. The header keeps the ARMED badge,
+        # and the button sits on the Health tab beside the checks behind it.
         header = HTML.split("<header>", 1)[1].split("</header>", 1)[0]
-        for element in ("arm", "arm-status", "netdot", "tabs"):
+        for element in ("armed", "netdot", "tabs"):
             self.assertIn(f'id="{element}"', header)
-        self.assertNotIn("<h2>Order submission</h2>", HTML)
+        self.assertNotIn('id="arm"', header)
+        health = _section("health")
+        self.assertIn("<h2>Order submission</h2>", health)
+        for element in ("arm", "arm-status"):
+            self.assertIn(f'id="{element}"', health)
 
     def test_timers_skip_work_while_the_page_is_hidden(self) -> None:
         self.assertIn("if (!document.hidden) refresh();", SCRIPT)

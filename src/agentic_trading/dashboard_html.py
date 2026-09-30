@@ -109,7 +109,6 @@ __COCKPIT_CSS__
   <button data-tab="orders">Orders</button>
   <button data-tab="health">Health</button>
 </nav>
-<div class="armbox"><div id="arm" class="sub">checking…</div><span class="sub" id="arm-status"></span></div>
 </header>
 
 <section class="tab on" id="tab-overview">
@@ -182,6 +181,7 @@ __COCKPIT_CSS__
 <section class="tab" id="tab-health">
 <main>
 <div class="card span7"><h2>Agents on duty</h2><div id="agents" class="sub">starting…</div><div id="alerts"></div><div id="health"></div></div>
+<div class="card span12"><h2>Order submission</h2><div id="arm" class="sub">checking…</div><div class="sub" id="arm-status"></div></div>
 <div class="card span5"><h2>Runtime &amp; P&amp;L</h2><div id="account" class="sub">starting…</div></div>
 <div class="card span5"><h2>Promotion streak</h2><div class="metric" id="streak">0</div><div class="sub" id="streak-sub">assessments to next stage</div><div class="gauge" style="margin-top:8px"><div id="streak-bar"></div></div></div>
 <div class="card span7"><h2>Market regimes</h2><div id="regimes" class="sub">no regime read yet</div></div>

@@ -20,7 +20,7 @@ header{position:sticky;top:0;z-index:5}
 .netdot.lost{background:var(--warn);animation:none}
 @keyframes ping{0%{box-shadow:0 0 0 0 rgba(53,208,127,.55)}70%{box-shadow:0 0 0 8px rgba(53,208,127,0)}100%{box-shadow:0 0 0 0 rgba(53,208,127,0)}}
 /* The cockpit fits one 1440x900 screen: stories | race | tiles, ticker below. */
-.cockpit{display:grid;grid-template-columns:1fr 2.2fr 1fr;gap:14px;padding:16px;height:calc(100vh - 150px);min-height:520px}
+.cockpit{display:grid;grid-template-columns:1fr 2.2fr 1fr;gap:14px;padding:16px;height:calc(100vh - 160px);min-height:520px}
 .stories,.tiles{display:flex;flex-direction:column;gap:12px;min-height:0}
 .story{flex:1;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--buy);border-radius:12px;padding:16px;display:flex;flex-direction:column;justify-content:center;min-height:0}
 .story.money{border-left-color:var(--accent)}
