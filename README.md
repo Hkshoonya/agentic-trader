@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1004%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1097%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -575,6 +575,23 @@ refusal reads *too small for the broker minimum order* rather than
 `below_min_notional`. The journal keeps the exact codes for auditing; the
 console is written for the person deciding whether to arm it.
 
+### Venues (Alpaca and Coinbase)
+
+A separate service, `agentic-trading venues run`, streams real-time prices from
+Alpaca (stocks and crypto) and Coinbase (crypto), records every tick under
+`data/stream/`, and reports health to the console's Health tab. It places no
+strategy orders. Live venues refuse every order until armed with
+`agentic-trading venues arm <alpaca_live|coinbase> --hours N --yes`.
+
+1. `pip install -e ".[venues]"`
+2. Copy `config/secrets.example.toml` to `config/secrets.toml`, add your keys, `chmod 600` it.
+3. Add `[venues]` with `enabled = true` to `config/agentic.toml`.
+4. `agentic-trading venues check --config config/agentic.toml` (read-only),
+   then `agentic-trading venues smoke --config config/agentic.toml` (Alpaca paper only).
+5. Install `deploy/agentic-trading-venues` to `~/.local/bin/` and
+   `deploy/agentic-trading-venues.service` to `~/.config/systemd/user/`, then
+   `systemctl --user enable --now agentic-trading-venues`.
+
 ## How it decides
 
 ```mermaid
@@ -607,7 +624,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1004 tests, including the honesty tests for the rig
+tests/                   1097 tests, including the honesty tests for the rig
 ```
 
 ## Operations

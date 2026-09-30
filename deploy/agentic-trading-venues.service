@@ -1,0 +1,15 @@
+[Unit]
+Description=Agentic Trading venues gateway (Alpaca + Coinbase streams, recorder, health)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/doczeus/.local/bin/agentic-trading-venues
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/doczeus/Projects/Agnetic TraDING/data/state/venues.log
+StandardError=append:/home/doczeus/Projects/Agnetic TraDING/data/state/venues.log
+
+[Install]
+WantedBy=default.target
