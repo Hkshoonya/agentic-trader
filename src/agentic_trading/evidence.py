@@ -43,8 +43,14 @@ def shadow_forward_stats(
     from agentic_trading.journal import DecisionJournal
 
     costs = cost_model_for(config.state_dir)
-    per_side = Decimal(str(costs.per_side_bps)) / Decimal("10000")
-    fee = max(Decimal("0"), Decimal(str(costs.fee_per_order)))
+
+    def charges(symbol: str) -> tuple[Decimal, Decimal]:
+        model = costs.for_symbol(symbol)
+        return (
+            Decimal(str(model.per_side_bps)) / Decimal("10000"),
+            max(Decimal("0"), Decimal(str(model.fee_per_order))),
+        )
+
     held: dict[str, Decimal] = {}
     average_cost: dict[str, Decimal] = {}
     completed = wins = entries = invalid = 0
@@ -75,6 +81,7 @@ def shadow_forward_stats(
             first = stamp if first is None else min(first, stamp)
             last = stamp if last is None else max(last, stamp)
 
+        per_side, fee = charges(symbol)
         if side == "buy":
             previous = held.get(symbol, Decimal("0"))
             previous_cost = average_cost.get(symbol, Decimal("0"))
@@ -133,6 +140,8 @@ def shadow_forward_stats(
         "invalid_records": invalid,
         "cost_per_side_bps": float(costs.per_side_bps),
         "fee_per_order_usd": float(costs.fee_per_order),
+        "crypto_cost_per_side_bps": float(costs.for_symbol("BTC-USD").per_side_bps),
+        "crypto_fee_per_order_usd": float(costs.for_symbol("BTC-USD").fee_per_order),
     }
 
 
@@ -174,6 +183,17 @@ def report_runtime_checks(
     reported_fee = float(reported.get("assumed_fee_per_order_usd") or 0.0)
     current_bps = float(current.per_side_bps)
     current_fee = float(current.fee_per_order)
+    # A report written before costs were split by asset class charged its one
+    # model to crypto too, so its top-level numbers stand in for the crypto ones.
+    reported_crypto_bps = float(
+        reported.get("assumed_crypto_per_side_bps", reported_bps) or 0.0
+    )
+    reported_crypto_fee = float(
+        reported.get("assumed_crypto_fee_per_order_usd", reported_fee) or 0.0
+    )
+    current_crypto = current.for_symbol("BTC-USD")
+    current_crypto_bps = float(current_crypto.per_side_bps)
+    current_crypto_fee = float(current_crypto.fee_per_order)
     current_equity = float(_current_equity(config.state_dir))
     try:
         reported_equity = float(report.get("starting_equity") or 0.0)
@@ -207,7 +227,10 @@ def report_runtime_checks(
         and floor_model_current
     )
     cost_current = (
-        reported_bps + 1e-9 >= current_bps and reported_fee + 1e-9 >= current_fee
+        reported_bps + 1e-9 >= current_bps
+        and reported_fee + 1e-9 >= current_fee
+        and reported_crypto_bps + 1e-9 >= current_crypto_bps
+        and reported_crypto_fee + 1e-9 >= current_crypto_fee
     )
     try:
         reported_positions = int(report.get("max_positions") or 0)
@@ -231,6 +254,8 @@ def report_runtime_checks(
             "current_per_side_bps": current_bps,
             "reported_fee_per_order_usd": reported_fee,
             "current_fee_per_order_usd": current_fee,
+            "reported_crypto_fee_per_order_usd": reported_crypto_fee,
+            "current_crypto_fee_per_order_usd": current_crypto_fee,
         },
         "capital_check": {
             "current": capital_current,
@@ -357,6 +382,7 @@ def build_report(
     if per_order_pct is None:
         per_order_pct = effective_per_order_pct(config)
     from agentic_trading.execution import cost_model_for, load_report
+    from agentic_trading.walkforward import rule_for_strategy
 
     costs = cost_model_for(config.state_dir)
     starting_equity = _current_equity(config.state_dir)
@@ -378,6 +404,7 @@ def build_report(
         # frontier next to a proportional book would misstate the drawdown.
         proportional=getattr(config, "sizing", "flat") == "proportional",
         small_account_floor=floor_model,
+        rule=rule_for_strategy(config.strategy),
     )
     report["generated_at"] = datetime.now(timezone.utc).isoformat()
     report["history_path"] = str(config.history_path or "data/bars")
@@ -385,7 +412,14 @@ def build_report(
     report["forward"] = shadow_forward_stats(config)
     measured = load_report(config.state_dir)
     cost_detail = report.setdefault("costs", {})
-    if measured is not None and measured.round_trips and float(costs.fee_per_order) > 0:
+    if (
+        measured is not None
+        and measured.round_trips
+        and (
+            float(costs.fee_per_order) > 0
+            or float(costs.for_symbol("BTC-USD").fee_per_order) > 0
+        )
+    ):
         cost_detail["source"] = "measured_round_trip_fixed_fee"
         cost_detail["measured_round_trips"] = len(measured.round_trips)
         cost_detail["measured_round_trip_bps"] = measured.measured_round_trip_bps

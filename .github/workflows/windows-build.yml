@@ -74,8 +74,10 @@ jobs:
             }
             if (-not $ok) { throw "frozen dashboard never answered" }
 
-            # The CLI is a console app, so a bare call is fine here.
-            & "./dist/AgenticTrader/agentic-trading.exe" selfcheck --offline --config "$smoke/config/agentic.toml"
+            # The CLI is a console app, so a bare call is fine here. The bars
+            # are the snapshot shipped in git and age with the calendar, so
+            # freshness is not gated here; missing, thin and flagged bars are.
+            & "./dist/AgenticTrader/agentic-trading.exe" selfcheck --offline --max-bar-age-days 36500 --config "$smoke/config/agentic.toml"
             if ($LASTEXITCODE -ne 0) { throw "frozen CLI self-check failed" }
           } finally {
             if ($dash -and -not $dash.HasExited) { Stop-Process -Id $dash.Id -Force }

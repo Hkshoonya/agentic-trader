@@ -24,16 +24,55 @@ import math
 import random
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
 from agentic_trading.backtest import CostModel
 from agentic_trading.history import Bar
+from agentic_trading.orders import is_crypto_symbol
 
 TARGET_VOL = 0.20
 MAX_LEVERAGE = 1.5
 EWMA_LAMBDA = 0.94
+
+# The momentum rotation's specification, fixed before its trial began (see the
+# 2026-09-23 research note). Per book: the regime symbol, the moving average it
+# must close above for the book to hold anything, the momentum lookback in bars,
+# and how many names the book holds.
+ROTATION_BOOKS = {
+    "equity": ("SPY", 200, 63, 3),
+    "crypto": ("BTCUSD", 100, 60, 2),
+}
+
+# The dip reversal's specification, fixed on design grounds on 2026-09-29
+# before any backtest of it was run: the regime symbol and its moving average,
+# the moving average each name must itself be above, the pullback lookback in
+# bars, and how many names the book holds. Equities only: weekly turnover at the
+# crypto spread (~60 bps a side) would cost more than a bounce pays.
+REVERSAL_BOOK = ("SPY", 200, 200, 5, 3)
+
+# Which ranking each strategy trades, so the evidence gate and the console
+# grade the rule the daemon actually runs. The desk has no single rule: its
+# members are judged by their live books, so the walk-forward grades nothing
+# (zero trades keeps the promotion gate shut).
+STRATEGY_RULES = {
+    "trend_crypto": "trend",
+    "momentum_rotation": "rotation",
+    "dip_reversal": "reversal",
+    "desk": "none",
+}
+
+
+# Configurations examined before each rule was fixed. The trend rule came from
+# its specification; the rotation was chosen from ~40 variants (6 candidates,
+# two 15-cell parameter grids and robustness runs), so its significance bar is
+# divided by that count rather than pretending it was the only idea tried.
+RULE_HYPOTHESES = {"trend": 1, "rotation": 40, "reversal": 1}
+
+
+def rule_for_strategy(strategy: str) -> str:
+    return STRATEGY_RULES.get(str(strategy or ""), "trend")
 
 
 @dataclass(frozen=True)
@@ -154,6 +193,7 @@ def rank_targets(
     horizons: tuple[int, ...] = (50, 100, 200, 252),
     min_vote: float = 0.5,
     max_positions: int = 5,
+    rule: str = "trend",
 ) -> list[dict[str, Any]]:
     """Every symbol's vote and size, chosen or not, for the console.
 
@@ -162,6 +202,12 @@ def rank_targets(
     nothing has traded. Both read the same numbers, so the explanation cannot
     drift from the decision.
     """
+    if rule == "none":
+        return []
+    if rule == "rotation":
+        return rank_rotation(series, when, max_positions=max_positions)
+    if rule == "reversal":
+        return rank_reversal(series, when, max_positions=max_positions)
     rows: list[dict[str, Any]] = []
     for symbol, bars in series.items():
         closes = [float(bar.close) for bar in bars if bar.start < when]
@@ -221,6 +267,202 @@ def rank_targets(
     return rows
 
 
+def rotation_anchor(when: datetime) -> datetime:
+    """Monday 00:00 UTC of ``when``'s week: the rotation decides once a week.
+
+    Every quote in a week ranks on the same bars, so the book changes on the
+    weekly boundary and nowhere else — the cadence the rule was tested at —
+    without a second clock beside the daemon's daily decision.
+    """
+    stamp = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    day = stamp.astimezone(timezone.utc).date()
+    monday = day - timedelta(days=day.weekday())
+    return datetime.combine(monday, time.min, tzinfo=timezone.utc)
+
+
+def rank_rotation(
+    series: dict[str, list[Bar]],
+    when: datetime,
+    *,
+    max_positions: int = 5,
+) -> list[dict[str, Any]]:
+    """Weekly momentum rotation: each book holds its strongest recent names.
+
+    Per book (equity, crypto): rank members by their lookback return using bars
+    strictly before this week's anchor, and hold the top few whose return is
+    positive — but only while the book's regime symbol closes above its moving
+    average. A missing regime symbol means the book holds nothing: no guessing.
+    Every selected name has weight 1.0, one full per-order budget.
+    """
+    anchor = rotation_anchor(when)
+    closes = {
+        symbol: [float(bar.close) for bar in bars if bar.start < anchor]
+        for symbol, bars in series.items()
+    }
+
+    def key(symbol: str) -> str:
+        return symbol.replace("-", "").upper()
+
+    rows: list[dict[str, Any]] = []
+    for book, (regime_symbol, regime_bars, lookback, top) in ROTATION_BOOKS.items():
+        crypto = book == "crypto"
+        regime = next(
+            (
+                values
+                for symbol, values in closes.items()
+                if key(symbol) == regime_symbol
+            ),
+            None,
+        )
+        risk_on = (
+            regime is not None
+            and len(regime) >= regime_bars
+            and regime[-1] > sum(regime[-regime_bars:]) / regime_bars
+        )
+        ranked: list[dict[str, Any]] = []
+        for symbol, values in closes.items():
+            if is_crypto_symbol(symbol) != crypto:
+                continue
+            row: dict[str, Any] = {
+                "symbol": symbol,
+                "bars": len(values),
+                "vote": 0.0,
+                "vol_pct": None,
+                "weight": 0.0,
+                "selected": False,
+                "book": book,
+            }
+            rows.append(row)
+            if len(values) < lookback + 1 or values[-1 - lookback] <= 0:
+                row["reason"] = f"only {len(values)} bars (needs {lookback + 1})"
+                continue
+            momentum = values[-1] / values[-1 - lookback] - 1
+            row["vote"] = round(momentum, 4)
+            if not risk_on:
+                row["reason"] = (
+                    f"{regime_symbol} is not above its {regime_bars}-day average, "
+                    f"so the {book} book holds cash"
+                )
+            elif momentum <= 0:
+                row["reason"] = f"{lookback}-day return {momentum:+.1%} is not positive"
+            else:
+                ranked.append(row)
+        ranked.sort(key=lambda row: (-float(row["vote"]), str(row["symbol"])))
+        for position, row in enumerate(ranked):
+            if position < top:
+                row["selected"] = True
+                row["weight"] = 1.0
+                row["reason"] = (
+                    f"#{position + 1} {book} name by {lookback}-day return "
+                    f"{float(row['vote']):+.1%}"
+                )
+            else:
+                row["reason"] = (
+                    f"{lookback}-day return {float(row['vote']):+.1%} ranks "
+                    f"{position + 1}; the {book} book holds {top}"
+                )
+    selected = sorted(
+        (row for row in rows if row["selected"]),
+        key=lambda row: (-float(row["vote"]), str(row["symbol"])),
+    )
+    for position, row in enumerate(selected):
+        if position >= max_positions:
+            row["selected"] = False
+            row["weight"] = 0.0
+            row["reason"] = f"ranked {position + 1}, only {max_positions} slots"
+    rows.sort(
+        key=lambda row: (not row["selected"], -float(row["vote"]), str(row["symbol"]))
+    )
+    return rows
+
+
+def rank_reversal(
+    series: dict[str, list[Bar]],
+    when: datetime,
+    *,
+    max_positions: int = 5,
+) -> list[dict[str, Any]]:
+    """Weekly dip reversal: hold last week's deepest pullbacks in rising names.
+
+    On bars strictly before this week's anchor: while SPY closes above its
+    200-day average, rank the equities that close above their own 200-day
+    average by their 5-bar return, and hold the most negative few. A name
+    that rose, a name in a downtrend and every coin are left out. Each
+    selected name has weight 1.0, one full per-order budget, like the rotation.
+    """
+    regime_symbol, regime_bars, trend_bars, lookback, top = REVERSAL_BOOK
+    anchor = rotation_anchor(when)
+    closes = {
+        symbol: [float(bar.close) for bar in bars if bar.start < anchor]
+        for symbol, bars in series.items()
+    }
+    regime = next(
+        (
+            values
+            for symbol, values in closes.items()
+            if symbol.replace("-", "").upper() == regime_symbol
+        ),
+        None,
+    )
+    risk_on = (
+        regime is not None
+        and len(regime) >= regime_bars
+        and regime[-1] > sum(regime[-regime_bars:]) / regime_bars
+    )
+    rows: list[dict[str, Any]] = []
+    ranked: list[dict[str, Any]] = []
+    for symbol, values in closes.items():
+        if is_crypto_symbol(symbol):
+            continue
+        row: dict[str, Any] = {
+            "symbol": symbol,
+            "bars": len(values),
+            "vote": 0.0,
+            "vol_pct": None,
+            "weight": 0.0,
+            "selected": False,
+            "book": "equity",
+        }
+        rows.append(row)
+        needed = max(trend_bars, lookback + 1)
+        if len(values) < needed or values[-1 - lookback] <= 0:
+            row["reason"] = f"only {len(values)} bars (needs {needed})"
+            continue
+        pullback = values[-1] / values[-1 - lookback] - 1
+        row["vote"] = round(pullback, 4)
+        if not risk_on:
+            row["reason"] = (
+                f"{regime_symbol} is not above its {regime_bars}-day average, "
+                "so the dip book holds cash"
+            )
+        elif values[-1] <= sum(values[-trend_bars:]) / trend_bars:
+            row["reason"] = (
+                f"below its own {trend_bars}-day average: a fall, not a dip"
+            )
+        elif pullback >= 0:
+            row["reason"] = f"{lookback}-day return {pullback:+.1%} is no pullback"
+        else:
+            ranked.append(row)
+    ranked.sort(key=lambda row: (float(row["vote"]), str(row["symbol"])))
+    for position, row in enumerate(ranked):
+        if position < min(top, max_positions):
+            row["selected"] = True
+            row["weight"] = 1.0
+            row["reason"] = (
+                f"#{position + 1} pullback: {lookback}-day return "
+                f"{float(row['vote']):+.1%} in an uptrend"
+            )
+        else:
+            row["reason"] = (
+                f"{lookback}-day pullback {float(row['vote']):+.1%} ranks "
+                f"{position + 1}; the dip book holds {top}"
+            )
+    rows.sort(
+        key=lambda row: (not row["selected"], float(row["vote"]), str(row["symbol"]))
+    )
+    return rows
+
+
 def targets_as_of(
     series: dict[str, list[Bar]],
     when: datetime,
@@ -229,6 +471,7 @@ def targets_as_of(
     min_vote: float = 0.5,
     max_positions: int = 5,
     normalise: bool = False,
+    rule: str = "trend",
 ) -> dict[str, float]:
     """The production rule, evaluated with data strictly before ``when``.
 
@@ -252,6 +495,7 @@ def targets_as_of(
         horizons=horizons,
         min_vote=min_vote,
         max_positions=max_positions,
+        rule=rule,
     )
     weights = {
         row["symbol"]: round(float(row["weight"]), 6) for row in rows if row["selected"]
@@ -279,6 +523,7 @@ def simulate(
     inverse_vol: bool = False,
     proportional: bool = False,
     small_account_floor: Optional[SmallAccountFloor] = None,
+    rule: str = "trend",
 ) -> tuple[list[dict[str, Any]], list[float]]:
     """Trade the fixed rule forward through one window; return round-trip trades.
 
@@ -312,8 +557,17 @@ def simulate(
     keeps a token presence instead of switching off completely.
     """
     costs = costs or CostModel()
-    per_side = float(costs.per_side_bps) / 10_000
-    fee_per_order = max(0.0, float(costs.fee_per_order))
+    # Per-symbol (per_side, fee): crypto and equities can cost differently.
+    side_costs: dict[str, tuple[float, float]] = {}
+
+    def cost_of(symbol: str) -> tuple[float, float]:
+        if symbol not in side_costs:
+            model = costs.for_symbol(symbol)
+            side_costs[symbol] = (
+                float(model.per_side_bps) / 10_000,
+                max(0.0, float(model.fee_per_order)),
+            )
+        return side_costs[symbol]
     # The gross budget the flat baseline would deploy when every slot is full,
     # as a fraction of equity.
     gross_budget_pct = min(per_order_pct * max_positions, max_gross)
@@ -348,7 +602,7 @@ def simulate(
             if day in table and table[day] > 0
         }
         last_seen.update(prices)
-        targets = targets_as_of(series, when, max_positions=max_positions)
+        targets = targets_as_of(series, when, max_positions=max_positions, rule=rule)
 
         # Exit anything no longer targeted. Positions are held as units, so the
         # entry price already contains the entry cost and the exit price the
@@ -359,6 +613,7 @@ def simulate(
             price = prices[symbol]
             units = held.pop(symbol)
             entry_price, notional = entry.pop(symbol)
+            per_side, fee_per_order = cost_of(symbol)
             proceeds = units * price * (1 - per_side) - fee_per_order
             equity += proceeds
             trades.append(
@@ -483,6 +738,7 @@ def simulate(
                 continue
             if gross + notional > book_equity * max_gross + 1e-12:
                 continue
+            per_side, fee_per_order = cost_of(symbol)
             if notional >= equity or notional <= fee_per_order:
                 continue
             equity -= notional
@@ -496,15 +752,19 @@ def simulate(
             daily_opening_notional += notional
             budget_left = max(0.0, book_equity * gross_budget_pct - gross)
 
-    # Close whatever is still open at the end of the window.
+    # Close whatever is still open at the end of the window, at its last close.
+    # The window's last day is often one only coins trade on (a weekend), so a
+    # stock has no bar that day; skipping it would drop the position from the
+    # account, which is how held equities once vanished at every window end.
     last = dates[-1]
     for symbol in list(held):
         table = closes.get(symbol) or {}
-        price = table.get(last)
+        price = table.get(last) or last_seen.get(symbol)
         if price is None:
             continue
         units = held.pop(symbol)
         entry_price, notional = entry.pop(symbol)
+        per_side, fee_per_order = cost_of(symbol)
         proceeds = units * price * (1 - per_side) - fee_per_order
         equity += proceeds
         trades.append(
@@ -620,6 +880,7 @@ def walk_forward(
     proportional: bool = False,
     max_gross: float = 1.0,
     small_account_floor: Optional[SmallAccountFloor] = None,
+    rule: str = "trend",
 ) -> WalkForwardResult:
     """Cut the pooled timeline into consecutive windows and trade each one."""
     dates = sorted({bar.start for bars in series.values() for bar in bars})
@@ -651,6 +912,7 @@ def walk_forward(
             proportional=proportional,
             max_gross=max_gross,
             small_account_floor=small_account_floor,
+            rule=rule,
         )
         equity_curve.extend(fold_curve[1:])
         window_returns = [trade["return_bps"] for trade in trades]
@@ -716,6 +978,7 @@ def build_evidence(
     grid: tuple[float, ...] = GATE_SIZE_GRID,
     proportional: bool = False,
     small_account_floor: Optional[SmallAccountFloor] = None,
+    rule: str = "trend",
 ) -> dict[str, Any]:
     """The three numbers the promotion gate is allowed to see, in one report.
 
@@ -740,6 +1003,7 @@ def build_evidence(
             max_positions=max_positions,
             proportional=proportional,
             small_account_floor=(small_account_floor if use_floor else None),
+            rule=rule,
             **kwargs,
         )
 
@@ -755,11 +1019,7 @@ def build_evidence(
         costs=CostModel(spread_bps=Decimal("0"), slippage_bps=Decimal("0")),
         use_floor=True,
     )
-    stressed_costs = CostModel(
-        spread_bps=base_costs.spread_bps * COST_STRESS_MULTIPLIER,
-        slippage_bps=base_costs.slippage_bps * COST_STRESS_MULTIPLIER,
-        fee_per_order=base_costs.fee_per_order * COST_STRESS_MULTIPLIER,
-    )
+    stressed_costs = base_costs.scaled(COST_STRESS_MULTIPLIER)
     stressed = run(
         per_order_pct=per_order_pct,
         costs=stressed_costs,
@@ -767,7 +1027,8 @@ def build_evidence(
     )
     report: dict[str, Any] = {
         "schema_version": 4,
-        "hypotheses": 1,
+        "rule": rule,
+        "hypotheses": RULE_HYPOTHESES.get(rule, 1),
         "alpha": 0.05,
         "sizing": (
             "small_account_floor"
@@ -815,6 +1076,14 @@ def build_evidence(
             "assumed_fee_per_order_usd": float((costs or CostModel()).fee_per_order),
             "assumed_round_trip_fixed_usd": float(
                 (costs or CostModel()).fee_per_order * 2
+            ),
+            # The crypto book's own charge (equal to the fields above when no
+            # separate crypto model is in force).
+            "assumed_crypto_per_side_bps": float(
+                (costs or CostModel()).for_symbol("BTC-USD").per_side_bps
+            ),
+            "assumed_crypto_fee_per_order_usd": float(
+                (costs or CostModel()).for_symbol("BTC-USD").fee_per_order
             ),
             "trades": production.trades,
         },

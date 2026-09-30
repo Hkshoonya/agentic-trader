@@ -148,6 +148,9 @@ const STRATEGY_TEXT = {
   spy_scalper: 'S&P 500 scalper',
   llm: 'AI multi-asset',
   trend_crypto: 'crypto trend following',
+  momentum_rotation: 'weekly momentum rotation',
+  dip_reversal: 'weekly dip buying in uptrends',
+  desk: 'strategy desk',
 };
 
 const SESSION_TEXT = {
@@ -835,8 +838,10 @@ async function refresh() {
     // must say so and keep retrying instead of throwing on every poll.
     document.getElementById('generated').textContent =
       'console unreachable — retrying…';
+    if (typeof Cockpit !== 'undefined') Cockpit.setHealth(null);
     return;
   }
+  if (typeof Cockpit !== 'undefined') Cockpit.setHealth(summary);
   setBadge('mode', summary.kill_switch ? 'kill switch' : summary.mode,
     summary.kill_switch ? 'kill' : (summary.mode === 'live' ? 'live' : 'shadow'));
   setBadge('stage', 'stage: ' + (STAGE_TEXT[summary.promotion.stage] || humanise(summary.promotion.stage)),
@@ -1350,9 +1355,27 @@ function renderOrders(data) {
   }).join('');
 }
 
-refresh();
+// Four tabs; the choice survives a reload. Canvas cards measure their width
+// when drawn, so a newly shown tab is redrawn at once, not after the next tick.
+function showTab(name) {
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('.tab').forEach((s) => s.classList.toggle('on', s.id === 'tab-' + name));
+  try { localStorage.setItem('tab', name); } catch (e) { /* storage blocked: default next time */ }
+  window.dispatchEvent(new Event('resize'));
+  refresh();
+}
+
+function initTabs() {
+  document.querySelectorAll('#tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+  let saved = 'overview';
+  try { saved = localStorage.getItem('tab') || 'overview'; } catch (e) { /* storage blocked */ }
+  if (!document.getElementById('tab-' + saved)) saved = 'overview';
+  showTab(saved);
+}
+
+initTabs();
 refreshCandidates();
-setInterval(refresh, 2000);
-setInterval(refreshCandidates, 30000);
+setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+setInterval(() => { if (!document.hidden) refreshCandidates(); }, 30000);
 window.addEventListener('resize', () => fetch('/api/equity').then(r => r.json()).then(drawChart));
 """

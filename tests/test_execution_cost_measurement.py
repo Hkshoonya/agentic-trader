@@ -18,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from agentic_trading import execution
+from agentic_trading.backtest import CostModel
 
 
 class RoundTripMeasurementTests(unittest.TestCase):
@@ -77,8 +78,63 @@ class CostAwareSizingTests(unittest.TestCase):
 
             model = execution.cost_model_for(state)
 
-            self.assertEqual(model.per_side_bps, Decimal("0"))
-            self.assertEqual(model.fee_per_order, Decimal("0.05"))
+            crypto = model.for_symbol("BTC-USD")
+            self.assertEqual(crypto.per_side_bps, Decimal("0"))
+            self.assertEqual(crypto.fee_per_order, Decimal("0.05"))
+
+    def test_a_crypto_trip_does_not_price_equities(self) -> None:
+        """A crypto spread markup says nothing about a commission-free SPY fill."""
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            execution.record_round_trip(
+                state, symbol="XLM-USD", buy_notional=5.00, sell_notional=4.90
+            )
+            model = execution.cost_model_for(state)
+            equity = model.for_symbol("SPY")
+            self.assertEqual(equity.fee_per_order, Decimal("0"))
+            self.assertEqual(equity.per_side_bps, CostModel().per_side_bps)
+            self.assertIsNone(execution.measured_cost_usd(state, symbol="NVDA"))
+            self.assertIsNone(
+                execution.required_notional_for_cost(state, max_share=0.02, symbol="SPY")
+            )
+            self.assertAlmostEqual(
+                float(
+                    execution.required_notional_for_cost(
+                        state, max_share=0.02, symbol="ETH-USD"
+                    )
+                    or 0
+                ),
+                5.00,
+                places=6,
+            )
+
+    def test_doubling_costs_doubles_both_asset_classes(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            execution.record_round_trip(
+                state, symbol="XLM-USD", buy_notional=5.00, sell_notional=4.90
+            )
+            stressed = execution.cost_model_for(state).scaled(Decimal("2"))
+        self.assertEqual(stressed.for_symbol("BTC-USD").fee_per_order, Decimal("0.10"))
+        self.assertEqual(
+            stressed.for_symbol("SPY").per_side_bps, CostModel().per_side_bps * 2
+        )
+
+    def test_an_old_single_fee_report_still_covers_crypto(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            execution.record_round_trip(
+                state, symbol="XLM-USD", buy_notional=5.00, sell_notional=4.90
+            )
+            old_report = {"assumed_fee_per_order_usd": 0.05}
+            self.assertIsNone(execution.unmodeled_round_trip(state, old_report))
+            under = {
+                "assumed_fee_per_order_usd": 0.0,
+                "assumed_crypto_fee_per_order_usd": 0.02,
+            }
+            gap = execution.unmodeled_round_trip(state, under)
+        assert gap is not None
+        self.assertEqual(gap[0], "crypto")
 
     def test_the_smallest_order_that_can_absorb_the_measured_cost(self) -> None:
         with tempfile.TemporaryDirectory() as name:

@@ -171,6 +171,29 @@ class TestSimulate:
         assert sum(t["pnl"] for t in fixed) < sum(t["pnl"] for t in free)
         assert fixed[0]["pnl"] == pytest.approx(free[0]["pnl"] - 0.10, abs=0.01)
 
+    def test_a_window_ending_on_a_crypto_only_day_still_closes_equities(
+        self,
+    ) -> None:
+        """The last day of a pooled window is often a weekend: coins trade, stocks
+        do not. A position without a bar that day must be closed at its last
+        close, not dropped — dropping it made held equities vanish from the
+        account at every such window end, compounding across folds."""
+        series = {
+            "A": _series("A", _ramp(300)),
+            "B-USD": _series("B-USD", _ramp(301, daily=-0.004)),
+        }
+        trades, curve = simulate(
+            series,
+            start=DAY,
+            end=DAY + timedelta(days=300),
+            starting_cash=50.0,
+            max_positions=1,
+            per_order_pct=0.10,
+        )
+        assert [t["symbol"] for t in trades] == ["A"]
+        assert curve[-1] == pytest.approx(50.0 + sum(t["pnl"] for t in trades))
+        assert curve[-1] > 50.0
+
     def test_entry_debits_cash(self) -> None:
         """Cash leaves the account at entry, so the balance cannot exceed it."""
         series = {"A": _series("A", _ramp(300))}

@@ -317,12 +317,19 @@ def assess_walkforward(
             f"walk-forward drawdown {drawdown:.1f}% "
             f"> allowed {policy.max_oos_drawdown_pct:.1f}%"
         )
-    # One rule, declared in advance: no Bonferroni penalty applies, and none is
-    # taken. The bar is the plain policy bar.
-    if p_value > policy.max_bootstrap_p_value:
+    # A rule declared in advance pays no Bonferroni penalty. A rule chosen from
+    # several candidates pays for every one the report says was examined.
+    tested_hypotheses = max(1, int(report.get("hypotheses") or 1))
+    effective_alpha = policy.max_bootstrap_p_value / tested_hypotheses
+    if p_value > effective_alpha:
         reasons.append(
             f"walk-forward edge indistinguishable from noise "
-            f"(bootstrap p={p_value:.4f} > {policy.max_bootstrap_p_value})"
+            f"(bootstrap p={p_value:.4f} > {effective_alpha:.6g}"
+            + (
+                f", 0.05 / {tested_hypotheses} hypotheses tested)"
+                if tested_hypotheses > 1
+                else ")"
+            )
         )
     if trades > 0 and expectancy > 0 and profit_factor < 1.0:
         reasons.append(
@@ -496,8 +503,8 @@ def assess_walkforward(
         ),
         "oos_max_drawdown_pct": round(drawdown, 3),
         "oos_bootstrap_p_value": round(p_value, 4),
-        "tested_hypotheses": 1,
-        "effective_alpha": policy.max_bootstrap_p_value,
+        "tested_hypotheses": tested_hypotheses,
+        "effective_alpha": effective_alpha,
         "folds_positive": folds_positive,
         "folds_total": folds_total,
         "latest_fold_return_pct": (
@@ -821,7 +828,12 @@ def state_path(state_dir: Path | str) -> Path:
 
 def policy_from_config(config: Any) -> PromotionPolicy:
     """Build the policy from bot config (keeps thresholds operator-controlled)."""
-    requires_forward = str(getattr(config, "strategy", "")) == "trend_crypto"
+    requires_forward = str(getattr(config, "strategy", "")) in (
+        "trend_crypto",
+        "momentum_rotation",
+        "dip_reversal",
+        "desk",
+    )
     return PromotionPolicy(
         min_oos_trades=int(getattr(config, "min_oos_trades", 30)),
         min_recent_positive_folds=int(getattr(config, "min_recent_positive_folds", 2)),

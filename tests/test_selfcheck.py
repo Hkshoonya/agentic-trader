@@ -35,8 +35,9 @@ def _config(tmp: Path, *, symbols: list[str], bars: dict[str, int] | None = None
                 json.dumps(
                     {
                         "symbol": stem,
-                        "start": f"2026-01-01T00:00:00+00:00" if day else
-                                 f"2026-01-01T00:00:00+00:00",
+                        "start": "2026-01-01T00:00:00+00:00"
+                        if day
+                        else "2026-01-01T00:00:00+00:00",
                         "open": str(price),
                         "high": str(price),
                         "low": str(price),
@@ -108,8 +109,12 @@ class StateCheckTests(unittest.TestCase):
                     }
                 )
             )
-            (tmp / "state" / "promotion.json").write_text(json.dumps({"stage": "shadow"}))
-            (tmp / "state" / "risk_guard.json").write_text(json.dumps({"kill_switch": False}))
+            (tmp / "state" / "promotion.json").write_text(
+                json.dumps({"stage": "shadow"})
+            )
+            (tmp / "state" / "risk_guard.json").write_text(
+                json.dumps({"kill_switch": False})
+            )
             check = check_state_files(config)
         self.assertEqual(check.status, FAIL)
         self.assertIn("exceeds the operator ceiling", check.detail)
@@ -208,9 +213,7 @@ class EvidenceCheckTests(unittest.TestCase):
                 else {"per_order_pct": None, "eligible": False, "reason": "none held"}
             ),
         }
-        Path(config.state_dir, "strategy_evidence.json").write_text(
-            _json.dumps(report)
-        )
+        Path(config.state_dir, "strategy_evidence.json").write_text(_json.dumps(report))
 
     def test_missing_report_warns_rather_than_passes(self) -> None:
         with tempfile.TemporaryDirectory() as name:
@@ -247,6 +250,29 @@ class EvidenceCheckTests(unittest.TestCase):
             check = check_evidence(config)
         self.assertEqual(check.status, FAIL)
         self.assertIn("drawdown ceiling", check.detail)
+
+    def test_the_desk_is_not_graded_against_a_single_rule_gate(self) -> None:
+        """Desk members are judged by their live books; promotion stays shut."""
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            config = _config(tmp, symbols=["SPY"], bars={"SPY": 400})
+            self._write(config, age_days=1, gate_pct=0.01)
+            from agentic_trading.limits import Limits, save_limits
+
+            save_limits(
+                config.state_dir,
+                Limits(
+                    max_order_pct="0.05",
+                    daily_notional_pct="0.20",
+                    reason="test",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            check = check_evidence(replace(config, strategy="desk"))
+        self.assertEqual(check.status, WARN)
+        self.assertIn("live paper books", check.detail)
 
     def test_size_inside_the_gate_passes(self) -> None:
         with tempfile.TemporaryDirectory() as name:
@@ -297,11 +323,59 @@ class ReportTests(unittest.TestCase):
             payload = json.loads(path.read_text())
 
         names = {check.name for check in report.checks}
-        self.assertEqual(
-            names, {"state", "data", "analysis", "evidence", "plumbing"}
-        )
+        self.assertEqual(names, {"state", "data", "analysis", "evidence", "plumbing"})
         self.assertIn("healthy", payload)
         self.assertIn("checks", payload)
+
+    def test_a_bundled_snapshot_can_be_checked_without_a_calendar_deadline(
+        self,
+    ) -> None:
+        # The Windows build smoke-tests a frozen app against the bars shipped
+        # in git. Those age with the calendar, so a fixed freshness window made
+        # the build fail a week after every data commit with no code change.
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name), symbols=["SPY"], bars={"SPY": 400})
+            strict = run_checks(config, include_broker=False)
+            relaxed = run_checks(config, include_broker=False, max_bar_age_days=100_000)
+        data = {c.name: c for c in strict.checks}["data"]
+        self.assertEqual(data.status, FAIL)
+        self.assertIn("stale", data.detail)
+        data = {c.name: c for c in relaxed.checks}["data"]
+        self.assertNotEqual(data.status, FAIL)
+
+    def test_a_wide_window_still_fails_missing_bars(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name), symbols=["SPY", "QQQ"], bars={"SPY": 400})
+            report = run_checks(config, include_broker=False, max_bar_age_days=100_000)
+        data = {c.name: c for c in report.checks}["data"]
+        self.assertEqual(data.status, FAIL)
+        self.assertIn("QQQ", data.detail)
+
+    def test_the_cli_passes_the_window_to_the_data_check(self) -> None:
+        import contextlib
+        import io
+
+        from agentic_trading.cli import main
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            _config(tmp, symbols=["SPY"], bars={"SPY": 400})
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                main(
+                    [
+                        "selfcheck",
+                        "--offline",
+                        "--config",
+                        str(tmp / "agentic.toml"),
+                        "--max-bar-age-days",
+                        "100000",
+                    ]
+                )
+        data_line = next(
+            line for line in out.getvalue().splitlines() if " data " in line
+        )
+        self.assertFalse(data_line.startswith("FAIL"), data_line)
 
 
 if __name__ == "__main__":

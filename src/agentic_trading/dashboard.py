@@ -25,6 +25,7 @@ from agentic_trading.arming import arm as arm_now
 from agentic_trading.arming import arm_status, disarm as disarm_now
 from agentic_trading.arming import evaluate as evaluate_arm
 from agentic_trading.config import Config, load_config
+from agentic_trading.dashboard_desk import DeskEventCache, build_desk_view
 from agentic_trading.dashboard_html import HTML
 from agentic_trading.jsonio import dumps as json_dumps
 from agentic_trading.promotion import load_state
@@ -333,6 +334,8 @@ class DashboardState:
         # feature rebuild for the order table keeps them for a while.
         self._bars_cache: dict[str, tuple[float, list[Any]]] = {}
         self._bars_lock = threading.Lock()
+        # Desk news for the cockpit's ticker, parsed once per changed journal.
+        self._desk_events = DeskEventCache(self.journal_dir)
 
     def _bars_for(self, symbol: str) -> list[Any]:
         import time as _time
@@ -523,7 +526,12 @@ class DashboardState:
             "next_decision_local": next_at.astimezone().strftime("%Y-%m-%d %H:%M %Z"),
             "held": held,
             "explanation": (
-                f"{self.config.strategy} rebalances once per UTC day, on the "
+                f"{self.config.strategy} re-ranks once a week on bars before "
+                "Monday 00:00 UTC; entries follow on the first quote of each "
+                "book's day (crypto at 00:00 UTC, equities at the regular-session "
+                "open)."
+                if self.config.strategy in ("momentum_rotation", "dip_reversal")
+                else f"{self.config.strategy} rebalances once per UTC day, on the "
                 "first quote after 00:00 UTC; between rebalances the order "
                 "table is static by design while the cycle stream keeps running."
             ),
@@ -541,7 +549,7 @@ class DashboardState:
         if cache is not None and (now - cache[0]).total_seconds() < 60:
             return cache[1]
         from agentic_trading.evidence import load_series
-        from agentic_trading.walkforward import rank_targets
+        from agentic_trading.walkforward import rank_targets, rule_for_strategy
 
         try:
             series = load_series(self.config)
@@ -549,6 +557,7 @@ class DashboardState:
                 series,
                 now,
                 max_positions=self.config.max_open_positions,
+                rule=rule_for_strategy(self.config.strategy),
             )
         except Exception as exc:  # noqa: BLE001 — the console must still render
             payload: dict[str, Any] = {"rows": [], "error": str(exc)[:200]}
@@ -1110,6 +1119,22 @@ class DashboardState:
             "daily_notional": risk.get("daily_notional", "0"),
         }
 
+    def desk(self) -> dict[str, Any]:
+        """The cockpit's view of the strategy desk (``/api/desk``)."""
+        config = self.refresh_config()
+        if self._desk_events.journal_dir != self.journal_dir:
+            self._desk_events = DeskEventCache(self.journal_dir)
+        try:
+            return build_desk_view(config, self._desk_events.read())
+        except Exception as exc:  # noqa: BLE001 — the console must not 500 on odd state
+            return {
+                "enabled": False,
+                "error": f"{type(exc).__name__}: {exc}"[:200],
+                "members": [],
+                "story": {},
+                "ticker": [],
+            }
+
     def orders_table(self, *, limit: int = 60) -> dict[str, Any]:
         """Every order the agent decided on today, newest first."""
         self.refresh_config()
@@ -1472,6 +1497,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/equity":
             self._json(self.state.equity_curve())
+            return
+        if parsed.path == "/api/desk":
+            self._json(self.state.desk())
             return
         if parsed.path == "/api/activity":
             self._json(self.state.activity())

@@ -438,7 +438,9 @@ class DaemonLiveTests(unittest.TestCase):
                     _AlwaysBuy(),
                     _OneQuotePerPoll(),
                     once=False,
-                    duration_seconds=0.1,
+                    # Wall-clock budget for three quotes (the loop runs the whole
+                    # duration): 0.1s was flaky on a busy machine.
+                    duration_seconds=2.0,
                     sleep=lambda _seconds: None,
                 )
             records = _records(config)

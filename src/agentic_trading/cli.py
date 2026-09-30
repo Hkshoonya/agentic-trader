@@ -243,6 +243,8 @@ def build_strategy(
 ) -> FixtureStrategy | SpyScalperStrategy | LlmMultiAssetStrategy:
     """Select strategy plugin from config / CLI override."""
     name = (strategy_name or config.strategy or "fixture").strip().lower()
+    if name == "desk":
+        return build_desk(config)
     if name == "fixture":
         return FixtureStrategy()
     if name == "spy_scalper":
@@ -263,7 +265,10 @@ def build_strategy(
             whitelist=config.effective_whitelist,
             max_quote_age_seconds=config.max_quote_age_seconds,
         )
-    if name == "trend_crypto":
+    if name in ("trend_crypto", "momentum_rotation", "dip_reversal"):
+        from agentic_trading.strategies.momentum_rotation import (
+            MomentumRotationStrategy,
+        )
         from agentic_trading.strategies.trend_crypto import TrendCryptoStrategy
 
         bar_dir = (
@@ -285,8 +290,22 @@ def build_strategy(
             for symbol in sorted(config.effective_whitelist)
         ]
         if not symbols:
-            raise ValueError(
-                "trend_crypto needs symbols in symbol_whitelist, e.g. BTC-USD"
+            raise ValueError(f"{name} needs symbols in symbol_whitelist, e.g. BTC-USD")
+        if name == "dip_reversal":
+            from agentic_trading.strategies.dip_reversal import DipReversalStrategy
+
+            return DipReversalStrategy(
+                bar_dir=bar_dir,
+                symbols=symbols,
+                max_positions=config.max_open_positions,
+                state_path=Path(config.state_dir) / "strategy_dip_reversal.json",
+            )
+        if name == "momentum_rotation":
+            return MomentumRotationStrategy(
+                bar_dir=bar_dir,
+                symbols=symbols,
+                max_positions=config.max_open_positions,
+                state_path=Path(config.state_dir) / "strategy_momentum_rotation.json",
             )
         return TrendCryptoStrategy(
             bar_dir=bar_dir,
@@ -296,6 +315,71 @@ def build_strategy(
         )
     raise ValueError(f"unknown strategy: {name}")
 
+
+
+def build_desk(config: Config) -> Any:
+    """The strategy desk, with every member's book and state under state/desk."""
+    from agentic_trading import trial
+    from agentic_trading.desk.benchmark import BenchmarkStrategy
+    from agentic_trading.desk.book import MemberBook
+    from agentic_trading.desk.desk import StrategyDesk
+    from agentic_trading.desk.member import Member
+    from agentic_trading.evidence import _current_equity
+    from agentic_trading.execution import cost_model_for
+    from agentic_trading.journal import DecisionJournal
+
+    from decimal import Decimal
+
+    from agentic_trading.execution import required_notional_for_cost
+
+    desk_dir = Path(config.state_dir) / "desk"
+    journal = DecisionJournal(Path(config.journal_dir))
+    floor = Decimal(str(config.min_order_notional))
+    share = float(getattr(config, "max_cost_share_of_order", 0) or 0)
+
+    def min_notional(symbol: str) -> Decimal:
+        """The smallest buy the runtime accepts for ``symbol`` (cost floor included)."""
+        required = required_notional_for_cost(
+            config.state_dir, max_share=share, symbol=symbol
+        )
+        return max(floor, Decimal(str(required))) if required else floor
+
+    equity = _current_equity(config.state_dir)
+    members = []
+    for name in config.desk_members:
+        if name == "benchmark":
+            strategy: Any = BenchmarkStrategy()
+        else:
+            strategy = build_strategy(config, name)
+            strategy.use_state_path(desk_dir / f"{name}_strategy.json")
+        book, reset = MemberBook.load(
+            desk_dir / f"{name}.json", name=name, starting_equity=equity
+        )
+        if reset:
+            journal.append({"event": "desk_member_reset", "member": name})
+        if book.is_new and trial.seed_member_book(config, book):
+            journal.append({"event": "desk_trial_adopted", "member": name})
+        members.append(
+            Member(
+                name,
+                strategy,
+                book,
+                order_pct=config.desk_member_order_pct,
+                min_notional=min_notional,
+            )
+        )
+    account, _ = MemberBook.load(
+        desk_dir / "account.json", name="account", starting_equity=equity
+    )
+    return StrategyDesk(
+        members=members,
+        account=account,
+        costs=lambda: cost_model_for(config.state_dir),
+        journal=journal.append,
+        state_path=desk_dir / "desk.json",
+        retry_seconds=config.rebalance_retry_seconds,
+        min_notional=min_notional,
+    )
 
 def cmd_run(
     config_path: str,
@@ -713,6 +797,22 @@ def cmd_evolve(
     return 0
 
 
+def cmd_trial(config_path: str, *, start: bool = False, as_json: bool = False) -> int:
+    from agentic_trading import trial
+    from agentic_trading.evidence import _current_equity
+
+    config = load_config(config_path)
+    if start:
+        equity = _current_equity(config.state_dir)
+        if equity <= 0:
+            print("cannot start a trial before the account value is known", file=sys.stderr)
+            return 1
+        trial.start_trial(config, starting_equity=equity)
+    result = trial.score_trial(config)
+    print(json.dumps(result, indent=2) if as_json else trial.format_trial(result))
+    return 0
+
+
 def cmd_walkforward(
     config_path: str,
     *,
@@ -824,9 +924,11 @@ def cmd_dashboard(
     return 0
 
 
-def cmd_selfcheck(config_path: str, *, offline: bool = False) -> int:
+def cmd_selfcheck(
+    config_path: str, *, offline: bool = False, max_bar_age_days: Optional[int] = None
+) -> int:
     """Read-only: verify state, data, analysis path, broker and plumbing."""
-    from agentic_trading.selfcheck import run_checks, write_report
+    from agentic_trading.selfcheck import MAX_BAR_AGE_DAYS, run_checks, write_report
 
     config = load_config(config_path)
     broker = None
@@ -835,7 +937,14 @@ def cmd_selfcheck(config_path: str, *, offline: bool = False) -> int:
             broker, _ = build_broker(config)
         except Exception as exc:  # noqa: BLE001 — report rather than crash
             print(f"broker unavailable ({exc}); running the offline checks only")
-    report = run_checks(config, broker, include_broker=broker is not None)
+    report = run_checks(
+        config,
+        broker,
+        include_broker=broker is not None,
+        max_bar_age_days=(
+            MAX_BAR_AGE_DAYS if max_bar_age_days is None else max_bar_age_days
+        ),
+    )
     for check in report.checks:
         print(f"{check.status.upper():5s} {check.name:9s} {check.ms:7.0f}ms  {check.detail}")
     write_report(config, report)
@@ -943,6 +1052,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Skip the broker round trips (no network)",
     )
+    check_p.add_argument(
+        "--max-bar-age-days",
+        type=int,
+        default=None,
+        help="How old the newest bar may be before the data check fails "
+        "(for checking a bundled snapshot, e.g. a build smoke test)",
+    )
 
     auth_p = sub.add_parser("auth", help="OAuth 2.1 PKCE desktop flow; save tokens")
     auth_p.add_argument("--config", required=True)
@@ -1021,6 +1137,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     wf_p.add_argument("--max-positions", type=int, default=None)
     wf_p.add_argument("--folds", type=int, default=6)
     wf_p.add_argument("--out", default=None, help="Where to write the report")
+
+    trial_p = sub.add_parser(
+        "trial",
+        help="Score the 30-day shadow trial against buy-and-hold (or start one)",
+    )
+    trial_p.add_argument("--config", required=True)
+    trial_p.add_argument(
+        "--start", action="store_true", help="Start (or restart) the trial now"
+    )
+    trial_p.add_argument("--json", action="store_true", help="Print the raw result")
 
     promote_p = sub.add_parser(
         "promote", help="Operator override: set promotion stage"
@@ -1111,6 +1237,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             folds=args.folds,
             out=args.out,
         )
+    if args.command == "trial":
+        return cmd_trial(args.config, start=args.start, as_json=args.json)
     if args.command == "promote":
         return cmd_promote(args.config, args.stage)
     if args.command == "propose":
@@ -1173,7 +1301,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "reset-kill-switch":
         return cmd_reset_kill_switch(args.config)
     if args.command == "selfcheck":
-        return cmd_selfcheck(args.config, offline=args.offline)
+        return cmd_selfcheck(
+            args.config, offline=args.offline, max_bar_age_days=args.max_bar_age_days
+        )
     if args.command == "auth":
         return cmd_auth(args.config, profile=args.profile)
     if args.command == "snapshot-tools":

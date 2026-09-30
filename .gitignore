@@ -22,6 +22,12 @@ build/
 output/
 results/
 data/intraday/
+data/tape/
 
 # Built Windows artifacts: downloadable from the Actions run, not committed.
 windows/dist/
+
+# Local config backups and per-plan executor scratch space.
+config/agentic.toml.bak*
+.superpowers/
+.playwright-mcp/

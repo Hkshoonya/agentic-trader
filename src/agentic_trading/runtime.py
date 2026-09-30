@@ -46,7 +46,12 @@ from agentic_trading.session import (
     session_for,
 )
 from agentic_trading.strategies.fixture import FixtureStrategy
-from agentic_trading.types import OrderIntent, Side, new_decision_id
+from agentic_trading.types import (
+    DESK_ORDER_REASON,
+    OrderIntent,
+    Side,
+    new_decision_id,
+)
 
 
 class Strategy(Protocol):
@@ -297,6 +302,13 @@ class _Loop:
         self.config = config
         self.broker = broker
         self.strategy = strategy or FixtureStrategy()
+
+        from agentic_trading.tape import QuoteTape
+
+        tape_dir = (
+            Path(config.tape_dir) if config.tape_dir else Path(config.state_dir).parent / "tape"
+        )
+        self.tape = QuoteTape(tape_dir) if config.tape_enabled else None
         # Used to rebuild the strategy when the scout changes the universe: a
         # strategy that was constructed for one symbol list cannot price another,
         # and re-seeding its book is not enough.
@@ -408,6 +420,12 @@ class _Loop:
         # unchanged, which is most days.
         reconcile(view)
         apply_to_guard(self.guard, view)
+        if self.shadow_full_size_active():
+            # A dry-run trial is paper: the confidence ladder protects money,
+            # and there is none at stake, so paper orders use the ceilings the
+            # operator set. Live orders never reach this branch.
+            self.guard.max_order_pct = view.max_order_pct
+            self.guard.daily_notional_pct = view.daily_notional_pct
         # Caps the evidence/confidence ladder currently justifies, before the
         # small-account floor is considered. Keep both separately so the floor
         # is re-derived rather than ratcheting its own previous result. These
@@ -427,6 +445,13 @@ class _Loop:
         self.apply_correlation_policy()
         self.apply_size_floor()
         self.reconcile_stage_mode()
+
+    def shadow_full_size_active(self) -> bool:
+        return bool(
+            getattr(self.config, "shadow_full_size", False)
+            and self.guard.mode == "shadow"
+            and getattr(self, "stage", "shadow") == "shadow"
+        )
 
     def risk_view(self) -> Config:
         """The operator's ceilings for *this* account size and confidence.
@@ -1645,11 +1670,14 @@ class _Loop:
 
             share = float(getattr(self.config, "max_cost_share_of_order", 0) or 0)
             required = required_notional_for_cost(
-                self.config.state_dir, max_share=share
+                self.config.state_dir, max_share=share, symbol=intent.symbol
             )
             notional = intent.resolved_notional()
             if required and notional < Decimal(str(required)):
-                cost = measured_cost_usd(self.config.state_dir) or 0.0
+                cost = (
+                    measured_cost_usd(self.config.state_dir, symbol=intent.symbol)
+                    or 0.0
+                )
                 self._journal_rejected(
                     intent,
                     "cost_too_high_for_size: "
@@ -1721,24 +1749,21 @@ class _Loop:
                 self.config.jev_veto_chase
                 and chase is not None
                 and chase >= self.config.jev_chase_threshold
-            ):
-                self._journal_rejected(
-                    intent,
-                    f"jev_chase: p={float(chase):.2f}",
-                    intent.resolved_notional(),
+                and self._advisory_refuses(
+                    intent, "jev", f"jev_chase: p={float(chase):.2f}"
                 )
+            ):
                 return
 
         # Regime gate: a bad regime may refuse entries, never create them. It
         # reads a cached classification, so this costs nothing on the order path.
         if is_entry and self.regime_gate is not None and not advised:
             blocked = self.regime_gate.blocks(intent.symbol)
-            if blocked is not None:
-                self._journal_rejected(
-                    intent,
-                    f"regime_block: {blocked.regime} c={blocked.confidence:.2f}"[:120],
-                    intent.resolved_notional(),
-                )
+            if blocked is not None and self._advisory_refuses(
+                intent,
+                "regime",
+                f"regime_block: {blocked.regime} c={blocked.confidence:.2f}"[:120],
+            ):
                 return
 
         # Advisory veto: the model may refuse an entry (reduce risk) and its
@@ -1781,15 +1806,18 @@ class _Loop:
                         **decision.to_dict(),
                     }
                 )
-                if decision.vetoes and is_entry:
-                    self._journal_rejected(
+                if (
+                    decision.vetoes
+                    and is_entry
+                    and self._advisory_refuses(
                         intent,
+                        "llm",
                         f"llm_veto: {decision.reason}"
                         if decision.reason
                         else "llm_veto",
-                        intent.resolved_notional(),
                         advisor=advisor_payload,
                     )
+                ):
                     return
             elif getattr(self.advisor, "last_error", ""):
                 # An advisor that fails silently is indistinguishable from one
@@ -1874,20 +1902,32 @@ class _Loop:
         try:
             review = self.broker.review_order(request)
         except Exception as exc:  # noqa: BLE001 — no review, no placement
-            self.journal.append(
-                {
-                    "decision_id": intent.decision_id,
-                    "event": "review_failed",
-                    "error": str(exc),
-                    "order_request": request.to_mcp_args(),
-                }
-            )
-            self.note_error("review_failed", exc)
-            # The judgement is done and the guard said yes; only the broker call
-            # failed. Hold it rather than making the strategy re-decide.
-            if deferred_root is None:
-                self.defer_intent(intent, session=session, why="review_failed")
-            return RETRY
+            if (
+                self.mode == "shadow"
+                and side is Side.SELL
+                and "invalid_request" in str(exc)
+            ):
+                # A paper position has no real counterpart, so the broker
+                # refusing to preview selling it ("you can only sell up to 0")
+                # says nothing about the paper exit. Record the exit with the
+                # broker's answer attached rather than counting it towards the
+                # kill switch. Transport failures still take the path below.
+                review = {"shadow_only_position": True, "broker_error": str(exc)[:500]}
+            else:
+                self.journal.append(
+                    {
+                        "decision_id": intent.decision_id,
+                        "event": "review_failed",
+                        "error": str(exc),
+                        "order_request": request.to_mcp_args(),
+                    }
+                )
+                self.note_error("review_failed", exc)
+                # The judgement is done and the guard said yes; only the broker
+                # call failed. Hold it rather than making the strategy re-decide.
+                if deferred_root is None:
+                    self.defer_intent(intent, session=session, why="review_failed")
+                return RETRY
         self.journal.append(
             {
                 "decision_id": intent.decision_id,
@@ -2239,6 +2279,42 @@ class _Loop:
         if self.consecutive_errors >= self.config.max_consecutive_errors:
             self.guard.trip_kill_switch(f"consecutive_{event}")
         self.guard.persist(self.config.state_dir)
+
+    def _advisory_refuses(
+        self,
+        intent: OrderIntent,
+        layer: str,
+        opinion: str,
+        *,
+        advisor: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Apply an advisory refusal, except to the desk's own account orders.
+
+        The desk funds members whose paper books, traded without any veto, beat
+        buy-and-hold. Refusing their account orders would leave the money in
+        something other than what earned it, and would hide whether the veto
+        helps. So a desk order is let through and the opinion journaled, to be
+        scored later; every other entry is refused as before. RiskGuard, the
+        caps and the cost floor are not advisory and still apply to both.
+        """
+        if intent.reason == DESK_ORDER_REASON:
+            self.journal.append(
+                {
+                    "decision_id": intent.decision_id,
+                    "event": "advisory_overruled",
+                    "layer": layer,
+                    "symbol": intent.symbol,
+                    "side": intent.side.value,
+                    "ref_price": str(intent.ref_price or ""),
+                    "opinion": opinion,
+                    "note": "desk orders follow member evidence; opinion recorded only",
+                }
+            )
+            return False
+        self._journal_rejected(
+            intent, opinion, intent.resolved_notional(), advisor=advisor
+        )
+        return True
 
     def _journal_rejected(
         self,
@@ -2954,6 +3030,10 @@ def run_daemon(
             except Exception as exc:  # noqa: BLE001 — feed errors must not crash
                 journal.append({"event": "quote_read_failed", "error": str(exc)})
                 quotes = []
+            if loop.tape is not None and quotes:
+                tape_error = loop.tape.record(quotes)
+                if tape_error:
+                    journal.append({"event": "tape_write_failed", "error": tape_error})
             if crypto_session:
                 # The equity market is closed: only the pairs are actionable,
                 # and reporting stock quotes as stale here would be noise.
@@ -3082,6 +3162,10 @@ def run_daemon(
         for worker in workers:
             if worker.is_alive():
                 worker.join(timeout=10)
+        if loop.tape is not None:
+            tape_error = loop.tape.flush()
+            if tape_error:
+                journal.append({"event": "tape_write_failed", "error": tape_error})
         loop.finish()
 
 
@@ -3426,6 +3510,9 @@ def _self_improve_cycle(loop: _Loop, config: Config, journal: DecisionJournal) -
                         "errors": errors,
                     }
                 )
+                reload_history = getattr(loop.strategy, "reload_history", None)
+                if callable(reload_history):
+                    reload_history()
                 # Success heartbeat: the data agent's health comes from the sync
                 # that just returned. (This line was previously inside the try
                 # before `except`, so `exc` was unbound on the success path and
