@@ -30,3 +30,4 @@ windows/dist/
 # Local config backups and per-plan executor scratch space.
 config/agentic.toml.bak*
 .superpowers/
+.playwright-mcp/
