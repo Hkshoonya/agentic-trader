@@ -23,7 +23,12 @@ header .badge{font-size:clamp(11px,.4vw + 6px,17px)}
 @keyframes tabin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .armbox{display:flex;align-items:center;gap:8px}
 .netdot{width:9px;height:9px;border-radius:50%;background:var(--buy);animation:ping 2s infinite}
-.netdot.lost{background:var(--warn);animation:none}
+.netdot.warn{background:var(--warn);animation:none}
+.netdot.bad{background:var(--sell);animation:pingbad 1.2s infinite}
+.netdot.unknown{background:var(--muted);animation:none}
+@keyframes pingbad{0%{box-shadow:0 0 0 0 rgba(255,95,109,.6)}70%{box-shadow:0 0 0 8px rgba(255,95,109,0)}100%{box-shadow:0 0 0 0 rgba(255,95,109,0)}}
+/* Lost connection is drawn over any health colour: a hollow ring. */
+.netdot.lost{background:transparent;box-shadow:inset 0 0 0 2px var(--muted);animation:none}
 @keyframes ping{0%{box-shadow:0 0 0 0 rgba(53,208,127,.55)}70%{box-shadow:0 0 0 8px rgba(53,208,127,0)}100%{box-shadow:0 0 0 0 rgba(53,208,127,0)}}
 /* The overview fills the screen below the header, whatever its size: --head is
    the header's measured height (set by the cockpit script), never a guess. */

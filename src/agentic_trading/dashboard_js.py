@@ -838,8 +838,10 @@ async function refresh() {
     // must say so and keep retrying instead of throwing on every poll.
     document.getElementById('generated').textContent =
       'console unreachable — retrying…';
+    if (typeof Cockpit !== 'undefined') Cockpit.setHealth(null);
     return;
   }
+  if (typeof Cockpit !== 'undefined') Cockpit.setHealth(summary);
   setBadge('mode', summary.kill_switch ? 'kill switch' : summary.mode,
     summary.kill_switch ? 'kill' : (summary.mode === 'live' ? 'live' : 'shadow'));
   setBadge('stage', 'stage: ' + (STAGE_TEXT[summary.promotion.stage] || humanise(summary.promotion.stage)),

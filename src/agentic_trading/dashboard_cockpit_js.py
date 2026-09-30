@@ -47,7 +47,24 @@ const CockpitFmt = (() => {
       .map(([name, w]) => ({ name: labelOf(name), value: w }));
   };
   const tickerKey = (items) => (items || []).map((i) => i.at + '|' + i.text).join('\n');
-  return { pct, money, countdown, spread, moneyParts, tickerKey };
+  // A view the server could not build carries `error`: it must not replace the
+  // last good picture (it would say "the desk is off" when it is not).
+  const accept = (data) => !!data && !data.error;
+  // The top bar's health dot: red for the kill switch or a failing check,
+  // amber for warnings, green when every check passed.
+  const healthLevel = (summary) => {
+    if (!summary) return 'unknown';
+    if (summary.kill_switch) return 'bad';
+    const health = summary.health;
+    if (!health) return 'unknown';
+    if (health.healthy === false || (health.failures || []).length) return 'bad';
+    if ((health.warnings || []).length) return 'warn';
+    return 'ok';
+  };
+  // A daily sample is labelled with the UTC day that just closed, so it is the
+  // value at the end of that day, not its start.
+  const sampleTime = (day) => Date.parse(day) + 86400000;
+  return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime };
 })();
 
 const Cockpit = (() => {
@@ -102,11 +119,14 @@ const Cockpit = (() => {
 
   function raceLines(data) {
     const members = data.members || [];
-    const days = members.flatMap((m) => (m.series || []).map((p) => p[0])).sort();
-    const origin = days.length ? days[0] : String(data.as_of || '').slice(0, 10);
-    const nowX = Math.max(Charts.dayIndex(data.as_of, origin), 0);
+    const DAY = 86400000;
+    const times = members.flatMap((m) => (m.series || []).map((p) => CockpitFmt.sampleTime(p[0])))
+      .filter(Number.isFinite);
+    const now = Date.parse(data.as_of);
+    const origin = times.length ? Math.min(...times) : now;
+    const nowX = Math.max((now - origin) / DAY, 0);
     const lines = members.map((m) => {
-      const pts = (m.series || []).map(([d, v]) => [Charts.dayIndex(d, origin), v]);
+      const pts = (m.series || []).map(([d, v]) => [(CockpitFmt.sampleTime(d) - origin) / DAY, v]);
       if (Number.isFinite(m.now_pct)) pts.push([nowX, m.now_pct]);
       return { m, pts };
     });
@@ -256,7 +276,11 @@ const Cockpit = (() => {
       } else {
         count('t-trial', Math.max(0, trial.days - trial.day), (v) => Math.ceil(v) + ' days left');
       }
-      if (ring) {
+      // Rebuilt only when the day changes: rebuilding every poll replayed the
+      // sweep animation every five seconds.
+      const ringKey = [Math.floor(trial.day), trial.days, trial.verdict].join('|');
+      if (ring && ring.dataset.key !== ringKey) {
+        ring.dataset.key = ringKey;
         const done = Math.min(360, (trial.day / trial.days) * 360);
         ring.innerHTML = '<path d="' + Charts.arcPath(50, 50, 36, 44, 0, 360) + '" fill="#1b2431"/>'
           + (done > 0 ? '<path class="sweep" d="' + Charts.arcPath(50, 50, 36, 44, 0, done) + '" fill="#4aa8ff"/>' : '')
@@ -265,7 +289,7 @@ const Cockpit = (() => {
       }
     } else {
       count('t-trial', NaN, String);
-      if (ring) ring.innerHTML = '';
+      if (ring) { ring.innerHTML = ''; delete ring.dataset.key; }
     }
     const money = $('t-money');
     if (money) {
@@ -345,17 +369,31 @@ const Cockpit = (() => {
     }).join('');
   }
 
+  let healthTitle = 'waiting for the first health check';
+
   function setLink(ok) {
     const dot = $('netdot');
     if (!dot) return;
     dot.classList.toggle('lost', !ok);
-    dot.title = ok ? 'connected' : 'reconnecting…';
+    dot.title = ok ? healthTitle : 'reconnecting… (showing the last good picture)';
+  }
+
+  function setHealth(summary) {
+    const dot = $('netdot');
+    if (!dot) return;
+    const level = CockpitFmt.healthLevel(summary);
+    ['ok', 'warn', 'bad', 'unknown'].forEach((c) => dot.classList.toggle(c, c === level));
+    const health = (summary && summary.health) || {};
+    const names = (list) => (list || []).map((c) => c.name).join(', ');
+    healthTitle = level === 'bad'
+      ? (summary && summary.kill_switch ? 'kill switch engaged' : 'failing: ' + names(health.failures))
+      : level === 'warn' ? 'healthy, with warnings: ' + names(health.warnings)
+      : level === 'ok' ? 'every health check passed' : 'health unknown';
+    if (!dot.classList.contains('lost')) dot.title = healthTitle;
   }
 
   function render(data) {
-    const story = data.error
-      ? { right_now: 'The cockpit could not read the desk (' + data.error + ').' }
-      : (data.story || {});
+    const story = data.story || {};
     say('say-now', story.right_now);
     say('say-money', story.money);
     say('say-just', story.just_now);
@@ -378,6 +416,13 @@ const Cockpit = (() => {
       const response = await fetch('/api/desk');
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const data = await response.json();
+      if (!CockpitFmt.accept(data)) {
+        // Keep the last good picture; say what went wrong in one place only.
+        setLink(false);
+        say('say-now', 'The cockpit could not read the desk just now ('
+          + String((data && data.error) || 'no data') + '); showing the last good picture.');
+        return;
+      }
       last = data;
       setLink(true);
       render(data);
@@ -410,7 +455,7 @@ const Cockpit = (() => {
     }
   }
 
-  return { start, poll };
+  return { start, poll, setHealth };
 })();
 """
 

@@ -68,6 +68,28 @@ class CockpitFormatTests(unittest.TestCase):
             [True, False],
         )
 
+    def test_a_view_that_failed_on_the_server_does_not_replace_the_picture(self) -> None:
+        self.assertEqual(
+            self.js("[CockpitFmt.accept({enabled: true}), CockpitFmt.accept({enabled: false}),"
+                    " CockpitFmt.accept({enabled: false, error: 'boom'}), CockpitFmt.accept(null)]"),
+            [True, True, False, False],
+        )
+
+    def test_the_health_dot_reads_kill_switch_failures_and_warnings(self) -> None:
+        self.assertEqual(
+            self.js("[CockpitFmt.healthLevel({kill_switch: true, health: {healthy: true, failures: [], warnings: []}}),"
+                    " CockpitFmt.healthLevel({health: {healthy: false, failures: [{name: 'data'}], warnings: []}}),"
+                    " CockpitFmt.healthLevel({health: {healthy: true, failures: [], warnings: [{name: 'evidence'}]}}),"
+                    " CockpitFmt.healthLevel({health: {healthy: true, failures: [], warnings: []}}),"
+                    " CockpitFmt.healthLevel({})]"),
+            ["bad", "bad", "warn", "ok", "unknown"],
+        )
+
+    def test_a_daily_sample_is_placed_at_the_end_of_its_day(self) -> None:
+        # MemberBook.mark labels a sample with the UTC day that just closed.
+        self.assertEqual(
+            self.js("CockpitFmt.sampleTime('2026-09-29') === Date.parse('2026-09-30T00:00:00Z')"), True)
+
     def test_the_whole_page_script_parses(self) -> None:
         from agentic_trading.dashboard_html import HTML
 
@@ -93,6 +115,18 @@ class CockpitPageWiringTests(unittest.TestCase):
         self.assertEqual(script.count("Cockpit.start();"), 1)
         self.assertLess(script.index("const esc ="), script.index("const Cockpit ="))
         self.assertLess(script.index("const Cockpit ="), script.index("Cockpit.start();"))
+
+    def test_the_console_refresh_feeds_the_health_dot(self) -> None:
+        from agentic_trading.dashboard_js import SCRIPT
+
+        self.assertIn("Cockpit.setHealth(", SCRIPT)
+
+    def test_the_trial_ring_only_rebuilds_when_the_trial_changes(self) -> None:
+        from agentic_trading.dashboard_cockpit_js import COCKPIT
+
+        guard = COCKPIT.index("ring.dataset.key !== ringKey")
+        build = COCKPIT.index("ring.innerHTML = '<path")
+        self.assertLess(guard, build)  # the arcs are drawn only behind the key check
 
     def test_the_module_is_raw_and_escapes_what_it_writes(self) -> None:
         from agentic_trading.dashboard_cockpit_js import COCKPIT

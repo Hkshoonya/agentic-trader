@@ -385,5 +385,50 @@ class DeskEndpointTests(unittest.TestCase):
         self.assertEqual(payload["members"], [])
 
 
+class OddStateTests(unittest.TestCase):
+    """Review fix: one unreadable piece degrades; it never fails the whole view."""
+
+    def _write_book(self, config, name: str, **overrides) -> None:
+        payload = {"name": name, "starting_equity": "50", "cash": "50", "positions": {},
+                   "prices": {}, "samples": [["2026-09-25", "50"]], "entries": 1, "exits": 0}
+        payload.update(overrides)
+        desk = Path(config.state_dir) / "desk"
+        (desk / f"{name}.json").write_text(json.dumps(payload))
+
+    def test_a_nan_starting_equity_marks_that_book_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(_desk(Path(name)))
+            self._write_book(config, "momentum_rotation", starting_equity="NaN")
+            view = build_desk_view(config, [], now=NOW)
+        rot = view["members"][0]
+        self.assertEqual(rot["reason"], "paper book unreadable")
+        self.assertIsNone(rot["now_pct"])
+        self.assertTrue(view["members"][1]["is_benchmark"])  # the rest still renders
+
+    def test_a_nan_position_quantity_marks_that_book_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(_desk(Path(name)))
+            self._write_book(config, "momentum_rotation", positions={"AAPL": "NaN"},
+                             prices={"AAPL": "250"})
+            rot = build_desk_view(config, [], now=NOW)["members"][0]
+        self.assertEqual(rot["reason"], "paper book unreadable")
+
+    def test_malformed_journal_records_are_skipped(self) -> None:
+        events = [
+            {"event": "selfcheck", "healthy": False, "failures": {"name": "data"}, "at": "x"},
+            {"event": "desk_allocation", "week": "2026-09-21", "allocations": ["benchmark"]},
+            {"event": "member_fill", "member": "benchmark", "side": "buy", "symbol": "QQQ",
+             "quantity": "1", "price": "2", "at": "2026-09-29T21:00:00+00:00"},
+        ]
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(_desk(Path(name)))
+            view = build_desk_view(config, events, now=NOW)
+        self.assertTrue(view["enabled"])
+        self.assertEqual(view["allocation"]["history"], [])
+        texts = [item["text"] for item in view["ticker"]]
+        self.assertIn("Buy-and-hold bought QQQ $2.00 on paper", texts)
+        self.assertIn("Health check found a problem in a check", texts)
+
+
 if __name__ == "__main__":
     unittest.main()

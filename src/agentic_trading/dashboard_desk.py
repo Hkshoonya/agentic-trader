@@ -151,16 +151,21 @@ def _member_view(
 def _allocation_view(
     state: dict[str, Any], events: list[dict[str, Any]], now: datetime
 ) -> dict[str, Any]:
+    raw = state.get("allocations")
     weights = {
         str(name): _float(weight)
-        for name, weight in (state.get("allocations") or {}).items()
+        for name, weight in (raw.items() if isinstance(raw, dict) else ())
     }
     history: dict[str, dict[str, float]] = {}
     for record in events:
-        if record.get("event") == "desk_allocation" and record.get("week"):
+        allocations = record.get("allocations")
+        if (
+            record.get("event") == "desk_allocation"
+            and record.get("week")
+            and isinstance(allocations, dict)
+        ):
             history[str(record["week"])] = {
-                str(name): _float(weight)
-                for name, weight in (record.get("allocations") or {}).items()
+                str(name): _float(weight) for name, weight in allocations.items()
             }
     weeks = sorted(history)[-HISTORY_WEEKS:]
     return {
@@ -261,7 +266,11 @@ def ticker_item(record: dict[str, Any]) -> Optional[dict[str, str]]:
             weights = sorted(
                 (
                     (str(name), _float(weight))
-                    for name, weight in (record.get("allocations") or {}).items()
+                    for name, weight in (
+                        record["allocations"].items()
+                        if isinstance(record.get("allocations"), dict)
+                        else ()
+                    )
                 ),
                 key=lambda pair: (-pair[1], pair[0]),
             )
@@ -280,14 +289,28 @@ def ticker_item(record: dict[str, Any]) -> Optional[dict[str, str]]:
         kind = "error"
         text = f"{label(str(record.get('member')))} hit an error and sits out today"
     elif event == "selfcheck":
-        failures = record.get("failures") or []
-        first = failures[0].get("name") if failures and isinstance(failures[0], dict) else None
+        failures = record.get("failures")
+        first = (
+            failures[0].get("name")
+            if isinstance(failures, list) and failures and isinstance(failures[0], dict)
+            else None
+        )
         kind = "error"
         text = f"Health check found a problem in {first or 'a check'}"
     else:  # kill_switch
         kind = "error"
         text = "Kill switch engaged: trading stopped"
     return {"at": str(record.get("at") or ""), "kind": kind, "text": text}
+
+
+def _safe_ticker_item(record: Any) -> Optional[dict[str, str]]:
+    """A malformed journal record is skipped, not allowed to fail the view."""
+    if not isinstance(record, dict):
+        return None
+    try:
+        return ticker_item(record)
+    except (ArithmeticError, ValueError, TypeError, KeyError, AttributeError):
+        return None
 
 
 def story(
@@ -415,7 +438,7 @@ def build_desk_view(
     """Everything the cockpit draws, from the desk's files and journal events."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     ticker = [
-        item for item in (ticker_item(record) for record in reversed(events)) if item
+        item for item in (_safe_ticker_item(r) for r in reversed(events)) if item
     ][:TICKER_SIZE]
     symbols = len(getattr(config, "effective_whitelist", ()) or ())
     if str(getattr(config, "strategy", "")) != "desk":
@@ -453,24 +476,33 @@ def build_desk_view(
     state = _read_json(desk_dir / "desk.json")
     allocation = _allocation_view(state, events, current)
     bar = min_t(sum(1 for name in names if name != BENCHMARK))
-    members = [
-        _member_view(
-            name,
-            books[name],
-            stats=stats,
-            reasons=reasons,
-            weight=allocation["weights"].get(name, 0.0),
-            t_needed=bar,
-        )
-        for name in names
-    ]
+    members = []
+    for name in names:
+        kwargs = {
+            "stats": stats,
+            "reasons": reasons,
+            "weight": allocation["weights"].get(name, 0.0),
+            "t_needed": bar,
+        }
+        try:
+            members.append(_member_view(name, books[name], **kwargs))
+        except (ArithmeticError, ValueError, TypeError, KeyError):
+            # One odd book (a NaN from a half-written file) greys out that
+            # member; it must not blank the whole cockpit.
+            view = _member_view(name, None, **kwargs)
+            view["reason"] = "paper book unreadable"
+            members.append(view)
     account_book = _load_book(desk_dir, "account")
-    account = {
-        "value": (
+    try:
+        account_value = (
             round(float(account_book.equity), 2)
             if account_book is not None and not account_book.cash_pending
             else None
-        ),
+        )
+    except (ArithmeticError, ValueError, TypeError):
+        account_value = None
+    account = {
+        "value": account_value,
         "series": [[day, round(value, 2)] for day, value in _samples(account_book)],
     }
     return {
