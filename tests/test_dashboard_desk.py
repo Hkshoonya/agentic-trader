@@ -339,5 +339,51 @@ class EventCacheTests(unittest.TestCase):
         self.assertEqual(DeskEventCache(Path("/nonexistent/journal")).read(), [])
 
 
+class DeskEndpointTests(unittest.TestCase):
+    def _get(self, config, path: str) -> dict:
+        import threading
+        import urllib.request
+
+        from agentic_trading.dashboard import serve
+
+        server = serve(config, host="127.0.0.1", port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}{path}"
+            with urllib.request.urlopen(url, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+                return json.loads(response.read().decode("utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_cockpit_endpoint_serves_the_desk_view(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(_desk(Path(name)))
+            journal = Path(config.journal_dir)
+            journal.mkdir(parents=True, exist_ok=True)
+            (journal / "2026-09-29.jsonl").write_text(json.dumps({
+                "event": "member_fill", "member": "momentum_rotation", "side": "buy",
+                "symbol": "AAPL", "quantity": "0.04", "price": "250",
+                "at": "2026-09-29T21:00:00+00:00"}) + "\n", encoding="utf-8")
+            payload = self._get(config, "/api/desk")
+        self.assertTrue(payload["enabled"])
+        self.assertEqual([m["name"] for m in payload["members"]], ["momentum_rotation", "benchmark"])
+        self.assertEqual(payload["ticker"][0]["text"], "Momentum rotation bought AAPL $10.00 on paper")
+
+    def test_a_failure_inside_the_view_is_reported_not_raised(self) -> None:
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(_desk(Path(name)))
+            with mock.patch("agentic_trading.dashboard.build_desk_view",
+                            side_effect=RuntimeError("boom")):
+                payload = self._get(config, "/api/desk")
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["error"], "RuntimeError: boom")
+        self.assertEqual(payload["members"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
