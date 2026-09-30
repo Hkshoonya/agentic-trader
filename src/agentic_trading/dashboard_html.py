@@ -180,6 +180,7 @@ __COCKPIT_CSS__
 
 <section class="tab" id="tab-health">
 <main>
+<div class="card span12"><h2>Venues · Alpaca and Coinbase connections</h2><div id="venues" class="venues"><div class="sub">reading the venues service…</div></div></div>
 <div class="card span7"><h2>Agents on duty</h2><div id="agents" class="sub">starting…</div><div id="alerts"></div><div id="health"></div></div>
 <div class="card span12"><h2>Order submission</h2><div id="arm" class="sub">checking…</div><div class="sub" id="arm-status"></div></div>
 <div class="card span5"><h2>Runtime &amp; P&amp;L</h2><div id="account" class="sub">starting…</div></div>

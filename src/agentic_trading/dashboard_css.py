@@ -85,6 +85,14 @@ header .badge{font-size:clamp(11px,.4vw + 6px,17px)}
 .chip{background:#1b2431;border-radius:999px;padding:2px 9px;font-size:11px}
 .progress{height:6px;background:#1b2431;border-radius:3px;overflow:hidden;margin:4px 0 8px}
 .progress>div{height:100%;background:linear-gradient(90deg,var(--shadow),var(--accent));transition:width .6s ease}
+.venues{display:grid;gap:10px}
+.vrow{display:flex;gap:14px;flex-wrap:wrap;align-items:center;padding:6px 0;border-bottom:1px dashed #1a2330}
+.vrow b{min-width:130px}
+.vstat{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);margin-right:6px}
+.vstat.live,.vstat.ok{background:var(--buy)}
+.vstat.closed{background:var(--shadow)}
+.vstat.stale,.vstat.reconnecting,.vstat.starting,.vstat.error{background:var(--warn)}
+.vstat.auth_failed{background:var(--sell)}
 /* Stacked: the page scrolls, so the race needs a height of its own (it was a
    150px strip), and the tiles pair up instead of stretching full width. */
 @media(max-width:1100px){#tab-overview.on{display:block;height:auto;min-height:0}.cockpit{grid-template-columns:1fr}.tiles{display:grid;grid-template-columns:1fr 1fr}#race{flex:none;height:clamp(260px,55vw,460px)}.tabs{margin-left:0}}
