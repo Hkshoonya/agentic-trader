@@ -170,5 +170,174 @@ class DeskViewTests(unittest.TestCase):
         self.assertEqual(next_allocation(NOW), monday)
 
 
+from agentic_trading.dashboard_desk import DeskEventCache, story, ticker_item  # noqa: E402
+
+
+def _member(name, now_pct, *, samples=3, bench=False):
+    return {"name": name, "label": label(name), "is_benchmark": bench,
+            "now_pct": now_pct, "samples": samples}
+
+
+ALL_BENCH = {"weights": {"momentum_rotation": 0.0, "benchmark": 1.0}}
+
+
+class TickerTests(unittest.TestCase):
+    def test_each_event_kind_reads_as_a_sentence(self) -> None:
+        cases = [
+            ({"event": "member_fill", "member": "momentum_rotation", "side": "buy",
+              "symbol": "AAPL", "quantity": "0.04", "price": "250"},
+             "fill", "Momentum rotation bought AAPL $10.00 on paper"),
+            ({"event": "accepted", "side": "sell", "symbol": "QQQ", "notional": "29.7",
+              "mode": "shadow", "intent": {"reason": "desk_rebalance"}},
+             "order", "Desk sold QQQ $29.70 for the account, on paper"),
+            ({"event": "desk_allocation", "changed": True,
+              "allocations": {"momentum_rotation": 0.4, "benchmark": 0.6}},
+             "allocation", "New weekly allocation: Buy-and-hold 60%, Momentum rotation 40%"),
+            ({"event": "desk_allocation", "changed": False, "allocations": {"benchmark": 1.0}},
+             "allocation", "Weekly allocation checked: no change"),
+            ({"event": "advisory_overruled", "layer": "llm", "symbol": "SOL-USD"},
+             "overruled", "The AI veto objected to SOL-USD; the desk followed its evidence"),
+            ({"event": "desk_member_failed", "member": "trend_crypto", "error": "boom"},
+             "error", "Crypto trend hit an error and sits out today"),
+            ({"event": "selfcheck", "healthy": False, "failures": [{"name": "data"}]},
+             "error", "Health check found a problem in data"),
+            ({"event": "kill_switch", "reason": "daily loss"},
+             "error", "Kill switch engaged: trading stopped"),
+        ]
+        for record, kind, text in cases:
+            with self.subTest(event=record["event"]):
+                item = ticker_item({**record, "at": "2026-09-29T21:00:00+00:00"})
+                self.assertEqual((item["kind"], item["text"]), (kind, text))
+                self.assertEqual(item["at"], "2026-09-29T21:00:00+00:00")
+
+    def test_ordinary_orders_and_healthy_checks_are_not_ticker_news(self) -> None:
+        self.assertIsNone(ticker_item({"event": "accepted", "intent": {"reason": "trend_entry"}}))
+        self.assertIsNone(ticker_item({"event": "selfcheck", "healthy": True}))
+        self.assertIsNone(ticker_item({"event": "cycle_stats"}))
+
+    def test_the_view_lists_the_newest_thirty_first(self) -> None:
+        events = [
+            {"event": "member_fill", "member": "benchmark", "side": "buy", "symbol": "QQQ",
+             "quantity": "1", "price": str(i), "at": f"2026-09-29T{i // 60:02d}:{i % 60:02d}:00+00:00"}
+            for i in range(1, 41)
+        ]
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(_desk(Path(name)))
+            ticker = build_desk_view(config, events, now=NOW)["ticker"]
+        self.assertEqual(len(ticker), 30)
+        self.assertIn("$40.00", ticker[0]["text"])
+
+
+class StoryTests(unittest.TestCase):
+    def _story(self, members, allocation=ALL_BENCH, account=49.45, ticker=(), now=NOW):
+        return story(members, allocation, account, list(ticker), symbols=19, now=now)
+
+    def test_right_now_names_the_leader_against_buy_and_hold(self) -> None:
+        said = self._story([_member("momentum_rotation", 1.16), _member("trend_crypto", -0.96),
+                            _member("benchmark", -0.8, bench=True)])
+        self.assertEqual(said["right_now"], "Momentum rotation is beating buy-and-hold by +1.96 points.")
+
+    def test_right_now_when_nobody_is_ahead(self) -> None:
+        said = self._story([_member("momentum_rotation", -1.0), _member("benchmark", 0.5, bench=True)])
+        self.assertEqual(
+            said["right_now"],
+            "No strategy is ahead of buy-and-hold yet; the closest is Momentum rotation (-1.50 points).",
+        )
+
+    def test_right_now_before_any_prices(self) -> None:
+        said = self._story([_member("momentum_rotation", None), _member("benchmark", None, bench=True)])
+        self.assertEqual(said["right_now"], "The race starts when every book has its first prices.")
+
+    def test_money_while_nobody_has_earned_capital(self) -> None:
+        said = self._story([_member("momentum_rotation", 1.0, samples=4),
+                            _member("benchmark", 0.0, bench=True)])
+        self.assertEqual(
+            said["money"],
+            "All $49.45 sits in buy-and-hold (60% QQQ, 40% BTC). No strategy has earned "
+            "capital yet: the furthest along has 4 of 20 daily samples.",
+        )
+
+    def test_money_when_samples_are_enough_but_the_edge_is_not(self) -> None:
+        said = self._story([_member("momentum_rotation", 1.0, samples=25),
+                            _member("benchmark", 0.0, bench=True)])
+        self.assertTrue(said["money"].endswith(
+            "No strategy has earned capital yet: none has beaten buy-and-hold convincingly."))
+
+    def test_money_when_capital_follows_a_winner(self) -> None:
+        said = self._story(
+            [_member("momentum_rotation", 3.0, samples=25), _member("benchmark", 0.0, bench=True)],
+            allocation={"weights": {"momentum_rotation": 0.4, "benchmark": 0.6}},
+        )
+        self.assertEqual(said["money"],
+                         "Capital follows the evidence: Momentum rotation 40%, buy-and-hold 60%.")
+
+    def test_money_before_the_first_allocation(self) -> None:
+        said = self._story([_member("benchmark", 0.0, bench=True)], allocation={"weights": {}})
+        self.assertEqual(said["money"], "The desk has not made its first allocation yet.")
+
+    def test_just_now_is_the_latest_news_or_the_quiet_watch(self) -> None:
+        fresh = [{"at": "2026-09-29T21:30:00+00:00", "kind": "fill", "text": "Crypto trend bought SPY $9.44 on paper"}]
+        stale = [{"at": "2026-09-28T01:00:00+00:00", "kind": "fill", "text": "old news"}]
+        members = [_member("benchmark", 0.0, bench=True)]
+        self.assertEqual(self._story(members, ticker=fresh)["just_now"],
+                         "Crypto trend bought SPY $9.44 on paper.")
+        self.assertEqual(self._story(members, ticker=stale)["just_now"],
+                         "Watching 19 symbols; nothing needs doing right now.")
+
+    def test_the_view_carries_the_story(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(_desk(Path(name)))
+            said = build_desk_view(config, [], now=NOW)["story"]
+        self.assertEqual(said["right_now"], "Momentum rotation is beating buy-and-hold by +1.50 points.")
+        self.assertIn("All $50.10 sits in buy-and-hold", said["money"])
+
+    def test_a_non_desk_bot_still_gets_a_story(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            config = _config(Path(name), strategy="trend_crypto")
+            view = build_desk_view(config, [], now=NOW)
+        self.assertFalse(view["enabled"])
+        self.assertEqual(view["story"]["right_now"],
+                         "The cockpit follows the strategy desk; this bot runs Crypto trend on its own.")
+        self.assertEqual(view["story"]["money"], "Its orders and positions are on the Orders tab.")
+
+
+class EventCacheTests(unittest.TestCase):
+    def _journal(self, tmp: Path) -> Path:
+        journal = tmp / "journal"
+        journal.mkdir()
+        lines = [
+            json.dumps({"event": "member_fill", "member": "benchmark", "side": "buy",
+                        "symbol": "QQQ", "quantity": "1", "price": "1", "at": "2026-09-28T01:00:00+00:00"}),
+            json.dumps({"event": "stale_quotes_rejected", "at": "2026-09-28T01:00:01+00:00"}),
+            '{"event": "member_fill", "memb',             # cut by a power loss
+            "\x00\x00\x00",                               # a null-byte tail
+            json.dumps({"event": "accepted", "intent": {"reason": "trend_entry"}, "at": "x"}),
+            json.dumps({"event": "accepted", "intent": {"reason": "desk_rebalance"},
+                        "side": "buy", "symbol": "QQQ", "notional": "1", "at": "2026-09-28T02:00:00+00:00"}),
+        ]
+        (journal / "2026-09-28.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (journal / "archive-2026-09-16-tif.jsonl").write_text(lines[0] + "\n", encoding="utf-8")
+        return journal
+
+    def test_it_keeps_only_desk_news_and_skips_broken_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            events = DeskEventCache(self._journal(Path(name))).read()
+        self.assertEqual([e["event"] for e in events], ["member_fill", "accepted"])
+
+    def test_an_unchanged_file_is_not_re_read(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            journal = self._journal(Path(name))
+            cache = DeskEventCache(journal)
+            first = cache.read()
+            from unittest import mock
+
+            with mock.patch("agentic_trading.dashboard_desk._relevant_events") as parse:
+                self.assertEqual(cache.read(), first)
+            parse.assert_not_called()
+
+    def test_a_missing_journal_dir_is_empty(self) -> None:
+        self.assertEqual(DeskEventCache(Path("/nonexistent/journal")).read(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

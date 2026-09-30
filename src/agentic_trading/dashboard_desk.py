@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any, Optional
 from agentic_trading.desk.allocator import MIN_SAMPLES, MemberRecord, allocate, min_t
 from agentic_trading.desk.benchmark import BENCHMARK_SHARES
 from agentic_trading.desk.book import MemberBook
+from agentic_trading.types import DESK_ORDER_REASON
 
 BENCHMARK = "benchmark"
 TICKER_SIZE = 30
@@ -193,11 +195,229 @@ def _trial_view(config: Any, now: datetime) -> Optional[dict[str, Any]]:
     }
 
 
+LAYERS = {"llm": "The AI veto", "regime": "The regime check", "jev": "The chase check"}
+TICKER_EVENTS = (
+    "member_fill",
+    "accepted",
+    "desk_allocation",
+    "advisory_overruled",
+    "desk_member_failed",
+    "selfcheck",
+    "kill_switch",
+)
+FRESH = timedelta(hours=6)
+
+
+def _money(value: Any) -> str:
+    number = _decimal(value)
+    return "$—" if number is None else f"${number:,.2f}"
+
+
+def _stamp(raw: Any) -> Optional[datetime]:
+    try:
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def _is_news(record: dict[str, Any]) -> bool:
+    event = record.get("event")
+    if event not in TICKER_EVENTS:
+        return False
+    if event == "accepted":
+        intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+        return intent.get("reason") == DESK_ORDER_REASON
+    if event == "selfcheck":
+        return record.get("healthy") is False
+    return True
+
+
+def ticker_item(record: dict[str, Any]) -> Optional[dict[str, str]]:
+    """One journal event as one plain-English line, or None if it is not news."""
+    if not _is_news(record):
+        return None
+    event = record["event"]
+    if event == "member_fill":
+        quantity, price = _decimal(record.get("quantity")), _decimal(record.get("price"))
+        notional = quantity * price if quantity is not None and price is not None else None
+        side = "bought" if str(record.get("side")).lower() == "buy" else "sold"
+        kind = "fill"
+        text = (
+            f"{label(str(record.get('member')))} {side} {record.get('symbol')} "
+            f"{_money(notional)} on paper"
+        )
+    elif event == "accepted":
+        side = "bought" if str(record.get("side")).lower() == "buy" else "sold"
+        where = "on paper" if record.get("mode") == "shadow" else "for real"
+        kind = "order"
+        text = (
+            f"Desk {side} {record.get('symbol')} {_money(record.get('notional'))} "
+            f"for the account, {where}"
+        )
+    elif event == "desk_allocation":
+        kind = "allocation"
+        if record.get("changed"):
+            weights = sorted(
+                (
+                    (str(name), _float(weight))
+                    for name, weight in (record.get("allocations") or {}).items()
+                ),
+                key=lambda pair: (-pair[1], pair[0]),
+            )
+            text = "New weekly allocation: " + ", ".join(
+                f"{label(name)} {weight:.0%}" for name, weight in weights if weight > 0
+            )
+        else:
+            text = "Weekly allocation checked: no change"
+    elif event == "advisory_overruled":
+        kind = "overruled"
+        text = (
+            f"{LAYERS.get(str(record.get('layer')), 'An advisor')} objected to "
+            f"{record.get('symbol')}; the desk followed its evidence"
+        )
+    elif event == "desk_member_failed":
+        kind = "error"
+        text = f"{label(str(record.get('member')))} hit an error and sits out today"
+    elif event == "selfcheck":
+        failures = record.get("failures") or []
+        first = failures[0].get("name") if failures and isinstance(failures[0], dict) else None
+        kind = "error"
+        text = f"Health check found a problem in {first or 'a check'}"
+    else:  # kill_switch
+        kind = "error"
+        text = "Kill switch engaged: trading stopped"
+    return {"at": str(record.get("at") or ""), "kind": kind, "text": text}
+
+
+def story(
+    members: list[dict[str, Any]],
+    allocation: Optional[dict[str, Any]],
+    account_value: Optional[float],
+    ticker: list[dict[str, str]],
+    *,
+    symbols: int,
+    now: datetime,
+) -> dict[str, str]:
+    """The three sentences on the left of the cockpit."""
+    bench = next((m for m in members if m.get("is_benchmark")), None)
+    racers = [m for m in members if not m.get("is_benchmark") and m.get("now_pct") is not None]
+    if bench is None or bench.get("now_pct") is None or not racers:
+        right_now = "The race starts when every book has its first prices."
+    else:
+        best = max(racers, key=lambda m: (m["now_pct"], m["name"]))
+        gap = round(best["now_pct"] - bench["now_pct"], 2)
+        right_now = (
+            f"{best['label']} is beating buy-and-hold by {gap:+.2f} points."
+            if gap > 0
+            else "No strategy is ahead of buy-and-hold yet; the closest is "
+            f"{best['label']} ({gap:+.2f} points)."
+        )
+
+    weights = (allocation or {}).get("weights") or {}
+    funded = sorted(
+        ((name, w) for name, w in weights.items() if name != BENCHMARK and w > 0),
+        key=lambda pair: (-pair[1], pair[0]),
+    )
+    if not weights:
+        money = "The desk has not made its first allocation yet."
+    elif funded:
+        parts = [f"{label(name)} {w:.0%}" for name, w in funded]
+        parts.append(f"buy-and-hold {weights.get(BENCHMARK, 0.0):.0%}")
+        money = "Capital follows the evidence: " + ", ".join(parts) + "."
+    else:
+        legs = ", ".join(
+            f"{float(share):.0%} {symbol.replace('-USD', '')}"
+            for symbol, share in BENCHMARK_SHARES.items()
+        )
+        amount = f"All {_money(account_value)}" if account_value is not None else "All the money"
+        furthest = max(
+            (int(m.get("samples") or 0) for m in members if not m.get("is_benchmark")),
+            default=0,
+        )
+        why = (
+            f"the furthest along has {furthest} of {MIN_SAMPLES} daily samples."
+            if furthest < MIN_SAMPLES
+            else "none has beaten buy-and-hold convincingly."
+        )
+        money = f"{amount} sits in buy-and-hold ({legs}). No strategy has earned capital yet: {why}"
+
+    fresh = [
+        item for item in ticker
+        if (stamp := _stamp(item.get("at"))) is not None and now - stamp <= FRESH
+    ]
+    just_now = (
+        fresh[0]["text"] + "."
+        if fresh
+        else f"Watching {symbols} symbols; nothing needs doing right now."
+    )
+    return {"right_now": right_now, "money": money, "just_now": just_now}
+
+
+def _relevant_events(path: Path) -> list[dict[str, Any]]:
+    """The ticker-worthy events of one journal file; broken lines are skipped."""
+    out: list[dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if not any(name in line for name in TICKER_EVENTS):
+            continue  # most lines are quotes and cycles; skip them unparsed
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and _is_news(record):
+            out.append(record)
+    return out
+
+
+class DeskEventCache:
+    """Desk news from the dated journals, re-read only from files that changed.
+
+    Old journals never change, so after the first read only today's file is
+    parsed again, and only when its size or modification time moved.
+    """
+
+    def __init__(self, journal_dir: Path | str) -> None:
+        self.journal_dir = Path(journal_dir)
+        self._files: dict[str, tuple[tuple[int, int], list[dict[str, Any]]]] = {}
+        self._lock = threading.Lock()
+
+    def read(self, *, days: int = 90) -> list[dict[str, Any]]:
+        try:
+            paths = sorted(
+                (p for p in self.journal_dir.glob("*.jsonl") if p.name[:1].isdigit()),
+                key=lambda p: p.name,
+            )[-days:]
+        except OSError:
+            return []
+        events: list[dict[str, Any]] = []
+        with self._lock:
+            for path in paths:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                stamp = (stat.st_mtime_ns, stat.st_size)
+                cached = self._files.get(path.name)
+                if cached is None or cached[0] != stamp:
+                    cached = (stamp, _relevant_events(path))
+                    self._files[path.name] = cached
+                events.extend(cached[1])
+        return events
+
+
 def build_desk_view(
     config: Any, events: list[dict[str, Any]], *, now: Optional[datetime] = None
 ) -> dict[str, Any]:
     """Everything the cockpit draws, from the desk's files and journal events."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    ticker = [
+        item for item in (ticker_item(record) for record in reversed(events)) if item
+    ][:TICKER_SIZE]
+    symbols = len(getattr(config, "effective_whitelist", ()) or ())
     if str(getattr(config, "strategy", "")) != "desk":
         return {
             "enabled": False,
@@ -207,8 +427,13 @@ def build_desk_view(
             "account": {"value": None, "series": []},
             "allocation": None,
             "trial": _trial_view(config, current),
-            "story": {},
-            "ticker": [],
+            "story": {
+                "right_now": "The cockpit follows the strategy desk; this bot runs "
+                f"{label(str(getattr(config, 'strategy', '')))} on its own.",
+                "money": "Its orders and positions are on the Orders tab.",
+                "just_now": story([], None, None, ticker, symbols=symbols, now=current)["just_now"],
+            },
+            "ticker": ticker,
         }
     desk_dir = Path(config.state_dir) / "desk"
     names = [str(name) for name in config.desk_members]
@@ -255,6 +480,6 @@ def build_desk_view(
         "account": account,
         "allocation": allocation,
         "trial": _trial_view(config, current),
-        "story": {},
-        "ticker": [],
+        "story": story(members, allocation, account["value"], ticker, symbols=symbols, now=current),
+        "ticker": ticker,
     }
