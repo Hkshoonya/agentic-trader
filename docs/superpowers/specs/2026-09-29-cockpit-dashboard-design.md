@@ -154,7 +154,7 @@ This endpoint is new, built by `dashboard_desk.py` (`build_desk_view(config, *, 
   - **right_now:** the leader against the benchmark, or "no strategy is ahead of buy-and-hold yet".
   - **money:** where capital sits and why, e.g. "No strategy has earned capital yet (4 of 20 daily samples)".
   - **just_now:** the newest ticker item, or "Watching N prices; nothing to do" when the last event is only a cycle.
-- **Not the desk.** When `config.strategy != "desk"` the response is `{"enabled": false, "equity": [...], "benchmark": [...]}`. The race then shows the account against the 60/40 benchmark over the account equity history.
+- **Not the desk.** When `config.strategy != "desk"` the response is `{"enabled": false, "strategy": ...}` with empty members. The cockpit still shows the story cards and the trial. The race says it follows the strategy desk and points to the Orders tab (no account-equity history exists to race).
 - **Missing or corrupt state.** Each missing or unreadable piece (a member file, `desk.json`, the trial) degrades to empty or null in the response and in its sentence. The endpoint never returns 500 for bad state.
 
 ### Refresh
