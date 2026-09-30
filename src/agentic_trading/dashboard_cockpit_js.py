@@ -132,7 +132,13 @@ const Cockpit = (() => {
       emptyRace(svg, W, H, 'The race fills in one point per day.');
       return;
     }
-    const pad = { l: 56, r: 180, t: 16, b: 24 };
+    // Labels and margins grow with the chart so a 4K screen is not read through
+    // a keyhole; below ~700px wide they stay at their designed size.
+    const u = Math.min(1.8, Math.max(1, Math.min(W / 700, H / 450)));
+    // On a phone-width chart full names would take most of it: short names
+    // ("Momentum", "Crypto") leave the lines the room.
+    const narrow = W < 520;
+    const pad = { l: (narrow ? 44 : 56) * u, r: narrow ? 128 : 180 * u, t: 16 * u, b: 24 * u };
     const sx = Charts.scale(0, Math.max(nowX, 1), pad.l, W - pad.r);
     const sy = Charts.scale(domain[0], domain[1], H - pad.b, pad.t);
     const colors = colorsFor(data.members);
@@ -142,8 +148,8 @@ const Cockpit = (() => {
     const zero = sy(0).toFixed(1);
     let out = '<line class="zero" x1="' + pad.l + '" x2="' + (W - pad.r) + '" y1="' + zero + '" y2="' + zero + '"/>';
     for (const v of [domain[1], 0, domain[0]]) {
-      out += '<text class="grid" x="' + (pad.l - 8) + '" y="' + (sy(v) + 4).toFixed(1)
-        + '" text-anchor="end">' + esc(CockpitFmt.pct(v)) + '</text>';
+      out += '<text class="grid" font-size="' + (11 * u).toFixed(1) + '" x="' + (pad.l - 8 * u).toFixed(1)
+        + '" y="' + (sy(v) + 4 * u).toFixed(1) + '" text-anchor="end">' + esc(CockpitFmt.pct(v)) + '</text>';
     }
     const ends = [];
     for (const { m, pts } of lines) {
@@ -156,14 +162,14 @@ const Cockpit = (() => {
       out += '<path class="hit" data-name="' + esc(m.name) + '" d="' + d + '"/>';
       const tip = pts[pts.length - 1];
       const x = sx(tip[0]), y = sy(tip[1]);
-      out += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="4.5" fill="' + colors[m.name] + '"'
+      out += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="' + (4.5 * u).toFixed(1) + '" fill="' + colors[m.name] + '"'
         + (m.name === leader ? ' class="lead"' : '') + '/>';
       ends.push({ m, x, y, value: tip[1] });
     }
-    const placed = CockpitFmt.spread(ends.map((e) => e.y), 16, pad.t + 6, H - pad.b);
+    const placed = CockpitFmt.spread(ends.map((e) => e.y), 16 * u, pad.t + 6 * u, H - pad.b);
     ends.forEach((e, i) => {
-      out += '<text class="end" x="' + (e.x + 10).toFixed(1) + '" y="' + (placed[i] + 4).toFixed(1)
-        + '" fill="' + colors[e.m.name] + '">' + esc(e.m.label + ' ' + CockpitFmt.pct(e.value)) + '</text>';
+      out += '<text class="end" font-size="' + (12 * u).toFixed(1) + '" x="' + (e.x + 10 * u).toFixed(1) + '" y="' + (placed[i] + 4 * u).toFixed(1)
+        + '" fill="' + colors[e.m.name] + '">' + esc((narrow ? e.m.label.split(' ')[0] : e.m.label) + ' ' + CockpitFmt.pct(e.value)) + '</text>';
     });
     svg.innerHTML = out;
   }
@@ -230,7 +236,7 @@ const Cockpit = (() => {
     if (spark) {
       const series = (account.series || []).slice(-30).map((p, i) => [i, p[1]]);
       const values = series.map((p) => p[1]).filter(Number.isFinite);
-      const W = spark.clientWidth || 200, H = 44;
+      const W = spark.clientWidth || 200, H = spark.clientHeight || 44;
       spark.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
       if (values.length > 1) {
         const d = Charts.linePath(series, Charts.scale(0, series.length - 1, 2, W - 2),
@@ -386,7 +392,22 @@ const Cockpit = (() => {
     setInterval(poll, 5000);
     setInterval(tick, 1000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
-    window.addEventListener('resize', () => { if (last) drawRace(last, raceDomain || [-1, 1], false); });
+    // The overview's height is the screen minus the header, and the header's
+    // height changes as its badges wrap, so it is measured, never assumed.
+    const head = document.querySelector('header');
+    const race = $('race');
+    if (window.ResizeObserver) {
+      if (head) {
+        const setHead = () => document.documentElement.style.setProperty('--head', head.offsetHeight + 'px');
+        new ResizeObserver(setHead).observe(head);
+        setHead();
+      }
+      // Redraw whenever the chart's own box changes: a window resize, a tab
+      // switch, or the header wrapping onto a second line.
+      if (race) new ResizeObserver(() => { if (last) { drawRace(last, raceDomain || [-1, 1], false); renderTiles(last); } }).observe(race);
+    } else {
+      window.addEventListener('resize', () => { if (last) drawRace(last, raceDomain || [-1, 1], false); });
+    }
   }
 
   return { start, poll };

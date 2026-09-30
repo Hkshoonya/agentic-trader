@@ -88,3 +88,26 @@ class CockpitPageTests(unittest.TestCase):
         self.assertIn("const Charts =", HTML)
         self.assertNotIn("__COCKPIT_CSS__", HTML)
         self.assertNotIn("__SCRIPT__", HTML)
+
+
+class CockpitSizingTests(unittest.TestCase):
+    """The cockpit adapts to the screen instead of assuming 1440x900.
+
+    It first shipped with fixed pixel type and ``height: calc(100vh - 160px)``:
+    tiny text and an empty band on a 2560 monitor, and a 150px race strip on a
+    laptop narrower than 1100px.
+    """
+
+    def test_the_overview_height_comes_from_the_measured_header(self) -> None:
+        self.assertNotIn("100vh - 160px", HTML)
+        self.assertIn("var(--head", HTML)
+        self.assertIn("ResizeObserver", HTML)
+
+    def test_type_scales_with_the_viewport(self) -> None:
+        for rule in (".say{font-size:clamp(", ".num{font-size:clamp(", ".item{", "clamp("):
+            self.assertIn(rule, HTML)
+
+    def test_a_stacked_layout_gives_the_race_a_real_height(self) -> None:
+        narrow = HTML.split("@media(max-width:1100px){", 1)[1].split("}}", 1)[0]
+        self.assertIn("#race{", narrow)
+        self.assertIn("height:clamp(", narrow)
