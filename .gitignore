@@ -31,3 +31,6 @@ windows/dist/
 config/agentic.toml.bak*
 .superpowers/
 .playwright-mcp/
+
+# Broker API keys (Alpaca, Coinbase): local only, mode 0600, never committed.
+config/secrets.toml
