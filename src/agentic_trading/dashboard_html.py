@@ -1,5 +1,7 @@
 """Embedded dashboard UI (no external assets, no CDN)."""
 
+from agentic_trading.dashboard_charts_js import CHARTS
+from agentic_trading.dashboard_css import CSS
 from agentic_trading.dashboard_js import SCRIPT
 
 _TEMPLATE = """<!doctype html>
@@ -86,7 +88,11 @@ tr:hover td{background:#151d28}
   .tablewrap{max-height:none}
 }
 .armbtn{background:#3a1f24;color:#ff5f6d;border:0;padding:8px 12px;font:600 13px -apple-system,'Segoe UI',Roboto,sans-serif;cursor:pointer;border-radius:6px}.armbtn:hover{background:#4a262c}
-</style></head>
+</style>
+<style>
+__COCKPIT_CSS__
+</style>
+</head>
 <body>
 <header><h1>Agentic Trader</h1>
 <span id="mode" class="badge shadow">shadow</span>
@@ -94,27 +100,42 @@ tr:hover td{background:#151d28}
 <span id="session" class="badge">session</span>
 <span id="armed" class="badge">arming…</span>
 <span id="kill" class="badge kill" style="display:none">kill switch</span>
-<span class="sub" id="generated"></span><span class="badge" id="pulse" style="display:none">—</span></header>
-<main>
-<div class="card span3"><h2>Account equity</h2><div class="metric" id="equity">—</div><div class="sub" id="equity-sub">—</div></div>
-<div class="card span3"><h2>Daily notional used</h2><div class="metric" id="notional">—</div><div class="sub" id="notional-sub">—</div></div>
-<div class="card span3"><h2>Checked / sent / refused</h2><div class="metric" id="trades">0</div><div class="sub" id="trades-sub">today (UTC — the strategy's day)</div></div>
-<div class="card span4"><h2>Runtime &amp; P&amp;L</h2><div id="account" class="sub">starting…</div></div>
-<div class="card span3"><h2>Order submission</h2><div id="arm" class="sub">checking…</div><div class="sub" id="arm-status"></div></div>
-<div class="card span3"><h2>Promotion streak</h2><div class="metric" id="streak">0</div><div class="sub" id="streak-sub">assessments to next stage</div><div class="gauge" style="margin-top:8px"><div id="streak-bar"></div></div></div>
-<div class="card span8"><h2>Decisions per day · accepted, placed, refused</h2><canvas id="chart"></canvas>
-  <div class="legend"><span><i class="dot buy"></i>placed/accepted</span><span><i class="dot sell"></i>refused</span><span class="sub" id="activity-note"></span></div></div>
-<div class="card span8"><h2>What sizing up costs · measured drawdown by per-order size</h2><canvas id="frontier"></canvas>
-  <div class="legend"><span><i class="dot buy"></i>inside the 15% ceiling</span><span><i class="dot sell"></i>above it</span><span><i class="line"></i>15% gate</span><span class="sub" id="frontier-note"></span></div></div>
-<div class="card span4"><h2>Promotion gate</h2><div id="gate"></div></div>
-<div class="card span12"><h2>Market &amp; order table</h2>
-  <div class="tablewrap"><table id="orders">
-    <thead><tr><th>time</th><th>status</th><th>what the checks said</th><th>symbol</th><th>side</th><th>type</th><th>session</th><th>size</th><th>value</th><th>price now</th><th>alerts</th><th>why</th></tr></thead>
-    <tbody><tr><td colspan="12" class="sub">no decisions yet</td></tr></tbody>
-  </table></div>
-  <div class="sub" id="orders-count"></div>
-  <div class="sub" id="orders-cadence"></div>
+<span class="netdot" id="netdot" title="connected"></span>
+<span class="sub" id="generated"></span><span class="badge" id="pulse" style="display:none">—</span>
+<nav class="tabs" id="tabs">
+  <button data-tab="overview" class="on">Overview</button>
+  <button data-tab="strategies">Strategies</button>
+  <button data-tab="orders">Orders</button>
+  <button data-tab="health">Health</button>
+</nav>
+<div class="armbox"><div id="arm" class="sub">checking…</div><span class="sub" id="arm-status"></span></div>
+</header>
+
+<section class="tab on" id="tab-overview">
+<div class="cockpit">
+  <div class="stories">
+    <div class="story"><div class="k">Right now</div><div class="say" id="say-now">Reading the desk…</div></div>
+    <div class="story money"><div class="k">Your money</div><div class="say" id="say-money">…</div></div>
+    <div class="story just"><div class="k">Just now</div><div class="say" id="say-just">…</div></div>
+  </div>
+  <div class="card race">
+    <div class="racehead"><h2>The race · every strategy against buy-and-hold</h2><span class="sub" id="race-trial"></span></div>
+    <svg id="race" role="img" aria-label="Each strategy's return against buy-and-hold"></svg>
+    <div class="tip" id="race-tip"></div>
+  </div>
+  <div class="tiles">
+    <div class="tile"><div class="k">Account</div><div class="num" id="t-account">—</div><svg id="t-spark"></svg></div>
+    <div class="tile ring"><div class="k">Trial</div><div class="num" id="t-trial">—</div><svg id="t-trial-ring" viewBox="0 0 100 100"></svg></div>
+    <div class="tile ring"><div class="k">Where the money is</div><svg id="t-money" viewBox="0 0 100 100"></svg><div class="sub" id="t-money-legend"></div></div>
+    <div class="tile"><div class="k">Next allocation</div><div class="num" id="t-next">—</div></div>
+  </div>
 </div>
+<div class="ticker" id="ticker"><div class="tape" id="tape"></div></div>
+</section>
+
+<section class="tab" id="tab-strategies">
+<main>
+<div class="card span12"><h2>Strategies · each one's paper record against buy-and-hold</h2><div id="members" class="members"><div class="sub">reading the desk…</div></div></div>
 <div class="card span12"><h2>Candidates · what the rule wants right now</h2>
   <div class="tablewrap"><table id="candidates">
     <thead><tr><th>symbol</th><th>how the price is moving</th><th>how wildly it moves</th><th>in the book</th><th>held back by</th><th>why</th></tr></thead>
@@ -129,15 +150,47 @@ tr:hover td{background:#151d28}
   </table></div>
   <div class="sub" id="universe-note"></div>
 </div>
-<div class="card span7"><h2>Live execution stream</h2><div id="stream"></div></div>
-<div class="card span5"><h2>Agents on duty</h2><div id="agents" class="sub">starting…</div><div id="alerts"></div><div id="health"></div></div>
-<div class="card span5"><h2>Evolution evidence</h2><div id="evolution" class="sub">no evolution run yet</div><div id="regimes"></div></div>
-<div class="card span12"><h2>Proposed changes · the evolution agent proposes, you decide</h2><div id="proposals" class="sub">nothing proposed yet</div></div>
+<div class="card span8"><h2>What sizing up costs · measured drawdown by per-order size</h2><canvas id="frontier"></canvas>
+  <div class="legend"><span><i class="dot buy"></i>inside the 15% ceiling</span><span><i class="dot sell"></i>above it</span><span><i class="line"></i>15% gate</span><span class="sub" id="frontier-note"></span></div></div>
+<div class="card span4"><h2>Promotion gate</h2><div id="gate"></div></div>
 <div class="card span12"><h2>Walk-forward evidence · what the order size is justified by</h2><div id="evidence" class="sub">no evidence report yet — run: agentic-trading walkforward --config config/agentic.toml</div></div>
+<div class="card span5"><h2>Evolution evidence</h2><div id="evolution" class="sub">no evolution run yet</div></div>
+<div class="card span7"><h2>Proposed changes · the evolution agent proposes, you decide</h2><div id="proposals" class="sub">nothing proposed yet</div></div>
 </main>
+</section>
+
+<section class="tab" id="tab-orders">
+<main>
+<div class="card span4"><h2>Account equity</h2><div class="metric" id="equity">—</div><div class="sub" id="equity-sub">—</div></div>
+<div class="card span4"><h2>Daily notional used</h2><div class="metric" id="notional">—</div><div class="sub" id="notional-sub">—</div></div>
+<div class="card span4"><h2>Checked / sent / refused</h2><div class="metric" id="trades">0</div><div class="sub" id="trades-sub">today (UTC — the strategy's day)</div></div>
+<div class="card span12"><h2>Market &amp; order table</h2>
+  <div class="tablewrap"><table id="orders">
+    <thead><tr><th>time</th><th>status</th><th>what the checks said</th><th>symbol</th><th>side</th><th>type</th><th>session</th><th>size</th><th>value</th><th>price now</th><th>alerts</th><th>why</th></tr></thead>
+    <tbody><tr><td colspan="12" class="sub">no decisions yet</td></tr></tbody>
+  </table></div>
+  <div class="sub" id="orders-count"></div>
+  <div class="sub" id="orders-cadence"></div>
+</div>
+<div class="card span7"><h2>Decisions per day · accepted, placed, refused</h2><canvas id="chart"></canvas>
+  <div class="legend"><span><i class="dot buy"></i>placed/accepted</span><span><i class="dot sell"></i>refused</span><span class="sub" id="activity-note"></span></div></div>
+<div class="card span5"><h2>Live execution stream</h2><div id="stream"></div></div>
+</main>
+</section>
+
+<section class="tab" id="tab-health">
+<main>
+<div class="card span7"><h2>Agents on duty</h2><div id="agents" class="sub">starting…</div><div id="alerts"></div><div id="health"></div></div>
+<div class="card span5"><h2>Runtime &amp; P&amp;L</h2><div id="account" class="sub">starting…</div></div>
+<div class="card span5"><h2>Promotion streak</h2><div class="metric" id="streak">0</div><div class="sub" id="streak-sub">assessments to next stage</div><div class="gauge" style="margin-top:8px"><div id="streak-bar"></div></div></div>
+<div class="card span7"><h2>Market regimes</h2><div id="regimes" class="sub">no regime read yet</div></div>
+</main>
+</section>
 <script>
 __SCRIPT__
 </script></body></html>
 """
 
-HTML = _TEMPLATE.replace("__SCRIPT__", SCRIPT)
+HTML = _TEMPLATE.replace("__COCKPIT_CSS__", CSS).replace(
+    "__SCRIPT__", CHARTS + "\n" + SCRIPT
+)

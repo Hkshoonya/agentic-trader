@@ -1353,9 +1353,27 @@ function renderOrders(data) {
   }).join('');
 }
 
-refresh();
+// Four tabs; the choice survives a reload. Canvas cards measure their width
+// when drawn, so a newly shown tab is redrawn at once, not after the next tick.
+function showTab(name) {
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('.tab').forEach((s) => s.classList.toggle('on', s.id === 'tab-' + name));
+  try { localStorage.setItem('tab', name); } catch (e) { /* storage blocked: default next time */ }
+  window.dispatchEvent(new Event('resize'));
+  refresh();
+}
+
+function initTabs() {
+  document.querySelectorAll('#tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+  let saved = 'overview';
+  try { saved = localStorage.getItem('tab') || 'overview'; } catch (e) { /* storage blocked */ }
+  if (!document.getElementById('tab-' + saved)) saved = 'overview';
+  showTab(saved);
+}
+
+initTabs();
 refreshCandidates();
-setInterval(refresh, 2000);
-setInterval(refreshCandidates, 30000);
+setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+setInterval(() => { if (!document.hidden) refreshCandidates(); }, 30000);
 window.addEventListener('resize', () => fetch('/api/equity').then(r => r.json()).then(drawChart));
 """
