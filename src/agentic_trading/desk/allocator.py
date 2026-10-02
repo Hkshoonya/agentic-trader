@@ -26,6 +26,26 @@ HYSTERESIS = 0.10
 # a winner by luck. min_t holds that family-wide rate as members are added.
 BASE_MEMBERS = 2
 
+# Members the desk judges but may not fund yet. Their trades happen on paper in
+# another process, and no live order path exists for them. Lifting this is a
+# code change in the live sub-project, never a config switch.
+UNFUNDED = frozenset({"switchboard"})
+
+
+def hold_unfunded(weights: dict[str, float], *, benchmark: str) -> tuple[dict[str, float], dict[str, float]]:
+    """Move unfunded members' weight to the benchmark; report what they would have earned."""
+    held = dict(weights)
+    would: dict[str, float] = {}
+    for name in sorted(UNFUNDED):
+        if name not in held:
+            continue
+        weight = held[name]
+        would[name] = round(weight, 6)
+        if weight > 0:
+            held[benchmark] = round(held.get(benchmark, 0.0) + weight, 6)
+            held[name] = 0.0
+    return held, would
+
 
 def min_t(members: int) -> float:
     """The t a member must beat when ``members`` non-benchmark members compete."""

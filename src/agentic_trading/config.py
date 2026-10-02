@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 DESK_MEMBER_NAMES = ("momentum_rotation", "trend_crypto", "benchmark")
 # Every member the desk can run; the default above is the launch line-up.
-DESK_MEMBER_CHOICES = DESK_MEMBER_NAMES + ("dip_reversal",)
+DESK_MEMBER_CHOICES = DESK_MEMBER_NAMES + ("dip_reversal", "switchboard")
 
 
 @dataclass(frozen=True)
