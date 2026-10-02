@@ -56,6 +56,21 @@ class FakeSource:
         self._stopped.set()
 
 
+
+class StubbornSource(FakeSource):
+    """Like the real SDKs at their worst: stop() raises (Alpaca before its loop
+    exists) and run() never returns (Coinbase after a clean close)."""
+
+    def run(self, emit):
+        self.runs += 1
+        for tick in self.steps.pop(0) if self.steps else []:
+            emit(tick)
+        threading.Event().wait(30)
+
+    def stop(self):
+        raise AttributeError("'NoneType' object has no attribute 'is_running'")
+
+
 class FakeVenue:
     def __init__(self, name="alpaca_paper", error=None):
         self.name, self.mode, self.error = name, "paper", error
@@ -71,7 +86,7 @@ def _tick(i=0):
     return Tick("alpaca", "SPY", Decimal("500"), Decimal("500.02"), None, None, at, at + timedelta(milliseconds=30))
 
 
-def _run(tmp: Path, sources, venues=None, *, seconds=0.4, now=None, stock_open=lambda t: True):
+def _run(tmp: Path, sources, venues=None, *, seconds=0.4, now=None, stock_open=lambda t: True, stop_grace=1.0):
     async def scenario():
         stop = asyncio.Event()
         asyncio.get_running_loop().call_later(seconds, stop.set)
@@ -80,6 +95,7 @@ def _run(tmp: Path, sources, venues=None, *, seconds=0.4, now=None, stock_open=l
             credentials=CREDS, venues=venues or {}, sources=sources, stop=stop,
             now=now or (lambda: T0), stock_open=stock_open, health_every=0.02, account_every=0.05,
             backoff_factory=lambda: Backoff(base=0.01, cap=0.02, jitter=0), rate_delay=0.01,
+            stop_grace=stop_grace,
         )
     asyncio.run(scenario())
     return json.loads((tmp / "state" / "venues.json").read_text())
@@ -96,6 +112,20 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(state["latest"]["alpaca:SPY"]["bid"], "500")
         self.assertEqual(state["streams"][0]["status"], "off")  # written on shutdown
+
+    def test_shutdown_finishes_even_when_a_source_ignores_stop(self) -> None:
+        import time
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            started = time.monotonic()
+            state = _run(tmp, [StubbornSource([[_tick(0)]]), FakeSource(["block"], key="coinbase", venue="coinbase")],
+                         stop_grace=0.2)
+            took = time.monotonic() - started
+            path = tmp / "stream" / "alpaca" / "SPY" / "2026-09-30.jsonl.gz"
+            self.assertTrue(path.exists())  # the recorder was flushed on the way out
+        self.assertLess(took, 5)
+        self.assertEqual({s["status"] for s in state["streams"]}, {"off"})
 
     def test_an_auth_failure_is_not_retried(self) -> None:
         with tempfile.TemporaryDirectory() as name:

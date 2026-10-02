@@ -7,6 +7,7 @@ window longer than a day) reads as disarmed: a live venue fails closed.
 
 from __future__ import annotations
 
+import getpass
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,7 +45,12 @@ def arm(
     if not 0 < float(hours) <= MAX_HOURS:
         raise ValueError(f"arm for more than 0 and at most {MAX_HOURS:g} hours")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    try:
+        who = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name (some containers): still arm
+        who = "unknown"
     record = {
+        "by": who,
         "armed_at": current.isoformat(),
         "until": (current + timedelta(hours=float(hours))).isoformat(),
     }

@@ -6,8 +6,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/home/doczeus/.local/bin/agentic-trading-venues
-Restart=always
+# on-failure: venues disabled (exit 0) or no keys (exit 2) stay stopped, not a 10 s loop.
+Restart=on-failure
+RestartPreventExitStatus=2
 RestartSec=10
+# shutdown flushes the recorder; streams that ignore stop are left after 5 s.
+TimeoutStopSec=20
 StandardOutput=append:/home/doczeus/Projects/Agnetic TraDING/data/state/venues.log
 StandardError=append:/home/doczeus/Projects/Agnetic TraDING/data/state/venues.log
 

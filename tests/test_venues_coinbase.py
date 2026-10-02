@@ -72,14 +72,89 @@ class StreamTests(unittest.TestCase):
             holder["ws"] = FakeWS(on_message, ["garbage", _message([BTC]), _message([BTC], channel="heartbeats")])
             return holder["ws"]
 
-        source = CoinbaseTicks(CREDS, ["BTC-USD"], client_factory=factory, clock=lambda: T0)
+        source = CoinbaseTicks(CREDS, ["BTC-USD"], client_factory=factory, clock=lambda: T0,
+                               poll_every=0.01)
         got = []
-        source.run(got.append)
+
+        def emit(tick):
+            got.append(tick)
+            source.stop()
+
+        holder_messages = ["garbage", _message([BTC]), _message([BTC], channel="heartbeats")]
+
+        def sdk_factory(creds, on_message):
+            holder["ws"] = SdkLikeWS(on_message, holder_messages)
+            return holder["ws"]
+
+        source._factory = sdk_factory
+        source.run(emit)
         self.assertEqual([t.symbol for t in got], ["BTC-USD"])
         self.assertEqual(holder["ws"].subscribed, (("BTC-USD",), ("ticker", "heartbeats")))
         self.assertEqual((source.key, source.venue, source.always_open), ("coinbase", "coinbase", True))
-        source.stop()
         self.assertTrue(holder["ws"].closed)
+
+
+
+class SdkLikeWS(FakeWS):
+    """Like the real WSClient: nothing returns on its own; messages arrive on
+    the SDK's thread, and errors surface only via raise_background_exception."""
+
+    def __init__(self, on_message, messages, error=None):
+        super().__init__(on_message, messages)
+        self.error = error
+
+    def subscribe(self, product_ids, channels):
+        super().subscribe(product_ids, channels)
+        for message in self.messages:
+            self.on_message(message)
+
+    def raise_background_exception(self):
+        if self.error:
+            raise self.error
+
+
+class StopAndSilenceTests(unittest.TestCase):
+    def _source(self, ws_holder, messages=(), error=None, **timing):
+        def factory(creds, on_message):
+            ws_holder["ws"] = SdkLikeWS(on_message, list(messages), error)
+            return ws_holder["ws"]
+
+        return CoinbaseTicks(CREDS, ["BTC-USD"], client_factory=factory, clock=lambda: T0, **timing)
+
+    def test_stop_ends_a_stream_the_sdk_would_never_end(self) -> None:
+        import threading
+
+        holder = {}
+        source = self._source(holder, [_message([BTC])], poll_every=0.01, silent_after=60)
+        got = []
+        thread = threading.Thread(target=source.run, args=(got.append,), daemon=True)
+        thread.start()
+        for _ in range(200):
+            if got:
+                break
+            threading.Event().wait(0.01)
+        source.stop()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(holder["ws"].closed)
+        self.assertEqual([t.symbol for t in got], ["BTC-USD"])
+
+    def test_a_stop_before_run_means_run_returns_at_once(self) -> None:
+        source = self._source({}, poll_every=0.01, silent_after=60)
+        source.stop()
+        source.run(lambda tick: None)  # returns instead of connecting
+
+    def test_a_silent_connection_raises_so_the_supervisor_reconnects(self) -> None:
+        holder = {}
+        source = self._source(holder, poll_every=0.01, silent_after=0.05)
+        with self.assertRaises(ConnectionError):
+            source.run(lambda tick: None)
+        self.assertTrue(holder["ws"].closed)  # the dead socket is not left open
+
+    def test_a_background_error_ends_the_run(self) -> None:
+        source = self._source({}, error=RuntimeError("socket died"), poll_every=0.01, silent_after=60)
+        with self.assertRaisesRegex(RuntimeError, "socket died"):
+            source.run(lambda tick: None)
 
 
 class FakeREST:

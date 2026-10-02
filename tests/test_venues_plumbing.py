@@ -121,3 +121,11 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(data["latest"]["alpaca_paper:SPY"]["bid"], "501")
         self.assertEqual(data["streams"][0]["status"], "live")
         self.assertEqual(data["venues"][0]["name"], "alpaca_paper")
+
+
+class ServiceUnitTests(unittest.TestCase):
+    def test_the_unit_neither_loops_when_off_nor_hangs_on_stop(self) -> None:
+        unit = (Path(__file__).resolve().parents[1] / "deploy" / "agentic-trading-venues.service").read_text()
+        self.assertIn("Restart=on-failure", unit)  # disabled (exit 0) stays stopped
+        self.assertIn("RestartPreventExitStatus=2", unit)  # missing keys: no 10 s loop
+        self.assertIn("TimeoutStopSec=", unit)

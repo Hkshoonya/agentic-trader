@@ -46,6 +46,13 @@ class ArmingTests(unittest.TestCase):
             arming.disarm(name, "alpaca_live")
             self.assertFalse(arming.is_armed(name, "alpaca_live", now=NOW))
 
+    def test_the_arm_record_says_who_armed_it(self) -> None:
+        import getpass
+
+        with tempfile.TemporaryDirectory() as name:
+            record = arming.arm(name, "coinbase", hours=1, now=NOW)
+        self.assertEqual(record["by"], getpass.getuser())
+
     def test_a_corrupt_or_hand_widened_arm_file_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             path = Path(name) / "venues_arm.json"
@@ -138,6 +145,17 @@ class PatternDayTraderTests(unittest.TestCase):
             guard.record_fill(_order("buy", "SPY"), notional=Decimal("5"), now=NOW)
             self.assertIn("day trade", _check(guard, _order("sell", "SPY")).reason)
             self.assertTrue(_check(guard, _order("sell", "SPY"), account=RICH).allowed)
+
+    def test_day_trades_the_broker_counted_elsewhere_count_too(self) -> None:
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as name:
+            arming.arm(name, "alpaca_live", hours=1, now=NOW)
+            guard = _guard(Path(name), "alpaca_live")  # no local history at all
+            guard.record_fill(_order("buy", "SPY"), notional=Decimal("5"), now=NOW)
+            busy = replace(SMALL, day_trades=3)  # made by hand or another tool
+            self.assertIn("day trade", _check(guard, _order("sell", "SPY"), account=busy).reason)
+            self.assertTrue(_check(guard, _order("sell", "SPY")).allowed)
 
     def test_crypto_and_paper_are_not_pattern_day_trading(self) -> None:
         with tempfile.TemporaryDirectory() as name:

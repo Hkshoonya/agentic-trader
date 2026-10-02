@@ -133,7 +133,8 @@ class VenueGuard:
             and order.side == "sell"
             and self._state["bought"].get(order.symbol) == self._state["day"]
             and account.equity < PDT_EQUITY
-            and self.day_trades_in_window(now) >= PDT_MAX_DAY_TRADES
+            # the broker's count also sees day trades made by hand or elsewhere
+            and max(account.day_trades, self.day_trades_in_window(now)) >= PDT_MAX_DAY_TRADES
         ):
             return Verdict(False, "would be a 4th day trade in 5 trading days under $25,000")
         return Verdict(True, "ok")

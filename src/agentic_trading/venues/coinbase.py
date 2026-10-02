@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
@@ -100,15 +102,30 @@ class CoinbaseTicks:
         *,
         client_factory: Optional[Callable[[Credentials, Callable[[str], None]], Any]] = None,
         clock: Optional[Callable[[], datetime]] = None,
+        poll_every: float = 1.0,
+        silent_after: float = 30.0,
     ) -> None:
         self.credentials = credentials
         self.symbols = tuple(products)
         self._factory = client_factory or _default_ws
         self._clock = clock or _now
-        self._client: Any = None
+        self.poll_every, self.silent_after = poll_every, silent_after
+        self._stopped = threading.Event()
 
     def run(self, emit: Emit) -> None:
+        """Stream until ``stop()``, a background error, or silence.
+
+        The SDK's ``run_forever_with_exception_check`` never returns after a
+        close, ours or the server's, so this loop owns the lifetime instead.
+        The heartbeats channel speaks every second, so a quiet socket is a
+        dead one: raising lets the supervisor reconnect it.
+        """
+        if self._stopped.is_set():
+            return
+        heard = [time.monotonic()]
+
         def on_message(message: str) -> None:
+            heard[0] = time.monotonic()
             try:
                 for tick in ticker_to_ticks(message, self._clock()):
                     emit(tick)
@@ -116,15 +133,21 @@ class CoinbaseTicks:
                 pass
 
         client = self._factory(self.credentials, on_message)
-        self._client = client
-        client.open()
-        client.subscribe(product_ids=list(self.symbols), channels=["ticker", "heartbeats"])
-        client.run_forever_with_exception_check()
+        try:
+            client.open()
+            client.subscribe(product_ids=list(self.symbols), channels=["ticker", "heartbeats"])
+            while not self._stopped.wait(self.poll_every):
+                client.raise_background_exception()
+                if time.monotonic() - heard[0] > self.silent_after:
+                    raise ConnectionError(f"no message from coinbase for {self.silent_after:g}s")
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 - already closed, or never opened
+                pass
 
     def stop(self) -> None:
-        client = self._client
-        if client is not None:
-            client.close()
+        self._stopped.set()  # run() notices within poll_every and closes the socket
 
 
 def _as_dict(response: Any) -> dict[str, Any]:

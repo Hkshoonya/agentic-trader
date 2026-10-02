@@ -120,25 +120,49 @@ def _settle(future: asyncio.Future, error: Optional[BaseException]) -> None:
         future.set_exception(error)
 
 
-async def _run_in_thread(source: Any, emit: Callable[[Tick], None]) -> None:
+async def _run_in_thread(source: Any, emit: Callable[[Tick], None], *,
+                         stop: asyncio.Event, grace: float) -> None:
+    """Run ``source.run`` on a daemon thread until it returns or ``stop`` is set.
+
+    After ``stop`` a source gets ``grace`` seconds to return. One that does
+    not (an SDK whose stop cannot reach its loop) is left behind on its daemon
+    thread, so shutdown can still flush the recorder and write final health.
+    """
     loop = asyncio.get_running_loop()
     done: asyncio.Future = loop.create_future()
+
+    def report(error: Optional[BaseException]) -> None:
+        try:
+            loop.call_soon_threadsafe(_settle, done, error)
+        except RuntimeError:  # the loop already closed: the source was left behind
+            pass
 
     def target() -> None:
         try:
             source.run(emit)
         except BaseException as exc:  # noqa: BLE001 - handed to the supervisor
-            loop.call_soon_threadsafe(_settle, done, exc)
+            report(exc)
         else:
-            loop.call_soon_threadsafe(_settle, done, None)
+            report(None)
 
     threading.Thread(target=target, name=f"venue-{source.key}", daemon=True).start()
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({done, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stopping.cancel()
+    if not done.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(done), grace)
+        except asyncio.TimeoutError:
+            done.add_done_callback(lambda f: f.cancelled() or f.exception())
+            return
     await done
 
 
 async def supervise(source: Any, *, deliver: Callable[[str, Tick], None], board: HealthBoard,
                     credentials: list[Credentials], stop: asyncio.Event, backoff: Backoff,
-                    rate_delay: float = 30.0, clock: Optional[Callable[[], datetime]] = None) -> None:
+                    rate_delay: float = 30.0, stop_grace: float = 5.0, clock: Optional[Callable[[], datetime]] = None) -> None:
     loop = asyncio.get_running_loop()
     clock = clock or _utcnow
     health = board.stream(source.key, source.venue, always_open=source.always_open)
@@ -150,7 +174,7 @@ async def supervise(source: Any, *, deliver: Callable[[str, Tick], None], board:
         seen_before = health.last_tick_at
         health.begin(clock())  # "reconnecting" covers only the wait before this
         try:
-            await _run_in_thread(source, emit)
+            await _run_in_thread(source, emit, stop=stop, grace=stop_grace)
             if stop.is_set():
                 break
             raise ConnectionError("stream ended")
@@ -177,7 +201,8 @@ async def run_venues(*, state_dir: Path | str, venues_config: Any, credentials: 
                      now: Optional[Callable[[], datetime]] = None,
                      stock_open: Callable[[datetime], bool] = stock_market_open,
                      health_every: float = 1.0, account_every: float = 30.0,
-                     backoff_factory: Callable[[], Backoff] = Backoff, rate_delay: float = 30.0) -> None:
+                     backoff_factory: Callable[[], Backoff] = Backoff, rate_delay: float = 30.0,
+                     stop_grace: float = 5.0) -> None:
     clock = now or _utcnow
     state_dir = Path(state_dir)
     creds = list(credentials.values())
@@ -224,19 +249,25 @@ async def run_venues(*, state_dir: Path | str, venues_config: Any, credentials: 
                                     last_error=redact(f"{type(exc).__name__}: {exc}", creds)[:200])
             await _wait(stop, account_every)
 
+    def stop_quietly(source: Any) -> None:
+        try:
+            source.stop()
+        except Exception:  # noqa: BLE001 - shutting down regardless
+            pass
+
     async def stopper() -> None:
         await stop.wait()
+        # SDK stops block (Coinbase joins its thread, Alpaca waits up to 5 s):
+        # never on the event loop, and never awaited, so none can stall shutdown.
         for source in sources:
-            try:
-                source.stop()
-            except Exception:  # noqa: BLE001 - shutting down regardless
-                pass
+            threading.Thread(target=stop_quietly, args=(source,), name=f"stop-{source.key}", daemon=True).start()
 
     try:
         await asyncio.gather(
             stopper(), record_loop(), health_loop(), account_loop(),
             *(supervise(s, deliver=deliver, board=board, credentials=creds, stop=stop,
-                        backoff=backoff_factory(), rate_delay=rate_delay, clock=clock) for s in sources),
+                        backoff=backoff_factory(), rate_delay=rate_delay, clock=clock,
+                        stop_grace=stop_grace) for s in sources),
         )
     finally:
         recorder.flush(now=clock())
