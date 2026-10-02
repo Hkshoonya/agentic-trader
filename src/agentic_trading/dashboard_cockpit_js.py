@@ -64,7 +64,19 @@ const CockpitFmt = (() => {
   // A daily sample is labelled with the UTC day that just closed, so it is the
   // value at the end of that day, not its start.
   const sampleTime = (day) => Date.parse(day) + 86400000;
-  return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime };
+  // The venues gateway's contribution to the header dot.
+  const venueLevel = (view) => {
+    if (!view || !view.enabled) return 'unknown';
+    const streams = view.streams || [], venues = view.venues || [];
+    if ([...streams, ...venues].some((x) => x.status === 'auth_failed')) return 'bad';
+    if (view.stale) return 'warn';
+    if (streams.some((s) => ['stale', 'reconnecting'].includes(s.status))) return 'warn';
+    if (venues.some((v) => v.status === 'error')) return 'warn';
+    return 'ok';
+  };
+  const RANK = { unknown: 0, ok: 1, warn: 2, bad: 3 };
+  const worst = (a, b) => ((RANK[a] || 0) >= (RANK[b] || 0) ? a : b);
+  return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst };
 })();
 
 const Cockpit = (() => {
@@ -378,18 +390,63 @@ const Cockpit = (() => {
     dot.title = ok ? healthTitle : 'reconnecting… (showing the last good picture)';
   }
 
-  function setHealth(summary) {
+  let lastSummary = null;
+  let lastVenues = null;
+
+  function applyDot() {
     const dot = $('netdot');
     if (!dot) return;
-    const level = CockpitFmt.healthLevel(summary);
+    const own = CockpitFmt.healthLevel(lastSummary);
+    const venues = CockpitFmt.venueLevel(lastVenues);
+    const level = CockpitFmt.worst(own, venues);
     ['ok', 'warn', 'bad', 'unknown'].forEach((c) => dot.classList.toggle(c, c === level));
-    const health = (summary && summary.health) || {};
+    const health = (lastSummary && lastSummary.health) || {};
     const names = (list) => (list || []).map((c) => c.name).join(', ');
-    healthTitle = level === 'bad'
-      ? (summary && summary.kill_switch ? 'kill switch engaged' : 'failing: ' + names(health.failures))
-      : level === 'warn' ? 'healthy, with warnings: ' + names(health.warnings)
-      : level === 'ok' ? 'every health check passed' : 'health unknown';
+    const parts = [];
+    if (own === 'bad') parts.push(lastSummary && lastSummary.kill_switch ? 'kill switch engaged' : 'failing: ' + names(health.failures));
+    else if (own === 'warn') parts.push('healthy, with warnings: ' + names(health.warnings));
+    else if (own === 'ok') parts.push('every health check passed');
+    if (venues === 'bad') parts.push('a venue login failed');
+    else if (venues === 'warn') parts.push('a venue stream is stale or reconnecting');
+    healthTitle = parts.join('; ') || 'health unknown';
     if (!dot.classList.contains('lost')) dot.title = healthTitle;
+  }
+
+  function setHealth(summary) {
+    lastSummary = summary;
+    applyDot();
+  }
+
+  function renderVenues(view) {
+    const box = $('venues');
+    if (!box) return;
+    if (!view || !view.enabled) {
+      box.innerHTML = '<div class="sub">' + esc((view && view.note) || 'the venues service is not running') + '</div>';
+      return;
+    }
+    const venueRows = (view.venues || []).map((v) => '<div class="vrow"><span class="vstat ' + esc(v.status) + '"></span><b>'
+      + esc(v.name) + '</b><span>' + esc(v.mode) + '</span><span>' + esc(v.armed ? 'ARMED' : 'disarmed') + '</span><span>'
+      + esc(v.equity ? '$' + Number(v.equity).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '') + '</span><span class="sub">'
+      + esc(v.last_error || v.status) + '</span></div>').join('');
+    const streamRows = (view.streams || []).map((s) => '<div class="vrow"><span class="vstat ' + esc(s.status) + '"></span><b>'
+      + esc(s.key) + '</b><span>' + esc(s.status) + '</span><span>' + esc(s.last_tick_age_s == null ? 'no tick yet' : 'last tick ' + s.last_tick_age_s + 's ago')
+      + '</span><span>' + esc(s.delay_ms_median == null ? '' : 'delay ' + s.delay_ms_median + ' ms (p95 ' + s.delay_ms_p95 + ')')
+      + '</span><span>' + esc('reconnects ' + s.reconnects) + '</span><span class="sub">' + esc(s.last_error || '') + '</span></div>').join('');
+    box.innerHTML = (view.stale ? '<div class="sub">' + esc('the venues service has not reported for a while') + '</div>' : '')
+      + venueRows + streamRows;
+  }
+
+  async function pollVenues() {
+    if (document.hidden) return;
+    try {
+      const response = await fetch('/api/venues');
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      lastVenues = await response.json();
+    } catch (e) {
+      lastVenues = null;  // unknown: the console itself may be restarting
+    }
+    renderVenues(lastVenues);
+    applyDot();
   }
 
   function render(data) {
@@ -435,6 +492,8 @@ const Cockpit = (() => {
     installRaceHover();
     poll();
     setInterval(poll, 5000);
+    pollVenues();
+    setInterval(pollVenues, 5000);
     setInterval(tick, 1000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
     // The overview's height is the screen minus the header, and the header's

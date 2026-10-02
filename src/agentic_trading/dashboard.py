@@ -27,6 +27,7 @@ from agentic_trading.arming import evaluate as evaluate_arm
 from agentic_trading.config import Config, load_config
 from agentic_trading.dashboard_desk import DeskEventCache, build_desk_view
 from agentic_trading.dashboard_html import HTML
+from agentic_trading.dashboard_venues import venues_view
 from agentic_trading.jsonio import dumps as json_dumps
 from agentic_trading.promotion import load_state
 from agentic_trading.runtime import effective_mode
@@ -1135,6 +1136,11 @@ class DashboardState:
                 "ticker": [],
             }
 
+    def venues(self) -> dict[str, Any]:
+        """The Alpaca/Coinbase gateway's health (``/api/venues``)."""
+        self.refresh_config()
+        return venues_view(self.state_dir)
+
     def orders_table(self, *, limit: int = 60) -> dict[str, Any]:
         """Every order the agent decided on today, newest first."""
         self.refresh_config()
@@ -1500,6 +1506,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/desk":
             self._json(self.state.desk())
+            return
+        if parsed.path == "/api/venues":
+            self._json(self.state.venues())
             return
         if parsed.path == "/api/activity":
             self._json(self.state.activity())

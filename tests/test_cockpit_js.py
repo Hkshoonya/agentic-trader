@@ -97,6 +97,20 @@ class CockpitFormatTests(unittest.TestCase):
         done = _node("new Function(require('fs').readFileSync(0, 'utf8'));", stdin=script)
         self.assertEqual(done.returncode, 0, done.stderr)
 
+    def test_venue_health_levels_and_the_worst_of_two(self) -> None:
+        self.assertEqual(
+            self.js("[CockpitFmt.venueLevel(null), CockpitFmt.venueLevel({enabled: false}),"
+                    " CockpitFmt.venueLevel({enabled: true, stale: false, streams: [{status: 'live'}, {status: 'closed'}], venues: [{status: 'ok'}]}),"
+                    " CockpitFmt.venueLevel({enabled: true, stale: false, streams: [{status: 'stale'}], venues: []}),"
+                    " CockpitFmt.venueLevel({enabled: true, stale: true, streams: [], venues: []}),"
+                    " CockpitFmt.venueLevel({enabled: true, stale: false, streams: [], venues: [{status: 'auth_failed'}]})]"),
+            ["unknown", "unknown", "ok", "warn", "warn", "bad"],
+        )
+        self.assertEqual(
+            self.js("[CockpitFmt.worst('ok', 'unknown'), CockpitFmt.worst('warn', 'ok'), CockpitFmt.worst('ok', 'bad')]"),
+            ["ok", "warn", "bad"],
+        )
+
 
 class CockpitPageWiringTests(unittest.TestCase):
     def test_every_element_the_cockpit_draws_into_exists(self) -> None:

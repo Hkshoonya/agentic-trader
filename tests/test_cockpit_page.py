@@ -89,6 +89,9 @@ class CockpitPageTests(unittest.TestCase):
         self.assertNotIn("__COCKPIT_CSS__", HTML)
         self.assertNotIn("__SCRIPT__", HTML)
 
+    def test_the_venues_card_is_on_the_health_tab(self) -> None:
+        self.assertIn('id="venues"', _section("health"))
+
 
 class CockpitSizingTests(unittest.TestCase):
     """The cockpit adapts to the screen instead of assuming 1440x900.

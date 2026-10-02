@@ -1191,6 +1191,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     dash_p.add_argument("--port", type=int, default=8787)
     dash_p.add_argument("--open", action="store_true", dest="open_browser")
 
+    from agentic_trading.venues.cli import add_venues_parser
+
+    add_venues_parser(sub)
+
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "run":
@@ -1290,6 +1294,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if result.get("configured") and not result.get("ok")
         ]
         return 1 if failed else 0
+    if args.command == "venues":
+        from agentic_trading.venues.cli import dispatch_venues
+
+        return dispatch_venues(args)
     if args.command == "dashboard":
         return cmd_dashboard(
             args.config, host=args.host, port=args.port, open_browser=args.open_browser
