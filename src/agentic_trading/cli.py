@@ -1200,6 +1200,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from agentic_trading.venues.cli import add_venues_parser
 
     add_venues_parser(sub)
+    from agentic_trading.fast.cli import add_fast_parser
+
+    add_fast_parser(sub)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -1304,6 +1307,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from agentic_trading.venues.cli import dispatch_venues
 
         return dispatch_venues(args)
+    if args.command == "fast":
+        from agentic_trading.fast.cli import dispatch_fast
+
+        return dispatch_fast(args)
     if args.command == "dashboard":
         return cmd_dashboard(
             args.config, host=args.host, port=args.port, open_browser=args.open_browser
