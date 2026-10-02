@@ -53,6 +53,16 @@ def _clean_secret(kind: str, value: str) -> str:
     return text
 
 
+def _is_placeholder(key: str, secret: str) -> bool:
+    """The example file's stand-ins ("PK...", "<org_id>", a "..." PEM body).
+
+    A copied template with an account left unfilled skips that account
+    instead of failing a login with the stand-in values.
+    """
+    body = [s for s in (line.strip() for line in secret.splitlines()) if s and not s.startswith("-----")]
+    return key.endswith("...") or "<" in key or all(line == "..." for line in body)
+
+
 def load_credentials(
     path: Path, *, env: Optional[Mapping[str, str]] = None
 ) -> dict[str, Credentials]:
@@ -71,9 +81,9 @@ def load_credentials(
         for kind in KINDS:
             table = raw.get(kind)
             if isinstance(table, dict) and table.get("key") and table.get("secret"):
-                found[kind] = Credentials(
-                    kind, str(table["key"]).strip(), _clean_secret(kind, table["secret"])
-                )
+                key, secret = str(table["key"]).strip(), _clean_secret(kind, table["secret"])
+                if not _is_placeholder(key, secret):
+                    found[kind] = Credentials(kind, key, secret)
     for kind, (key_name, secret_name) in ENV.items():
         if kind not in found and env.get(key_name) and env.get(secret_name):
             found[kind] = Credentials(

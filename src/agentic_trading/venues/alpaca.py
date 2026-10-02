@@ -9,6 +9,8 @@ end the stream.
 
 from __future__ import annotations
 
+import logging
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
@@ -64,6 +66,39 @@ def trade_to_tick(trade: Any, venue: str, received_at: datetime) -> Optional[Tic
     return Tick(venue, str(symbol), None, None, price, _dec(getattr(trade, "size", None)), at, received_at)
 
 
+class _LoginRefused(logging.Filter):
+    """Spots a refused stream login, which the SDK only logs, then retries forever.
+
+    The record is dropped (one traceback per retry would fill the service log)
+    and the stream is stopped from a helper thread, so ``run`` returns and the
+    supervisor can mark the stream ``auth_failed`` instead of retrying.
+    """
+
+    WORDS = ("auth failed", "failed to authenticate")
+
+    def __init__(self, stream: Any) -> None:
+        super().__init__()
+        self.stream = stream
+        self.thread = threading.get_ident()  # the SDK logs from the thread running it
+        self.refused = False
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.thread != self.thread:
+            return True
+        if not any(word in record.getMessage().lower() for word in self.WORDS):
+            return True
+        if not self.refused:
+            self.refused = True
+            threading.Thread(target=self._stop, daemon=True).start()
+        return False
+
+    def _stop(self) -> None:
+        try:
+            self.stream.stop()
+        except Exception:  # noqa: BLE001 - run() ends on its own when the loop does
+            pass
+
+
 class _AlpacaTicks:
     key = ""
     always_open = False
@@ -112,7 +147,15 @@ class _AlpacaTicks:
 
         stream.subscribe_quotes(on_quote, *self.symbols)
         stream.subscribe_trades(on_trade, *self.symbols)
-        stream.run()
+        refused = _LoginRefused(stream)
+        sdk_log = logging.getLogger("alpaca.data.live.websocket")
+        sdk_log.addFilter(refused)
+        try:
+            stream.run()
+        finally:
+            sdk_log.removeFilter(refused)
+        if refused.refused:
+            raise PermissionError("alpaca data stream login failed: auth failed")
 
     def stop(self) -> None:
         stream = self._stream

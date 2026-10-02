@@ -75,6 +75,18 @@ class LoadTests(unittest.TestCase):
             self.assertEqual(load_credentials(path, env={}), {})
 
 
+    def test_the_template_placeholders_count_as_absent(self) -> None:
+        # A copied template with one account still unfilled must skip that
+        # account, not try (and fail) to log in with "PK..." / "...".
+        template = (Path(__file__).resolve().parents[1] / "config" / "secrets.example.toml").read_text()
+        filled = template.replace('key = "AK..."', 'key = "AKREALKEY00000000WXYZ"', 1).replace(
+            'secret = "..."', 'secret = "realsecret-0000000000"', 2).replace(
+            'secret = "realsecret-0000000000"', 'secret = "..."', 1)
+        with tempfile.TemporaryDirectory() as name:
+            creds = load_credentials(_write(Path(name), filled), env={})
+            self.assertEqual(set(creds), {"alpaca_live"})
+            self.assertEqual(load_credentials(_write(Path(name), template), env={}), {})
+
 class ShowingTests(unittest.TestCase):
     def test_repr_and_str_show_only_the_key_tail(self) -> None:
         cred = Credentials("alpaca_paper", PAPER_KEY, PAPER_SECRET)

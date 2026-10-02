@@ -111,6 +111,49 @@ class StreamTests(unittest.TestCase):
         self.assertTrue(source.always_open)
 
 
+class RefusingStream(FakeStream):
+    """Behaves like the SDK on a bad key: logs a traceback and retries until stopped."""
+
+    def run(self):
+        import logging
+        import time
+
+        log = logging.getLogger("alpaca.data.live.websocket")
+        log.error("error during websocket communication: connection reset")
+        for _ in range(500):
+            if self.stopped:
+                return
+            try:
+                raise ValueError("auth failed")
+            except ValueError as e:
+                log.exception(f"error during websocket communication: {e}")
+            time.sleep(0.01)
+
+
+class LoginRefusedTests(unittest.TestCase):
+    def test_a_refused_stream_login_is_an_auth_error_without_tracebacks(self) -> None:
+        import logging
+
+        from agentic_trading.venues.alpaca import AlpacaStockTicks
+        from agentic_trading.venues.daemon import classify_error
+
+        fake = RefusingStream()
+        source = AlpacaStockTicks(CREDS, ["SPY"], stream_factory=lambda c: fake, clock=lambda: T0)
+        seen: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda record: seen.append(record.getMessage())
+        log = logging.getLogger("alpaca.data.live.websocket")
+        log.addHandler(handler)
+        try:
+            with self.assertRaises(PermissionError) as caught:
+                source.run(lambda tick: None)
+        finally:
+            log.removeHandler(handler)
+        self.assertTrue(fake.stopped)
+        self.assertEqual(classify_error(caught.exception), "auth")
+        self.assertEqual(seen, ["error during websocket communication: connection reset"])
+        self.assertEqual(log.filters, [])  # nothing left behind for the next run
+
 class FakeTradingClient:
     def __init__(self):
         self.submitted = []
