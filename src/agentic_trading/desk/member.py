@@ -128,3 +128,18 @@ class Member:
                 }
             )
         return events
+
+
+class _Silent:
+    """The strategy of a member that trades elsewhere: it never asks for orders here."""
+
+    def on_quote(self, quote: dict[str, Any]) -> list[Any]:
+        return []
+
+
+class ReadOnlyMember(Member):
+    """A desk member whose trading happens in another process (the switchboard
+    runs inside the venues service). The desk judges its book and never trades for it."""
+
+    def __init__(self, name: str, book: MemberBook) -> None:
+        super().__init__(name, _Silent(), book, order_pct=Decimal("0"))

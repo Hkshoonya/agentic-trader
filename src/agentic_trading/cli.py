@@ -321,9 +321,9 @@ def build_desk(config: Config) -> Any:
     """The strategy desk, with every member's book and state under state/desk."""
     from agentic_trading import trial
     from agentic_trading.desk.benchmark import BenchmarkStrategy
-    from agentic_trading.desk.book import MemberBook
+    from agentic_trading.desk.book import MemberBook, ReadOnlyBook
     from agentic_trading.desk.desk import StrategyDesk
-    from agentic_trading.desk.member import Member
+    from agentic_trading.desk.member import Member, ReadOnlyMember
     from agentic_trading.evidence import _current_equity
     from agentic_trading.execution import cost_model_for
     from agentic_trading.journal import DecisionJournal
@@ -347,6 +347,12 @@ def build_desk(config: Config) -> Any:
     equity = _current_equity(config.state_dir)
     members = []
     for name in config.desk_members:
+        if name == "switchboard":  # trades in the venues service; the desk only reads its book
+            book, reset = ReadOnlyBook.load(desk_dir / f"{name}.json", name=name, starting_equity=equity)
+            if reset:
+                journal.append({"event": "desk_member_reset", "member": name})
+            members.append(ReadOnlyMember(name, book))
+            continue
         if name == "benchmark":
             strategy: Any = BenchmarkStrategy()
         else:
@@ -1194,6 +1200,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from agentic_trading.venues.cli import add_venues_parser
 
     add_venues_parser(sub)
+    from agentic_trading.fast.cli import add_fast_parser
+
+    add_fast_parser(sub)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -1298,6 +1307,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from agentic_trading.venues.cli import dispatch_venues
 
         return dispatch_venues(args)
+    if args.command == "fast":
+        from agentic_trading.fast.cli import dispatch_fast
+
+        return dispatch_fast(args)
     if args.command == "dashboard":
         return cmd_dashboard(
             args.config, host=args.host, port=args.port, open_browser=args.open_browser

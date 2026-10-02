@@ -244,3 +244,23 @@ class MemberBook:
             return cls(name, starting_equity=starting_equity, path=path), True
         book.is_new = False
         return book, False
+
+
+class ReadOnlyBook(MemberBook):
+    """A member book another process owns: the switchboard's, written by the
+    venues service. The desk reads it, and never marks or writes it."""
+
+    def mark(self, prices: dict[str, Decimal], stamp: datetime) -> bool:
+        return False
+
+    def save(self) -> None:
+        return None
+
+    def refresh(self) -> None:
+        """Re-read the owner's latest file. An unreadable file reads as empty."""
+        if self.path is None:
+            return
+        fresh, _ = MemberBook.load(self.path, name=self.name, starting_equity=self.starting_equity)
+        for key, value in vars(fresh).items():
+            if key != "path":
+                setattr(self, key, value)
