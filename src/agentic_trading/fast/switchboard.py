@@ -1,0 +1,276 @@
+"""The switchboard: for each coin, read the market, pick a playbook, act on each price.
+
+A paper desk member that runs inside the venues service:
+* It reads each coin's market once a minute (regime.py). On every price, it
+  lets that regime's playbooks propose an entry.
+* It keeps an open trade with the playbook that opened it until that
+  playbook's own exit fires.
+* Fills come from PaperFiller: the real ask or bid, 250 ms after the
+  decision, plus the Alpaca fee. A CoinbaseMirror copies each fill at
+  Coinbase prices for comparison.
+
+Every rule here is about not paying fees for nothing. It stands aside unless
+the market is trending or squeezed, and enters only when the expected move is
+several times the round-trip cost. It enters on no price that follows 30 s of
+silence, stops entering for the day after a 3% loss, and cools down after
+each exit.
+
+The time base is each tick's ``received_at``, so a replay of recorded ticks
+makes the same decisions the live run made.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from typing import Any, Callable, Optional, Sequence
+
+from agentic_trading.desk.book import MemberBook
+from agentic_trading.fast.bars import Bar, MinuteBars
+from agentic_trading.fast.fills import Fill, Order, PaperFiller, usable_quote
+from agentic_trading.fast.mirror import CoinbaseMirror
+from agentic_trading.fast.playbooks import ENTRIES, Plan, Trade, exit_reason
+from agentic_trading.fast.regime import STAND_ASIDE, WARMING, read_regime
+from agentic_trading.fast.settings import FastConfig
+from agentic_trading.venues.model import Tick
+
+STALE_AFTER = timedelta(seconds=30)
+CENT = Decimal("0.01")
+
+
+@dataclass(frozen=True)
+class Event:
+    kind: str
+    symbol: str
+    at: datetime
+    text: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def to_record(self) -> dict[str, Any]:
+        return {"at": self.at.isoformat(), "event": self.kind, "symbol": self.symbol,
+                "text": self.text, **self.data}
+
+
+def tick_price(tick: Tick) -> Optional[Decimal]:
+    """The mid of a usable quote, else a positive trade price, else None."""
+    if usable_quote(tick):
+        return (tick.bid + tick.ask) / 2
+    if tick.last is not None and tick.last > 0:
+        return tick.last
+    return None
+
+
+def _book_view(book: MemberBook) -> dict[str, Any]:
+    start, equity = book.starting_equity, book.equity
+    return {
+        "equity": str(equity.quantize(CENT)),
+        "return_pct": round(float(equity / start - 1) * 100, 3) if start > 0 else None,
+        "entries": book.entries,
+        "exits": book.exits,
+    }
+
+
+class Switchboard:
+    def __init__(
+        self,
+        config: FastConfig,
+        book: MemberBook,
+        *,
+        mirror: Optional[CoinbaseMirror] = None,
+        regime_reader: Callable[[Sequence[Bar]], str] = read_regime,
+    ) -> None:
+        self.config = config
+        self.book = book
+        self.mirror = mirror
+        self.read_regime = regime_reader
+        self.fee = float(config.alpaca_fee)
+        self.filler = PaperFiller(book, config.alpaca_fee, delay=timedelta(milliseconds=config.fill_delay_ms))
+        self.bars = MinuteBars()
+        self.regimes: dict[str, str] = {symbol: WARMING for symbol in config.symbols}
+        self.trades: dict[str, Trade] = {}
+        self.entering: dict[str, Plan] = {}
+        self.exiting: dict[str, str] = {}
+        self.cooldown_until: dict[str, datetime] = {}
+        self.quotes: dict[str, Tick] = {}
+        self.last_seen: dict[str, datetime] = {}
+        self.skipped: dict[str, int] = {}
+        self._skip_minute: dict[str, datetime] = {}
+        self.skipped_total = 0
+        self.day = ""
+        self.day_start_equity = book.equity
+        self.halted_day = ""
+
+    # -- the tick path -----------------------------------------------------
+
+    def on_tick(self, tick: Tick) -> list[Event]:
+        if tick.venue == "coinbase":
+            if self.mirror is not None:
+                self.mirror.on_tick(tick)
+            return []
+        if tick.venue != "alpaca" or tick.symbol not in self.config.symbols:
+            return []
+        price = tick_price(tick)
+        if price is None:
+            return []
+        symbol, now = tick.symbol, tick.received_at
+        previous = self.last_seen.get(symbol)
+        self.last_seen[symbol] = now
+        if usable_quote(tick):
+            self.quotes[symbol] = tick
+        events = self._roll_day(now)
+        self.book.mark({symbol: price}, now)
+        if self.mirror is not None:
+            self.mirror.mark(symbol, price, now)
+        for fill in self.filler.on_tick(tick):
+            events.extend(self._on_fill(fill))
+        if self.bars.add(symbol, float(price), tick.exchange_at) is not None:
+            events.extend(self._on_bar(symbol, now))
+        value = float(price)
+        trade = self.trades.get(symbol)
+        if trade is not None:
+            if symbol not in self.exiting:
+                reason = exit_reason(trade, self.bars.closed(symbol), value)
+                if reason:
+                    self.exiting[symbol] = reason
+                    self.filler.submit(Order(symbol, "sell", now, quantity=trade.quantity))
+        elif symbol not in self.entering:
+            if previous is not None and now - previous <= STALE_AFTER:
+                events.extend(self._consider_entry(symbol, value, now))
+        return events
+
+    def _roll_day(self, now: datetime) -> list[Event]:
+        day = now.astimezone(timezone.utc).date().isoformat()
+        if day != self.day:
+            self.day = day
+            self.day_start_equity = self.book.equity
+        start = self.day_start_equity
+        if self.halted_day != day and start > 0 and self.book.equity <= start * (1 - self.config.daily_loss_stop):
+            self.halted_day = day
+            drop = float(1 - self.book.equity / start) * 100
+            return [Event("fast_halted", "*", now,
+                          f"The switchboard is down {drop:.1f}% today: no new entries until tomorrow (UTC)",
+                          {"drop_pct": round(drop, 2)})]
+        return []
+
+    def _on_bar(self, symbol: str, now: datetime) -> list[Event]:
+        events: list[Event] = []
+        regime = self.read_regime(self.bars.closed(symbol))
+        was = self.regimes.get(symbol, WARMING)
+        if regime != was:
+            self.regimes[symbol] = regime
+            events.append(Event("fast_regime", symbol, now, f"{symbol} is now {regime} (was {was})",
+                                {"regime": regime, "was": was}))
+        count = self.skipped.pop(symbol, 0)
+        if count:
+            noun = "setup" if count == 1 else "setups"
+            events.append(Event(
+                "fast_skipped", symbol, now,
+                f"{symbol}: {count} {noun} skipped by the cost gate "
+                f"(expected move under {self.config.cost_gate_multiple}x the round-trip cost)",
+                {"count": count}))
+        return events
+
+    def _consider_entry(self, symbol: str, price: float, now: datetime) -> list[Event]:
+        regime = self.regimes.get(symbol, WARMING)
+        if regime in STAND_ASIDE or self.halted_day == self.day:
+            return []
+        if now < self.cooldown_until.get(symbol, now):
+            return []
+        if len(self.trades) + len(self.entering) >= self.config.max_positions:
+            return []
+        quote = self.quotes.get(symbol)
+        if quote is None:
+            return []
+        bars = self.bars.closed(symbol)
+        plan = next((p for _, entry in ENTRIES.get(regime, ()) if (p := entry(bars, price)) is not None), None)
+        if plan is None:
+            return []
+        round_trip = 2 * self.fee * price + float(quote.ask - quote.bid)
+        if plan.expected_move < float(self.config.cost_gate_multiple) * round_trip:
+            minute = now.replace(second=0, microsecond=0)
+            if self._skip_minute.get(symbol) != minute:  # one count per coin per minute
+                self._skip_minute[symbol] = minute
+                self.skipped[symbol] = self.skipped.get(symbol, 0) + 1
+                self.skipped_total += 1
+            return []
+        notional = min(self.book.equity / self.config.max_positions, self.book.cash)
+        self.entering[symbol] = plan
+        self.filler.submit(Order(symbol, "buy", now, notional=notional))
+        return []
+
+    def _on_fill(self, fill: Fill) -> list[Event]:
+        symbol, now = fill.symbol, fill.at
+        if fill.side == "buy":
+            plan = self.entering.pop(symbol, None)
+            if plan is None:
+                return []
+            if fill.quantity <= 0:
+                return [Event("fast_unfilled", symbol, now,
+                              f"{symbol}: the {plan.playbook} entry was too small for the book to fill",
+                              {"playbook": plan.playbook})]
+            entry = float(fill.price)
+            self.trades[symbol] = Trade(symbol, plan.playbook, entry, plan.stop, plan.target,
+                                        fill.quantity, now, entry)
+            if self.mirror is not None:
+                self.mirror.copy(fill, now)
+            quote = self.quotes.get(symbol)
+            spread = float((quote.ask - quote.bid) / quote.ask) if quote is not None else 0.0
+            cost_pct = (2 * self.fee + spread) * 100
+            move_pct = plan.expected_move / entry * 100
+            regime = self.regimes.get(symbol, WARMING)
+            text = (f"Bought ${float(fill.price * fill.quantity):,.2f} of {symbol} at {fill.price} "
+                    f"({plan.playbook}, {regime}): stop {plan.stop:,.2f}, expecting {move_pct:+.2f}% "
+                    f"against {cost_pct:.2f}% round-trip cost")
+            return [Event("fast_entry", symbol, now, text, {
+                "playbook": plan.playbook, "regime": regime, "price": str(fill.price),
+                "quantity": str(fill.quantity), "stop": round(plan.stop, 6),
+                "target": None if plan.target is None else round(plan.target, 6),
+                "expected_move_pct": round(move_pct, 3), "cost_pct": round(cost_pct, 3),
+            })]
+        reason = self.exiting.pop(symbol, "exit")
+        trade = self.trades.pop(symbol, None)
+        if trade is None:
+            return []
+        self.cooldown_until[symbol] = now + timedelta(minutes=self.config.cooldown_minutes)
+        if fill.quantity <= 0:
+            return [Event("fast_unfilled", symbol, now, f"{symbol}: the exit found nothing to sell",
+                          {"playbook": trade.playbook})]
+        if self.mirror is not None:
+            self.mirror.copy(fill, now)
+        net = float(fill.price) * (1 - self.fee) / (trade.entry * (1 + self.fee)) - 1
+        net_pct = round(net * 100, 3)
+        text = f"Sold {symbol} at {fill.price} ({reason}, {trade.playbook}): {net_pct:+.2f}% after fees"
+        return [Event("fast_exit", symbol, now, text, {
+            "playbook": trade.playbook, "reason": reason, "price": str(fill.price),
+            "quantity": str(fill.quantity), "net_pct": net_pct,
+        })]
+
+    # -- reporting -----------------------------------------------------------
+
+    def status(self) -> dict[str, Any]:
+        coins = []
+        for symbol in self.config.symbols:
+            regime = self.regimes.get(symbol, WARMING)
+            trade = self.trades.get(symbol)
+            row: dict[str, Any] = {"symbol": symbol, "regime": regime,
+                                   "standing_aside": trade is None and regime in STAND_ASIDE, "trade": None}
+            if trade is not None:
+                price = self.book.prices.get(symbol.upper())
+                row["trade"] = {
+                    "playbook": trade.playbook, "entry": trade.entry, "stop": round(trade.stop, 6),
+                    "target": None if trade.target is None else round(trade.target, 6),
+                    "pnl_pct": None if price is None else round((float(price) / trade.entry - 1) * 100, 3),
+                    "opened_at": trade.opened_at.isoformat(),
+                }
+            coins.append(row)
+        mirror = None
+        if self.mirror is not None:
+            mirror = {**_book_view(self.mirror.book), "unpriced": self.mirror.unpriced}
+        return {
+            "coins": coins,
+            "book": _book_view(self.book),
+            "mirror": mirror,
+            "skipped": self.skipped_total,
+            "halted": bool(self.day) and self.halted_day == self.day,
+        }
