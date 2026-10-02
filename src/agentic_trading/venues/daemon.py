@@ -202,13 +202,15 @@ async def run_venues(*, state_dir: Path | str, venues_config: Any, credentials: 
                      stock_open: Callable[[datetime], bool] = stock_market_open,
                      health_every: float = 1.0, account_every: float = 30.0,
                      backoff_factory: Callable[[], Backoff] = Backoff, rate_delay: float = 30.0,
-                     stop_grace: float = 5.0) -> None:
+                     stop_grace: float = 5.0, engine: Optional[Any] = None,
+                     fast_status_every: float = 1.0, fast_save_every: float = 10.0) -> None:
     clock = now or _utcnow
     state_dir = Path(state_dir)
     creds = list(credentials.values())
     board, bus = HealthBoard(), TickBus()
     recorder = StreamRecorder(venues_config.stream_dir)
     queue = bus.subscribe()
+    fast_queue = bus.subscribe() if engine is not None else None
     health_path = state_dir / "venues.json"
     for name, venue in venues.items():
         board.set_venue(name, mode=venue.mode, status="starting")
@@ -249,6 +251,29 @@ async def run_venues(*, state_dir: Path | str, venues_config: Any, credentials: 
                                     last_error=redact(f"{type(exc).__name__}: {exc}", creds)[:200])
             await _wait(stop, account_every)
 
+    async def fast_loop() -> None:
+        """The switchboard's own subscriber: a slow strategy drops only its own ticks."""
+        if engine is None or fast_queue is None:
+            return
+        loop = asyncio.get_running_loop()
+        next_status = next_save = loop.time()
+        while not (stop.is_set() and fast_queue.empty()):
+            try:
+                tick = await asyncio.wait_for(fast_queue.get(), timeout=0.2)
+            except asyncio.TimeoutError:
+                tick = None
+            if tick is not None:
+                engine.on_tick(tick)
+            moment = loop.time()
+            if moment >= next_status:
+                engine.write_status(clock())
+                board.set_venue("switchboard", mode="paper", status="error" if engine.failed else "ok",
+                                last_error=engine.failed)
+                next_status = moment + fast_status_every
+            if moment >= next_save:
+                engine.save()
+                next_save = moment + fast_save_every
+
     def stop_quietly(source: Any) -> None:
         try:
             source.stop()
@@ -264,12 +289,17 @@ async def run_venues(*, state_dir: Path | str, venues_config: Any, credentials: 
 
     try:
         await asyncio.gather(
-            stopper(), record_loop(), health_loop(), account_loop(),
+            stopper(), record_loop(), health_loop(), account_loop(), fast_loop(),
             *(supervise(s, deliver=deliver, board=board, credentials=creds, stop=stop,
                         backoff=backoff_factory(), rate_delay=rate_delay, clock=clock,
                         stop_grace=stop_grace) for s in sources),
         )
     finally:
+        if engine is not None:
+            engine.save()
+            engine.write_status(clock())
+            board.set_venue("switchboard", mode="paper", status="error" if engine.failed else "ok",
+                            last_error=engine.failed)
         recorder.flush(now=clock())
         for stream in board.streams.values():
             if stream.status != "auth_failed":
@@ -299,6 +329,22 @@ def main_run(config_path: str) -> int:
         print("venues: no keys for any enabled venue; see config/secrets.example.toml")
         return 2
 
+    from agentic_trading.fast.service import FastEngine, fast_problem
+    from agentic_trading.fast.settings import load_fast_config
+
+    try:
+        fast_config = load_fast_config(config_path)
+    except ValueError as exc:
+        print(f"fast: {exc}")
+        return 2
+    engine = None
+    if fast_config.enabled:
+        problem = fast_problem(fast_config, venues_config, sources)
+        if problem:
+            print(f"fast: {problem}")
+            return 2
+        engine = FastEngine(fast_config, state_dir=config.state_dir, journal_dir=config.journal_dir)
+
     async def main() -> None:
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -308,7 +354,7 @@ def main_run(config_path: str) -> int:
             except NotImplementedError:  # Windows: Ctrl+C raises KeyboardInterrupt instead
                 pass
         await run_venues(state_dir=config.state_dir, venues_config=venues_config, credentials=credentials,
-                         venues=venues, sources=sources, stop=stop)
+                         venues=venues, sources=sources, stop=stop, engine=engine)
 
     try:
         asyncio.run(main())
