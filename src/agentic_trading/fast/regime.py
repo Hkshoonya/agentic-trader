@@ -14,7 +14,6 @@ cost eats every small win.
 from __future__ import annotations
 
 import math
-import statistics
 from typing import Sequence
 
 from agentic_trading.fast.bars import Bar
@@ -37,9 +36,39 @@ def efficiency_ratio(closes: Sequence[float]) -> float:
     return 0.0 if path == 0 else abs(closes[-1] - closes[0]) / path
 
 
+def _log_returns(closes: Sequence[float]) -> list[float]:
+    return [math.log(b / a) if a > 0 and b > 0 else 0.0 for a, b in zip(closes, closes[1:])]
+
+
 def realized_vol(closes: Sequence[float]) -> float:
-    returns = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
-    return statistics.pstdev(returns) if len(returns) >= 2 else 0.0
+    """Population standard deviation of log returns, in floats.
+
+    ``statistics.pstdev`` computes with exact fractions: about 0.3 ms a window,
+    which made each minute's reading ~15 ms on the venues event loop and a
+    90-day replay take hours.
+    """
+    returns = _log_returns(closes)
+    if len(returns) < 2:
+        return 0.0
+    mean = math.fsum(returns) / len(returns)
+    return math.sqrt(math.fsum((r - mean) ** 2 for r in returns) / len(returns))
+
+
+def _rolling_vols(closes: Sequence[float], window: int) -> list[float]:
+    """``realized_vol`` of each ``window``-close slice ending at len, len-10, ... (prefix sums)."""
+    returns = _log_returns(closes)
+    s1, s2 = [0.0], [0.0]
+    for r in returns:
+        s1.append(s1[-1] + r)
+        s2.append(s2[-1] + r * r)
+    vols = []
+    for end in range(len(closes), window - 1, -VOL_STEP):
+        lo, hi = end - window, end - 1  # the window's returns are [lo, hi)
+        n = hi - lo
+        mean = (s1[hi] - s1[lo]) / n
+        variance = (s2[hi] - s2[lo]) / n - mean * mean
+        vols.append(math.sqrt(variance) if variance > 0 else 0.0)
+    return vols
 
 
 def read_regime(bars: Sequence[Bar]) -> str:
@@ -48,8 +77,8 @@ def read_regime(bars: Sequence[Bar]) -> str:
     closes = [bar.close for bar in bars]
     window = ER_BARS + 1  # 30 moves need 31 closes
     if len(closes) >= SQUEEZE_HISTORY:
-        now = realized_vol(closes[-window:])
-        history = [realized_vol(closes[i - window:i]) for i in range(len(closes), window - 1, -VOL_STEP)]
+        history = _rolling_vols(closes, window)
+        now = history[0]
         if now > 0 and sum(1 for v in history if v < now) / len(history) < SQUEEZE_SHARE:
             return SQUEEZE
     ratio = efficiency_ratio(closes[-window:])

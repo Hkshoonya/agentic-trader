@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from agentic_trading.fast.bars import MinuteBars
 from agentic_trading.fast.regime import (
-    CHOPPY, SQUEEZE, TRENDING, UNCLEAR, WARMING, efficiency_ratio, read_regime,
+    CHOPPY, SQUEEZE, TRENDING, UNCLEAR, WARMING, efficiency_ratio, read_regime, realized_vol,
 )
 from tests.fast_support import T0, bars_from
 
@@ -62,3 +62,25 @@ class RegimeTests(unittest.TestCase):
         wild = [100 + 2 * (i % 2) for i in range(260)]
         calm = [100 + 0.01 * (i % 2) for i in range(40)]
         self.assertEqual(read_regime(bars_from(wild + calm)), SQUEEZE)
+
+
+class SpeedTests(unittest.TestCase):
+    def test_volatility_matches_the_textbook_and_a_full_day_reads_in_milliseconds(self) -> None:
+        import math
+        import statistics
+        import time
+
+        closes = [100 + 3 * math.sin(i / 7) + (i % 5) * 0.1 for i in range(1440)]
+        returns = [math.log(b / a) for a, b in zip(closes, closes[1:])]
+        self.assertAlmostEqual(realized_vol(closes[-31:]), statistics.pstdev(returns[-30:]), places=12)
+        bars = bars_from(closes)
+        best = min(self._time(bars, time) for _ in range(3))
+        # The switchboard reads every coin once a minute on the venues event loop,
+        # and a 90-day replay does it ~390,000 times: it must take milliseconds.
+        self.assertLess(best, 0.010)
+
+    @staticmethod
+    def _time(bars, time) -> float:
+        start = time.perf_counter()
+        read_regime(bars)
+        return time.perf_counter() - start
