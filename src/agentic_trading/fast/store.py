@@ -54,7 +54,7 @@ class FastStore:
                     raise ValueError("not an object")
                 state = raw
             except (OSError, ValueError):
-                self._aside(self.engine_path, now, notes)
+                self.move_aside(self.engine_path, now, notes)
         return book, mirror, state, notes
 
     def save(self, board: Any) -> None:
@@ -66,11 +66,11 @@ class FastStore:
     def _book(self, path: Path, name: str, equity: Decimal, now: datetime, notes: list[str]) -> MemberBook:
         book, broken = MemberBook.load(path, name=name, starting_equity=equity)
         if broken:
-            self._aside(path, now, notes)
+            self.move_aside(path, now, notes)
         return book
 
     @staticmethod
-    def _aside(path: Path, now: datetime, notes: list[str]) -> None:
+    def move_aside(path: Path, now: datetime, notes: list[str]) -> None:
         target = path.with_name(f"{path.name}.corrupt-{now:%Y%m%dT%H%M%SZ}")
         try:
             path.rename(target)

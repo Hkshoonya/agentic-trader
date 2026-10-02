@@ -21,6 +21,7 @@ makes the same decisions the live run made.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -184,11 +185,19 @@ class Switchboard:
         if quote is None:
             return []
         bars = self.bars.closed(symbol)
-        plan = next((p for _, entry in ENTRIES.get(regime, ()) if (p := entry(bars, price)) is not None), None)
+        gate = float(self.config.cost_gate_multiple) * (2 * self.fee * price + float(quote.ask - quote.bid))
+        plan, proposed = None, False
+        for _, entry in ENTRIES.get(regime, ()):  # each playbook's plan is gated on its own merits
+            candidate = entry(bars, price)
+            if candidate is None:
+                continue
+            proposed = True
+            if candidate.expected_move >= gate:
+                plan = candidate
+                break
         if plan is None:
-            return []
-        round_trip = 2 * self.fee * price + float(quote.ask - quote.bid)
-        if plan.expected_move < float(self.config.cost_gate_multiple) * round_trip:
+            if not proposed:
+                return []
             minute = now.replace(second=0, microsecond=0)
             if self._skip_minute.get(symbol) != minute:  # one count per coin per minute
                 self._skip_minute[symbol] = minute
@@ -268,12 +277,35 @@ class Switchboard:
         managed as ``recovered`` with a 2% stop and target, so it is never
         left unmanaged.
         """
+        if not isinstance(state, dict):
+            raise ValueError("the engine state is not an object")
+        if state.get("version", 1) != 1:
+            raise ValueError(f"unknown engine state version {state.get('version')!r}")
+        raw_trades, raw_cooldowns = state.get("trades") or [], state.get("cooldown_until") or {}
+        if not isinstance(raw_trades, list) or not isinstance(raw_cooldowns, dict):
+            raise ValueError("the engine state has the wrong shape")
+        cooldowns: dict[str, datetime] = {}
+        for symbol, raw in raw_cooldowns.items():
+            at = datetime.fromisoformat(str(raw))
+            if at.tzinfo is None:
+                raise ValueError("a cooldown time has no timezone")
+            cooldowns[str(symbol)] = at
+        try:
+            day_start = Decimal(str(state.get("day_start_equity", self.book.equity)))
+        except ArithmeticError:
+            raise ValueError("day_start_equity is not a number") from None
+        if not day_start.is_finite() or day_start < 0:
+            raise ValueError("day_start_equity is not a usable number")
+        skipped_total = int(state.get("skipped_total") or 0)
         trades: dict[str, Trade] = {}
-        for raw in state.get("trades") or []:
+        for raw in raw_trades:
             try:
                 trade = Trade.from_dict(raw)
             except (KeyError, TypeError, ValueError, ArithmeticError):
                 continue
+            numbers = [trade.entry, trade.stop, trade.high] + ([] if trade.target is None else [trade.target])
+            if not all(math.isfinite(n) and n > 0 for n in numbers) or trade.opened_at.tzinfo is None:
+                continue  # unusable: its holding (if any) is recovered below
             held = self.book.positions.get(trade.symbol.upper(), Decimal("0"))
             if trade.symbol in self.config.symbols and held > 0:
                 trade.quantity = held
@@ -289,21 +321,11 @@ class Switchboard:
                                 f"{symbol}: a holding with no saved trade is now managed with a "
                                 f"{RECOVER_BAND:.0%} stop and target", {"quantity": str(held)}))
         self.trades = trades
-        for symbol, raw in (state.get("cooldown_until") or {}).items():
-            try:
-                self.cooldown_until[str(symbol)] = datetime.fromisoformat(str(raw))
-            except ValueError:
-                continue
+        self.cooldown_until.update(cooldowns)
         self.day = str(state.get("day") or "")
-        try:
-            self.day_start_equity = Decimal(str(state.get("day_start_equity", self.book.equity)))
-        except ArithmeticError:
-            self.day_start_equity = self.book.equity
+        self.day_start_equity = day_start
         self.halted_day = str(state.get("halted_day") or "")
-        try:
-            self.skipped_total = int(state.get("skipped_total") or 0)
-        except (TypeError, ValueError):
-            self.skipped_total = 0
+        self.skipped_total = skipped_total
         return events
 
     # -- reporting -----------------------------------------------------------

@@ -65,9 +65,17 @@ class FastEngine:
         self.recent: deque[dict[str, Any]] = deque(maxlen=RECENT)
         self.failed = ""
         self.save_error = ""
+        try:
+            restored = self.board.restore(state, current)
+        except (ValueError, TypeError, ArithmeticError, AttributeError, KeyError):
+            # A malformed (or future-version) engine file: never a crash. Move it aside,
+            # start the engine state fresh, and still recover any holdings in the book.
+            self.store.move_aside(self.store.engine_path, current, notes)
+            self.board = Switchboard(config, book, mirror=CoinbaseMirror(mirror_book, config.coinbase_fee))
+            restored = self.board.restore({}, current)
         for note in notes:
             self._record({"at": current.isoformat(), "event": "fast_reset", "symbol": "*", "text": note})
-        for event in self.board.restore(state, current):
+        for event in restored:
             self._record(event.to_record())
 
     def on_tick(self, tick: Tick) -> None:
@@ -94,6 +102,8 @@ class FastEngine:
             self.save_error = ""
         except OSError as exc:
             self.save_error = f"could not save: {exc.strerror}"
+        except Exception as exc:  # noqa: BLE001 - a state bug must not reach the feeds
+            self._fail(exc, "saving")
 
     def status(self, now: datetime) -> dict[str, Any]:
         return {
@@ -107,9 +117,22 @@ class FastEngine:
 
     def write_status(self, now: datetime) -> None:
         try:
-            jsonio.write_text(self.state_dir / "fast.json", jsonio.dumps(self.status(now), indent=2) + "\n")
+            payload = self.status(now)
+        except Exception as exc:  # noqa: BLE001 - a reporting bug must not reach the feeds
+            self._fail(exc, "reporting")
+            payload = {"enabled": True, "as_of": now.isoformat(), "failed": self.failed, "coins": [],
+                       "recent": list(reversed(self.recent))}
+        try:
+            jsonio.write_text(self.state_dir / "fast.json", jsonio.dumps(payload, indent=2) + "\n")
         except OSError:
             pass  # the console shows the file as stale; the switchboard keeps trading
+
+    def _fail(self, exc: BaseException, doing: str) -> None:
+        if self.failed:
+            return
+        self.failed = f"{type(exc).__name__} while {doing}: {exc}"[:200]
+        self._record({"at": datetime.now(timezone.utc).isoformat(), "event": "fast_failed", "symbol": "*",
+                      "text": f"The switchboard stopped: {self.failed}"})
 
     def _record(self, record: dict[str, Any]) -> None:
         self.recent.append(record)

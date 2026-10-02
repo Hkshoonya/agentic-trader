@@ -175,3 +175,29 @@ class MirrorAndStatusTests(unittest.TestCase):
         self.assertEqual(status["mirror"]["unpriced"], 0)
         self.assertIsNotNone(status["book"]["return_pct"])
         self.assertTrue(status["coins"][1]["standing_aside"])  # ETH is still warming
+
+
+class GateEachPlanTests(unittest.TestCase):
+    def _entries(self, breakout_move, pullback_move):
+        from agentic_trading.fast.playbooks import Plan
+        return {TRENDING: (
+            ("breakout", lambda bars, price: Plan("breakout", price - 1, None, breakout_move)),
+            ("pullback", lambda bars, price: Plan("pullback", price - 1, price + 10, pullback_move)),
+        )}
+
+    def test_a_passing_plan_is_taken_when_an_earlier_one_fails_the_gate(self) -> None:
+        from unittest.mock import patch
+        board = _board()
+        _seed(board)
+        with patch.dict("agentic_trading.fast.switchboard.ENTRIES", self._entries(0.01, 10.0), clear=True):
+            _enter(board)
+        self.assertEqual(board.trades["BTC/USD"].playbook, "pullback")
+        self.assertEqual(board.skipped_total, 0)
+
+    def test_a_skip_is_counted_only_when_every_plan_fails(self) -> None:
+        from unittest.mock import patch
+        board = _board()
+        _seed(board)
+        with patch.dict("agentic_trading.fast.switchboard.ENTRIES", self._entries(0.01, 0.02), clear=True):
+            _enter(board)
+        self.assertEqual((board.trades, board.skipped_total), ({}, 1))

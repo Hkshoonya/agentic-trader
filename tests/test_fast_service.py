@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -93,3 +94,56 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("DOGE/USD", fast_problem(FastConfig(enabled=True, symbols=("BTC/USD", "DOGE/USD")), venues, crypto))
         self.assertIn("Alpaca crypto stream", fast_problem(BTC_ONLY, venues, [NS(key="coinbase")]))
         self.assertEqual(fast_problem(BTC_ONLY, venues, crypto), "")
+
+
+class HardeningTests(unittest.TestCase):
+    def test_an_error_while_reporting_stops_only_the_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            engine = _engine(tmp)
+
+            def boom():
+                raise ZeroDivisionError("division by zero in a status line")
+
+            engine.board.status = boom
+            state = _run(tmp, engine)  # must return, not raise
+            recorded = (tmp / "stream" / "alpaca" / "BTCUSD" / "2026-10-05.jsonl.gz").exists()
+        self.assertEqual(_row(state)["status"], "error")
+        self.assertIn("ZeroDivisionError", _row(state)["last_error"])
+        self.assertTrue(recorded)
+
+    def test_a_malformed_engine_file_is_moved_aside_and_the_engine_starts(self) -> None:
+        cases = {
+            "cooldowns as a list": {"version": 1, "cooldown_until": [1, 2]},
+            "a future version": {"version": 2},
+            "a naive cooldown time": {"version": 1, "cooldown_until": {"BTC/USD": "2026-10-05T12:00:00"}},
+            "a NaN day equity": {"version": 1, "day_start_equity": "NaN"},
+        }
+        for label, state in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as name:
+                tmp = Path(name)
+                (tmp / "state" / "fast").mkdir(parents=True)
+                (tmp / "state" / "fast" / "engine.json").write_text(json.dumps(state))
+                engine = _engine(tmp)
+                moved = list((tmp / "state" / "fast").glob("engine.json.corrupt-*"))
+                engine.on_tick(quote("BTC/USD", 100, 100.1, T0))
+                self.assertEqual(engine.failed, "")
+                self.assertEqual(len(moved), 1)
+                self.assertEqual(engine.recent[0]["event"], "fast_reset")
+
+    def test_a_saved_trade_with_a_zero_entry_is_dropped_and_its_holding_recovered(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            engine = _engine(tmp)
+            engine.board.book.positions = {"BTC/USD": Decimal("0.1")}
+            engine.board.book.prices = {"BTC/USD": Decimal("100")}
+            engine.save()
+            bad = {"symbol": "BTC/USD", "playbook": "breakout", "entry": 0, "stop": 0, "target": None,
+                   "quantity": "0.1", "opened_at": T0.isoformat(), "high": 0}
+            state = json.loads((tmp / "state" / "fast" / "engine.json").read_text())
+            state["trades"] = [bad]
+            (tmp / "state" / "fast" / "engine.json").write_text(json.dumps(state))
+            again = _engine(tmp)
+            again.write_status(T0)
+        self.assertEqual(again.board.trades["BTC/USD"].playbook, "recovered")
+        self.assertEqual(again.failed, "")
