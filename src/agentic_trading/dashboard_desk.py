@@ -28,6 +28,7 @@ LABELS = {
     "momentum_rotation": "Momentum rotation",
     "trend_crypto": "Crypto trend",
     "dip_reversal": "Dip buyer",
+    "switchboard": "Switchboard",
     "benchmark": "Buy-and-hold",
 }
 
@@ -209,6 +210,8 @@ TICKER_EVENTS = (
     "desk_member_failed",
     "selfcheck",
     "kill_switch",
+    "fast_entry",
+    "fast_exit",
 )
 FRESH = timedelta(hours=6)
 
@@ -297,6 +300,9 @@ def ticker_item(record: dict[str, Any]) -> Optional[dict[str, str]]:
         )
         kind = "error"
         text = f"Health check found a problem in {first or 'a check'}"
+    elif event in ("fast_entry", "fast_exit"):
+        kind = "fast"
+        text = str(record.get("text") or "")[:200]
     else:  # kill_switch
         kind = "error"
         text = "Kill switch engaged: trading stopped"
@@ -411,9 +417,10 @@ class DeskEventCache:
     def read(self, *, days: int = 90) -> list[dict[str, Any]]:
         try:
             paths = sorted(
-                (p for p in self.journal_dir.glob("*.jsonl") if p.name[:1].isdigit()),
-                key=lambda p: p.name,
-            )[-days:]
+                (p for p in self.journal_dir.glob("*.jsonl")
+                 if p.name[:1].isdigit() or p.name.startswith("fast-")),
+                key=lambda p: p.name.removeprefix("fast-"),
+            )[-2 * days:]
         except OSError:
             return []
         events: list[dict[str, Any]] = []
@@ -429,6 +436,8 @@ class DeskEventCache:
                     cached = (stamp, _relevant_events(path))
                     self._files[path.name] = cached
                 events.extend(cached[1])
+        # The trader's and the switchboard's journals interleave: order by time.
+        events.sort(key=lambda record: str(record.get("at") or ""))
         return events
 
 

@@ -111,6 +111,27 @@ class CockpitFormatTests(unittest.TestCase):
             ["ok", "warn", "bad"],
         )
 
+    def test_switchboard_words(self) -> None:
+        self.assertEqual(
+            self.js("[CockpitFmt.regimeWord('choppy'), CockpitFmt.regimeWord('trending'), CockpitFmt.regimeWord('odd')]"),
+            ["choppy · standing aside", "trending", "unknown"],
+        )
+        self.assertEqual(
+            self.js("CockpitFmt.fastCompare({book: {return_pct: 0.42}, mirror: {return_pct: -0.31, unpriced: 2}})"),
+            "the same trades: +0.42% at Alpaca, −0.31% at Coinbase (2 not copied)",
+        )
+        self.assertEqual(self.js("CockpitFmt.fastCompare({book: {return_pct: null}})"), "no trades yet")
+        self.assertEqual(
+            self.js("[CockpitFmt.fundedBadge(null), CockpitFmt.fundedBadge(0.42)]"),
+            ["judged only — not yet funded", "judged only — not yet funded · would earn 42%"],
+        )
+        self.assertEqual(
+            self.js("[CockpitFmt.tradeLine({standing_aside: true, trade: null}),"
+                    " CockpitFmt.tradeLine({standing_aside: false, trade: null}),"
+                    " CockpitFmt.tradeLine({trade: {playbook: 'breakout', entry: 105.2, stop: 99.2, pnl_pct: 0.5}})]"),
+            ["standing aside", "watching for a setup", "breakout open at 105.2 · stop 99.2 · +0.50%"],
+        )
+
 
 class CockpitPageWiringTests(unittest.TestCase):
     def test_every_element_the_cockpit_draws_into_exists(self) -> None:
