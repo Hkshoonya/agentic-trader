@@ -34,3 +34,4 @@ config/agentic.toml.bak*
 
 # Broker API keys (Alpaca, Coinbase): local only, mode 0600, never committed.
 config/secrets.toml
+data/stream/
