@@ -30,12 +30,13 @@ from agentic_trading.desk.book import MemberBook
 from agentic_trading.fast.bars import Bar, MinuteBars
 from agentic_trading.fast.fills import Fill, Order, PaperFiller, usable_quote
 from agentic_trading.fast.mirror import CoinbaseMirror
-from agentic_trading.fast.playbooks import ENTRIES, Plan, Trade, exit_reason
+from agentic_trading.fast.playbooks import ENTRIES, RECOVERED, Plan, Trade, exit_reason
 from agentic_trading.fast.regime import STAND_ASIDE, WARMING, read_regime
 from agentic_trading.fast.settings import FastConfig
 from agentic_trading.venues.model import Tick
 
 STALE_AFTER = timedelta(seconds=30)
+RECOVER_BAND = 0.02
 CENT = Decimal("0.01")
 
 
@@ -245,6 +246,65 @@ class Switchboard:
             "playbook": trade.playbook, "reason": reason, "price": str(fill.price),
             "quantity": str(fill.quantity), "net_pct": net_pct,
         })]
+
+    # -- persistence ----------------------------------------------------------
+
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "trades": [trade.to_dict() for trade in self.trades.values()],
+            "cooldown_until": {s: at.isoformat() for s, at in self.cooldown_until.items()},
+            "day": self.day,
+            "day_start_equity": str(self.day_start_equity),
+            "halted_day": self.halted_day,
+            "skipped_total": self.skipped_total,
+        }
+
+    def restore(self, state: dict[str, Any], now: datetime) -> list[Event]:
+        """Pick up where a saved run left off. The book is the truth for holdings.
+
+        A saved trade with no holding behind it is dropped. A holding with no
+        saved trade (a crash between the book save and the engine save) is
+        managed as ``recovered`` with a 2% stop and target, so it is never
+        left unmanaged.
+        """
+        trades: dict[str, Trade] = {}
+        for raw in state.get("trades") or []:
+            try:
+                trade = Trade.from_dict(raw)
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                continue
+            held = self.book.positions.get(trade.symbol.upper(), Decimal("0"))
+            if trade.symbol in self.config.symbols and held > 0:
+                trade.quantity = held
+                trades[trade.symbol] = trade
+        events: list[Event] = []
+        for symbol, held in self.book.positions.items():
+            price = float(self.book.prices.get(symbol) or 0)
+            if symbol in trades or symbol not in self.config.symbols or held <= 0 or price <= 0:
+                continue
+            trades[symbol] = Trade(symbol, RECOVERED, price, price * (1 - RECOVER_BAND),
+                                   price * (1 + RECOVER_BAND), held, now, price)
+            events.append(Event("fast_recovered", symbol, now,
+                                f"{symbol}: a holding with no saved trade is now managed with a "
+                                f"{RECOVER_BAND:.0%} stop and target", {"quantity": str(held)}))
+        self.trades = trades
+        for symbol, raw in (state.get("cooldown_until") or {}).items():
+            try:
+                self.cooldown_until[str(symbol)] = datetime.fromisoformat(str(raw))
+            except ValueError:
+                continue
+        self.day = str(state.get("day") or "")
+        try:
+            self.day_start_equity = Decimal(str(state.get("day_start_equity", self.book.equity)))
+        except ArithmeticError:
+            self.day_start_equity = self.book.equity
+        self.halted_day = str(state.get("halted_day") or "")
+        try:
+            self.skipped_total = int(state.get("skipped_total") or 0)
+        except (TypeError, ValueError):
+            self.skipped_total = 0
+        return events
 
     # -- reporting -----------------------------------------------------------
 
