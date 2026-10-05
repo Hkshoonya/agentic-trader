@@ -28,8 +28,9 @@ BASE_MEMBERS = 2
 
 # Members the desk judges but may not fund yet. Their trades happen on paper in
 # another process, and no live order path exists for them. Lifting this is a
-# code change in the live sub-project, never a config switch.
-UNFUNDED = frozenset({"switchboard"})
+# code change in the live sub-project, never a config switch. The swarm's book is
+# written by its daily job.
+UNFUNDED = frozenset({"switchboard", "swarm"})
 
 
 def hold_unfunded(weights: dict[str, float], *, benchmark: str) -> tuple[dict[str, float], dict[str, float]]:

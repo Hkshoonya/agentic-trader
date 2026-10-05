@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 DESK_MEMBER_NAMES = ("momentum_rotation", "trend_crypto", "benchmark")
 # Every member the desk can run; the default above is the launch line-up.
-DESK_MEMBER_CHOICES = DESK_MEMBER_NAMES + ("dip_reversal", "switchboard")
+DESK_MEMBER_CHOICES = DESK_MEMBER_NAMES + ("dip_reversal", "switchboard", "swarm")
 
 
 @dataclass(frozen=True)
@@ -539,7 +539,7 @@ def _adopted_symbols(state_dir: Any) -> frozenset[str]:
 def load_config(path: str | Path) -> Config:
     raw = tomllib.loads(Path(path).read_text())
     scalper_raw = raw.get("scalper_config")
-    return Config(
+    config = Config(
         mode=raw["mode"],
         symbol_whitelist=_symbols(raw["symbol_whitelist"]),
         max_order_pct=Decimal(str(raw["max_order_pct"])),
@@ -654,3 +654,7 @@ def load_config(path: str | Path) -> Config:
         ),
         accept_evidence_override=_boolean(raw, "accept_evidence_override", False),
     )
+    swarm_table = raw.get("swarm") if isinstance(raw.get("swarm"), dict) else {}
+    if "swarm" in config.desk_members and swarm_table.get("enabled") is not True:
+        raise ValueError("desk_members includes swarm, but [swarm] enabled is not true")
+    return config
