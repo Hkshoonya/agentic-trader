@@ -1203,6 +1203,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from agentic_trading.fast.cli import add_fast_parser
 
     add_fast_parser(sub)
+    from agentic_trading.swarm.cli import add_swarm_parser
+
+    add_swarm_parser(sub)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -1311,6 +1314,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from agentic_trading.fast.cli import dispatch_fast
 
         return dispatch_fast(args)
+    if args.command == "swarm":
+        from agentic_trading.swarm.cli import dispatch_swarm
+
+        return dispatch_swarm(args)
     if args.command == "dashboard":
         return cmd_dashboard(
             args.config, host=args.host, port=args.port, open_browser=args.open_browser
