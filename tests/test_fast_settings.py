@@ -28,14 +28,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual((config.fill_delay_ms, config.max_positions), (250, 3))
         self.assertEqual((config.cost_gate_multiple, config.daily_loss_stop), (Decimal("3"), Decimal("0.03")))
         self.assertEqual(config.cooldown_minutes, 5.0)
+        self.assertEqual(config.bar_minutes, 1)
 
     def test_a_full_table_parses(self) -> None:
         config = _load('[fast]\nenabled = true\nsymbols = ["btc/usd"]\nalpaca_fee = "0.0015"\n'
-                       'fill_delay_ms = 500\nmax_positions = 1\ncooldown_minutes = 2\n')
+                       'fill_delay_ms = 500\nmax_positions = 1\ncooldown_minutes = 2\nbar_minutes = 15\n')
         self.assertTrue(config.enabled)
         self.assertEqual(config.symbols, ("BTC/USD",))
         self.assertEqual(config.alpaca_fee, Decimal("0.0015"))
         self.assertEqual((config.fill_delay_ms, config.max_positions, config.cooldown_minutes), (500, 1, 2.0))
+        self.assertEqual(config.bar_minutes, 15)
 
     def test_mistakes_are_refused_with_the_key_named(self) -> None:
         cases = {
@@ -47,6 +49,8 @@ class SettingsTests(unittest.TestCase):
             '[fast]\nsymbols = []\n': "fast.symbols",
             '[fast]\nmax_positions = 0\n': "fast.max_positions",
             '[fast]\nfill_delay_ms = "250"\n': "fast.fill_delay_ms",
+            '[fast]\nbar_minutes = 7\n': "fast.bar_minutes",
+            '[fast]\nbar_minutes = true\n': "fast.bar_minutes",
         }
         for text, needle in cases.items():
             with self.subTest(text=text):

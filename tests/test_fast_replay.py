@@ -116,7 +116,23 @@ class CommandTests(unittest.TestCase):
                                   fetch=fake, today=DAY + timedelta(days=1))
         self.assertEqual(code, 0)
         self.assertIn("approximate", out.getvalue())
+        self.assertIn("spread (the median of recordings so far)", out.getvalue())
         self.assertIn(f"{DAY.isoformat()} → {DAY.isoformat()}", out.getvalue())  # clamped to finished days
+
+    def test_a_replay_can_try_another_bar_length_without_editing_the_config(self) -> None:
+        def fake(symbol, start, end):
+            return [NS(timestamp=T0 + timedelta(minutes=m), open=20.0, high=20.1, low=19.9, close=20.0)
+                    for m in range(30)]
+
+        with tempfile.TemporaryDirectory() as name:
+            path = self._config(Path(name))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cmd_replay(str(path), "bars", DAY.isoformat(), DAY.isoformat(),
+                                  fetch=fake, today=DAY + timedelta(days=1), bar_minutes=5)
+            self.assertNotIn("bar_minutes", path.read_text())
+        self.assertEqual(code, 0)
+        self.assertIn("trading 5-minute bars", out.getvalue())
 
     def test_recorded_replay_with_nothing_recorded_says_so(self) -> None:
         with tempfile.TemporaryDirectory() as name:

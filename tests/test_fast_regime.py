@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from agentic_trading.fast.bars import MinuteBars
 from agentic_trading.fast.regime import (
-    CHOPPY, SQUEEZE, TRENDING, UNCLEAR, WARMING, efficiency_ratio, read_regime, realized_vol,
+    CHOPPY, SQUEEZE, TRENDING, UNCLEAR, WARMING, efficiency_ratio, history_bars, read_regime, realized_vol,
 )
 from tests.fast_support import T0, bars_from
 
@@ -28,6 +28,21 @@ class BarTests(unittest.TestCase):
         self.assertEqual(bars.closed("BTC/USD"), [])
         done = bars.add("BTC/USD", 101.0, T0 + timedelta(minutes=2))
         self.assertEqual((done.minute, done.high), (T0 + timedelta(minutes=1), 105.0))
+
+    def test_fifteen_minute_bars_open_on_the_quarter_hour(self) -> None:
+        bars = MinuteBars(minutes=15)
+        for offset, price in ((timedelta(minutes=3), 100.0), (timedelta(minutes=9), 103.0),
+                              (timedelta(minutes=14, seconds=59), 101.0)):
+            self.assertIsNone(bars.add("BTC/USD", price, T0 + offset))
+        done = bars.add("BTC/USD", 102.0, T0 + timedelta(minutes=15))
+        self.assertEqual((done.minute, done.open, done.high, done.close), (T0, 100.0, 103.0, 101.0))
+
+    def test_a_bar_length_that_does_not_divide_the_hour_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "bar minutes"):
+            MinuteBars(minutes=7)
+
+    def test_a_day_is_kept_but_never_fewer_bars_than_the_squeeze_needs(self) -> None:
+        self.assertEqual([history_bars(m) for m in (1, 5, 15, 60)], [1440, 288, 240, 240])
 
     def test_only_the_newest_bars_are_kept(self) -> None:
         bars = MinuteBars(keep=3)

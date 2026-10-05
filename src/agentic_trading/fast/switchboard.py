@@ -1,7 +1,7 @@
 """The switchboard: for each coin, read the market, pick a playbook, act on each price.
 
 A paper desk member that runs inside the venues service:
-* It reads each coin's market once a minute (regime.py). On every price, it
+* It reads each coin's market as each bar closes (regime.py). On every price, it
   lets that regime's playbooks propose an entry.
 * It keeps an open trade with the playbook that opened it until that
   playbook's own exit fires.
@@ -28,11 +28,11 @@ from decimal import Decimal
 from typing import Any, Callable, Optional, Sequence
 
 from agentic_trading.desk.book import MemberBook
-from agentic_trading.fast.bars import Bar, MinuteBars
+from agentic_trading.fast.bars import Bar, MinuteBars, bar_start
 from agentic_trading.fast.fills import Fill, Order, PaperFiller, usable_quote
 from agentic_trading.fast.mirror import CoinbaseMirror
 from agentic_trading.fast.playbooks import ENTRIES, RECOVERED, Plan, Trade, exit_reason
-from agentic_trading.fast.regime import STAND_ASIDE, WARMING, read_regime
+from agentic_trading.fast.regime import STAND_ASIDE, WARMING, history_bars, read_regime
 from agentic_trading.fast.settings import FastConfig
 from agentic_trading.venues.model import Tick
 
@@ -88,7 +88,7 @@ class Switchboard:
         self.read_regime = regime_reader
         self.fee = float(config.alpaca_fee)
         self.filler = PaperFiller(book, config.alpaca_fee, delay=timedelta(milliseconds=config.fill_delay_ms))
-        self.bars = MinuteBars()
+        self.bars = MinuteBars(keep=history_bars(config.bar_minutes), minutes=config.bar_minutes)
         self.regimes: dict[str, str] = {symbol: WARMING for symbol in config.symbols}
         self.trades: dict[str, Trade] = {}
         self.entering: dict[str, Plan] = {}
@@ -97,7 +97,7 @@ class Switchboard:
         self.quotes: dict[str, Tick] = {}
         self.last_seen: dict[str, datetime] = {}
         self.skipped: dict[str, int] = {}
-        self._skip_minute: dict[str, datetime] = {}
+        self._skip_bar: dict[str, datetime] = {}
         self.skipped_total = 0
         self.day = ""
         self.day_start_equity = book.equity
@@ -198,9 +198,9 @@ class Switchboard:
         if plan is None:
             if not proposed:
                 return []
-            minute = now.replace(second=0, microsecond=0)
-            if self._skip_minute.get(symbol) != minute:  # one count per coin per minute
-                self._skip_minute[symbol] = minute
+            bar = bar_start(now, self.config.bar_minutes)
+            if self._skip_bar.get(symbol) != bar:  # one count per coin per bar
+                self._skip_bar[symbol] = bar
                 self.skipped[symbol] = self.skipped.get(symbol, 0) + 1
                 self.skipped_total += 1
             return []

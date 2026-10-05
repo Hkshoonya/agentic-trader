@@ -14,6 +14,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from agentic_trading.fast.bars import BAR_MINUTES
+
 _CRYPTO = re.compile(r"^[A-Z]{2,10}/USD$")
 MAX_FEE = Decimal("0.02")
 
@@ -29,6 +31,7 @@ class FastConfig:
     max_positions: int = 3
     cooldown_minutes: float = 5.0
     daily_loss_stop: Decimal = Decimal("0.03")
+    bar_minutes: int = 1
 
 
 def _decimal(name: str, value: Any, low: Decimal, high: Decimal) -> Decimal:
@@ -82,6 +85,11 @@ def load_fast_config(path: Path | str) -> FastConfig:
         values["fill_delay_ms"] = _whole("fill_delay_ms", raw["fill_delay_ms"], 0, 5000)
     if "max_positions" in raw:
         values["max_positions"] = _whole("max_positions", raw["max_positions"], 1, 10)
+    if "bar_minutes" in raw:
+        minutes = raw["bar_minutes"]
+        if isinstance(minutes, bool) or minutes not in BAR_MINUTES:
+            raise ValueError(f"fast.bar_minutes must be one of {list(BAR_MINUTES)}")
+        values["bar_minutes"] = minutes
     if "cooldown_minutes" in raw:
         minutes = raw["cooldown_minutes"]
         if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not 0 <= minutes <= 1440:
