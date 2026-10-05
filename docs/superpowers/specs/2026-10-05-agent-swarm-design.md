@@ -16,7 +16,7 @@ The user wants agents that spawn, compete, die and switch strategy, a swarm that
 
 | # | Ruling | Cost if wrong |
 |---|---|---|
-| R1 | **Daily bars, the existing universe** (`data/bars/*_day.jsonl`, 43 symbols), with no intraday data. | The swarm can't act within a day. Intraday edges were ruled out by the evidence above. |
+| R1 | **Daily bars, the trader's universe:** the effective whitelist's `data/bars` files (19 symbols on 2026-10-05, scout additions included), with no intraday data. *Amended at review: the swarm's book may hold only what the account could trade if it were funded.* | The swarm can't act within a day. Intraday edges were ruled out by the evidence above. |
 | R2 | **The swarm is one desk member, `swarm`.** Its book is a blend of its living agents, weighted only by each agent's past forward results. Agents never join the desk one by one. | One blended series is judged instead of many lottery tickets. A brilliant single agent is diluted by the blend. |
 | R3 | **Judged but not funded.** `UNFUNDED` becomes `{"switchboard", "swarm"}`. Funding is a later user decision and a one-constant code change, because netting already turns member book weights into account targets. | It earns nothing real until the user lifts it. |
 | R4 | **The switchboard leaves `desk_members` when the swarm joins.** That keeps the competing members at 3 (`min_t` 1.23, not 1.39). The switchboard keeps running in the venues service, and its card stays. | The switchboard loses its desk record. It was retired as having no edge. |

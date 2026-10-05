@@ -66,10 +66,21 @@ class Recipe:
         return replace(self, **changes)
 
 
+def _whole(value: Any) -> Any:
+    """``10.0`` is ``10``: JSON and LLMs write whole numbers as floats; the rankers index with them."""
+    return int(value) if isinstance(value, float) and value.is_integer() else value
+
+
 def _choice(name: str, value: Any, allowed: tuple[Any, ...]) -> Any:
     if isinstance(value, list):
         value = tuple(value)
-    if isinstance(value, bool) != any(isinstance(a, bool) for a in allowed) or value not in allowed:
+    if isinstance(value, tuple):
+        value = tuple(_whole(v) for v in value)
+    elif not any(isinstance(a, float) for a in allowed):
+        value = _whole(value)
+    kinds = {type(a) for a in allowed}
+    if (isinstance(value, bool) != any(isinstance(a, bool) for a in allowed) or type(value) not in kinds
+            or value not in allowed):
         shown = [list(a) if isinstance(a, tuple) else a for a in allowed]
         raise ValueError(f"{name} must be one of {shown}, not {value!r}")
     return value

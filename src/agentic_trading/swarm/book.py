@@ -3,7 +3,8 @@
 The book is marked at the day's closes. That closes the previous day's sample,
 just as the desk's own books sample. The book then trades toward the blend:
 - a position more than 5 points over its target is sold down;
-- one under its target by more than 5 points is bought up.
+- one under its target by more than 5 points is bought up;
+- a new target of any size is entered (the $1 minimum still applies).
 
 A symbol with no close that day (a stock on a Saturday) waits. Missed days are
 replayed one by one by the caller, so a machine that was off still gets one
@@ -59,8 +60,10 @@ def advance(book: MemberBook, day: date, weights: dict[str, float], closes: dict
     for symbol, want in sorted(targets.items()):
         price = closes.get(symbol)
         have = Decimal(str(current.get(symbol, 0.0)))
-        if price is None or want - have <= REBALANCE_GAP:
+        if price is None:
             continue
+        if symbol in book.positions and want - have <= REBALANCE_GAP:
+            continue  # the gap stops churn on held positions; it never keeps a new target out
         if book.buy(symbol, (want - have) * equity, price, costs, MIN_NOTIONAL) > 0:
             bought += 1
     return {"sold": sold, "bought": bought}

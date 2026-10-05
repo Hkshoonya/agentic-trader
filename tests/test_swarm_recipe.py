@@ -87,3 +87,14 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(set(universe_series(series, "crypto")), {"BTCUSD", "ETHUSD", "SOLUSD"})
         self.assertEqual(set(universe_series(series, "equity")), {"SPY", "QQQ", "AAPL", "MSFT"})
         self.assertEqual(len(universe_series(series, "all")), 7)
+
+
+class StrictTypeTests(unittest.TestCase):
+    def test_whole_floats_become_ints_and_other_floats_are_refused(self) -> None:
+        loose = validate({**TREND, "params": {**TREND["params"], "horizons": [20.0, 50, 100, 200],
+                                              "max_positions": 3.0}})
+        self.assertEqual(loose.id, validate(TREND).id)
+        self.assertTrue(all(isinstance(h, int) for h in loose.param("horizons")))
+        self.assertIsInstance(loose.param("max_positions"), int)
+        with self.assertRaisesRegex(ValueError, "max_positions"):
+            validate({**TREND, "params": {**TREND["params"], "max_positions": 3.5}})

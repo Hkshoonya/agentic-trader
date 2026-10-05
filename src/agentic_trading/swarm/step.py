@@ -94,6 +94,8 @@ class _Step:
         from agentic_trading.execution import cost_model_for
 
         series = series if series is not None else load_series(self.config)
+        # One convention for the whole step: the whitelist keys crypto as BTC-USD, the swarm as BTCUSD.
+        series = {symbol.replace("-", "").upper(): bars for symbol, bars in series.items()}
         self.costs = costs if costs is not None else cost_model_for(self.config.state_dir)
         self.cash = cash if cash is not None else FastStore(self.config.state_dir).starting_equity()
         today = self.now.date()
@@ -113,6 +115,8 @@ class _Step:
         self.series = through(series, as_of)
         self._records(state, as_of)
         deaths, agent_shares = self._days(state, as_of)
+        state.last_step = as_of.isoformat()
+        self.store.save(state)  # the book has taken these days: a crash while breeding must not replay them
         births, screens = self._breed(state, as_of)
         for agent in state.living:
             agent.signature.update(zip(agent.record.days, agent.record.returns))
@@ -131,6 +135,7 @@ class _Step:
             try:
                 agent.record = forward_record(agent.recipe, self.series, date.fromisoformat(agent.born), as_of,
                                               costs=self.costs, cash=self.cash)
+                agent.errored = ""
             except Exception as exc:  # noqa: BLE001 — one broken agent must not stop the swarm
                 if not agent.errored:
                     self.say("swarm_agent_error", f"{agent.recipe.name} hit an error and sits out "
@@ -144,7 +149,11 @@ class _Step:
             self.say("swarm_store_reset", "the swarm's book was unreadable; it starts fresh")
         day = date.fromisoformat(state.last_step) + timedelta(days=1) if state.last_step else as_of
         deaths, agent_shares = 0, {}
+        taken = str(book.to_dict().get("mark_day") or "")
         while day <= as_of:
+            if taken and day.isoformat() <= taken:  # the book already took this day
+                day += timedelta(days=1)
+                continue
             known = (day + timedelta(days=1)).isoformat()  # records through this day's close
             seen = [Agent(a.recipe, a.born, a.signature, a.errored, a.record.upto(known)) for a in state.living]
             doomed = cull(seen, today=day, max_drawdown_pct=float(self.swarm.max_drawdown) * 100,
@@ -214,7 +223,12 @@ class _Step:
             known.add(candidate.id)
             state.trials += 1
             screens += 1
-            result = screen(candidate, self.series, birth, costs=self.costs, cash=self.cash)
+            try:
+                result = screen(candidate, self.series, birth, costs=self.costs, cash=self.cash)
+            except Exception as exc:  # noqa: BLE001 — one bad candidate must not stop the swarm
+                self.say("swarm_rejected", f"{candidate.name} was not born: its screen errored "
+                                           f"({type(exc).__name__})", agent=candidate.id)
+                continue
             reason = result.reason
             if result.passed:
                 twin = duplicate_of(result.signature, state.living)

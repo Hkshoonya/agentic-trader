@@ -53,3 +53,14 @@ class BookTests(unittest.TestCase):
             advance(book, date(2024, 1, 1) + timedelta(days=offset), {"BTCUSD": 0.4},
                     {"BTC-USD": D(str(60000 + offset * 100))}, CostModel())
         self.assertEqual([d for d, _ in book.samples], ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"])
+
+
+class SmallTargetTests(unittest.TestCase):
+    def test_small_new_targets_are_entered_not_left_in_cash(self) -> None:
+        book = _book()
+        names = {"QQQ": D("400"), "SPY": D("500"), "AAPL": D("200"), "MSFT": D("300"), "BTC-USD": D("60000"),
+                 "ETH-USD": D("3000")}
+        weights = {s.replace("-", ""): 0.033 for s in names}
+        result = advance(book, date(2024, 1, 5), weights, names, CostModel())
+        self.assertEqual(result["bought"], 6)
+        self.assertGreater(len(book.positions), 0)

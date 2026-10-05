@@ -166,3 +166,96 @@ class CliTests(unittest.TestCase):
                                           "excess_pct": 0.5, "share": 0.0}]})
         self.assertIn("4 recipes tried", lines[0])
         self.assertIn("trend-ab12: nursery", lines[1])
+
+
+def _samples(store) -> list[str]:
+    book, _ = MemberBook.load(store.book_path, name="swarm", starting_equity=50)
+    return [d for d, _ in book.samples]
+
+
+class ReviewFixTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = load_config(_write_config(Path(self.tmp.name)))
+        self.store = SwarmStore(self.config.state_dir)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _step(self, day, series=SERIES, **kw):
+        return run_step(self.config, SWARM, now=_now(day), series=series, costs=CostModel(), cash=50, **kw)
+
+    def test_the_live_dashed_crypto_keys_work(self) -> None:
+        dashed = {("BTC-USD" if s == "BTCUSD" else "ETH-USD" if s == "ETHUSD" else "SOL-USD" if s == "SOLUSD"
+                   else s): bars for s, bars in SERIES.items()}
+        with mock.patch("agentic_trading.swarm.step.screen", return_value=PASS):
+            result = self._step(LAST + timedelta(days=1), series=dashed)
+        self.assertNotIn("waits", result.message)
+        status = self.store.read_status()
+        self.assertEqual((status["as_of"], status["alive"]), ((LAST - timedelta(days=1)).isoformat(), 3))
+
+    def test_a_crash_while_breeding_never_replays_days_into_the_book(self) -> None:
+        early = {s: [b for b in bars if b.start.date() <= LAST - timedelta(days=4)] for s, bars in SERIES.items()}
+        with mock.patch("agentic_trading.swarm.step.screen", return_value=PASS):
+            self._step(LAST - timedelta(days=3), series=early)
+            with mock.patch("agentic_trading.swarm.step.immigrant", side_effect=RuntimeError("killed")):
+                with self.assertRaises(RuntimeError):
+                    self._step(LAST + timedelta(days=1))
+            self._step(LAST + timedelta(days=1))
+        days = _samples(self.store)
+        self.assertEqual(days, sorted(set(days)))
+
+    def test_a_book_ahead_of_the_ledger_is_not_replayed(self) -> None:
+        early = {s: [b for b in bars if b.start.date() <= LAST - timedelta(days=4)] for s, bars in SERIES.items()}
+        with mock.patch("agentic_trading.swarm.step.screen", return_value=PASS):
+            self._step(LAST - timedelta(days=3), series=early)
+            self._step(LAST + timedelta(days=1))
+            ledger = json.loads(self.store.ledger_path.read_text())
+            ledger["last_step"] = (LAST - timedelta(days=4)).isoformat()  # as if the save was lost
+            self.store.ledger_path.write_text(json.dumps(ledger))
+            self._step(LAST + timedelta(days=1))
+        days = _samples(self.store)
+        self.assertEqual(days, sorted(set(days)))
+
+    def test_a_screen_that_raises_is_a_counted_rejection_not_a_crash(self) -> None:
+        calls = []
+
+        def flaky(recipe, *args, **kw):
+            calls.append(recipe.id)
+            if len(calls) == 1:
+                raise TypeError("bad parameter")
+            return PASS
+
+        with mock.patch("agentic_trading.swarm.step.screen", side_effect=flaky):
+            result = self._step(LAST + timedelta(days=1))
+        self.assertEqual(result.code, 0)
+        state, _ = self.store.load(_now(LAST))
+        self.assertEqual((state.trials, len(state.living)), (3, 2))
+        rejected = [e for e in self._events() if e["event"] == "swarm_rejected"]
+        self.assertIn("errored", rejected[0]["text"])
+
+    def test_an_agent_that_errored_once_recovers(self) -> None:
+        from agentic_trading.swarm import life
+        real = life.forward_record
+        early = {s: [b for b in bars if b.start.date() <= LAST - timedelta(days=4)] for s, bars in SERIES.items()}
+        mid = {s: [b for b in bars if b.start.date() <= LAST - timedelta(days=2)] for s, bars in SERIES.items()}
+        with mock.patch("agentic_trading.swarm.step.screen", return_value=PASS):
+            self._step(LAST - timedelta(days=3), series=early)
+            victim = self.store.load(_now(LAST))[0].living[0].recipe.id
+
+            def flaky(recipe, *args, **kw):
+                if recipe.id == victim:
+                    raise ArithmeticError("bad bar")
+                return real(recipe, *args, **kw)
+
+            with mock.patch("agentic_trading.swarm.step.forward_record", side_effect=flaky):
+                self._step(LAST - timedelta(days=1), series=mid)
+            self._step(LAST + timedelta(days=1))
+        agent = next(a for a in self.store.load(_now(LAST))[0].living if a.recipe.id == victim)
+        self.assertEqual(agent.errored, "")
+
+    def _events(self) -> list[dict]:
+        out = []
+        for path in sorted(Path(self.config.journal_dir).glob("swarm-*.jsonl")):
+            out += [json.loads(line) for line in path.read_text().splitlines()]
+        return out
