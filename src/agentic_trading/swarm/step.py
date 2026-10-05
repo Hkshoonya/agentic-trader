@@ -201,7 +201,9 @@ class _Step:
         rng = random.Random(f"{self.swarm.seed}:{as_of.isoformat()}:{state.trials}")
         birth = as_of + timedelta(days=1)
         scout = self._scout()
-        known = set(state.lineage) | {a.recipe.id for a in state.living}
+        if scout is not None and scout.exhausted(state.scout, as_of):
+            scout = None  # spent for the week: say nothing until Monday
+        known = set(state.lineage) | {a.recipe.id for a in state.living} | set(state.rejected)
         births = screens = tries = 0
         while (len(state.living) < self.swarm.max_agents and screens < self.swarm.screens_per_day
                and tries < MAX_TRIES):
@@ -226,6 +228,7 @@ class _Step:
             try:
                 result = screen(candidate, self.series, birth, costs=self.costs, cash=self.cash)
             except Exception as exc:  # noqa: BLE001 — one bad candidate must not stop the swarm
+                state.rejected.append(candidate.id)
                 self.say("swarm_rejected", f"{candidate.name} was not born: its screen errored "
                                            f"({type(exc).__name__})", agent=candidate.id)
                 continue
@@ -235,6 +238,7 @@ class _Step:
                 if twin:
                     reason = f"a near-copy of {twin}"
             if reason != "passed":
+                state.rejected.append(candidate.id)  # never screened (or counted) again
                 self.say("swarm_rejected", f"{candidate.name} was not born: {reason}", agent=candidate.id)
                 continue
             state.living.append(Agent(candidate, birth.isoformat(), dict(result.signature)))

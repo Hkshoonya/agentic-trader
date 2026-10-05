@@ -625,8 +625,10 @@ rule on daily bars, with its own parameters. A daily job does the work.
   the swarm's book.
 - **Deaths:** a 25% drawdown kills an agent at once. On Mondays, the losing bottom quarter of agents
   over 60 days old dies.
-- **Judged, not funded:** the desk judges the swarm's one blended book like any member's, and holds its
-  weight at 0.
+- **Funded by results:** the desk judges the swarm's one blended book like any member's, and gives it capital
+  only when its record earns it at the weekly allocation (20 daily samples first). The desk re-reads the book
+  when it changes (checked once a minute). An unreadable book keeps its last good copy, and a book not updated
+  for over 4 days hands its weight to the benchmark. In shadow mode that capital is simulated.
 - **Every recipe ever tried is counted** and shown.
 
 1. Add `[swarm]` with `enabled = true` to `config/agentic.toml` (`llm_scout = true` turns on the scout;

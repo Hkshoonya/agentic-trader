@@ -63,7 +63,8 @@ class Record:
 
     @property
     def excess_pct(self) -> float:
-        return round(math.fsum(self.excess) * 100, 3)
+        """Compounded, as the desk compounds: the agent's growth minus the benchmark's over the same days."""
+        return round(compounded_excess(self.returns, self.excess) * 100, 3)
 
     def upto(self, day: str) -> "Record":
         """The record as it stood before ``day`` (ISO date): what a past day could have known."""
@@ -71,6 +72,12 @@ class Record:
         returns = self.returns[:keep]
         return Record(self.days[:keep], returns, self.excess[:keep], self.trades,
                       drawdown_pct(returns), _total_pct(returns))
+
+
+def compounded_excess(returns: Iterable[float], excess: Iterable[float]) -> float:
+    """Growth of the agent minus growth of the benchmark (whose daily return is return − excess)."""
+    pairs = list(zip(returns, excess))
+    return math.prod(1 + r for r, _ in pairs) - math.prod(1 + r - e for r, e in pairs)
 
 
 def _total_pct(returns: Iterable[float]) -> float:
