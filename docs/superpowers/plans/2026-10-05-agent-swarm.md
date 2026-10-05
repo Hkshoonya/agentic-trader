@@ -34,7 +34,7 @@
 
 **Plan rulings (the spec left these open; recorded here):**
 - **P1. The quarter cull runs on Mondays (UTC), not every step.** A daily cull would shrink the mature pool to 3 within a week. It also only takes agents whose forward excess is ≤ 0.
-- **P2. A step's `as_of` is the last *finished* UTC day.** That is `min(newest BTCUSD bar date, today − 1)`, because today's crypto bar is still forming. Every bar dated after `as_of` is dropped.
+- **P2. A step's `as_of` is the last day known to be finished.** That is `min(newest BTCUSD bar date − 1, today − 1)`: a day counts only once a later BTC bar exists. History sync merges the still-forming daily candle, so the newest bar may be partial even when it is yesterday's, for example if the last sync ran at 23:30 UTC. A later bar also means a sync ran after the US close, so equities are final too. Every bar dated after `as_of` is dropped.
 - **P3. Birth and forward life:**
   - An agent screened at a step is born on `as_of + 1`.
   - It is screened on bars dated ≤ `as_of`.
@@ -48,8 +48,8 @@
 
 ## Review Focus
 
-1. **Today's half-formed crypto bar.** BTCUSD's newest bar is today's, still moving. Nothing may read it (P2). Task 10 has a test.
-2. **The host was off for days.** The book must replay each missed day in order, one sample per day, not jump. Task 8 and Task 10 have tests.
+1. **A half-formed daily bar.** BTCUSD's newest bar may still be moving, whether it is today's or yesterday's with no sync since. Nothing may read it (P2). Task 10 has a test.
+2. **The host was off for days.** Each missed day must be replayed in order, exactly as daily runs would: cull with that day's records and weekday, then blend and trade, with one sample per day. A Monday must not be skipped, and a later death must not be applied to an earlier day. Task 8 and Task 10 have tests.
 3. **A recipe whose universe lacks its regime symbol** (rotation on `crypto` has no SPY; reversal on `crypto` is refused). It must hold cash, not crash. Task 2 and Task 4 have tests.
 4. **Running the step twice on the same day.** The second run is a no-op: no new trials, no second book sample. Task 10 has a test.
 5. **Corrupt state.** A broken `population.json` moves aside, and the trial count never goes down (taken from `lineage.json`). Task 7 has a test.
@@ -2039,13 +2039,15 @@ git -c user.name="Hkshoonya" -c user.email="154622641+Hkshoonya@users.noreply.gi
 3. Load the state.
 4. Skip if `as_of` is already done.
 5. Trim the series to `as_of` (P2).
-6. Rebuild the records.
-7. Cull.
-8. Replay the book for every day since the last step, each day with records `upto(day)`.
-9. Breed and screen into free slots.
-10. Extend the signatures.
-11. Save; write the status; journal `swarm_step`.
-12. Unlock.
+6. Rebuild the records through `as_of`.
+7. For every day since the last step, in order:
+   - cull with records through that day and that day's weekday;
+   - then shares and the blend from records before that day;
+   - then trade at that day's close.
+8. Breed and screen into free slots, once, at `as_of`.
+9. Extend the signatures.
+10. Save; write the status; journal `swarm_step`.
+11. Unlock.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2100,9 +2102,10 @@ class StepTests(unittest.TestCase):
             out += [json.loads(line) for line in path.read_text().splitlines()]
         return out
 
-    def test_the_last_finished_day_never_includes_today(self) -> None:
-        self.assertEqual(finished_day(SERIES, LAST), LAST - timedelta(days=1))
-        self.assertEqual(finished_day(SERIES, LAST + timedelta(days=2)), LAST)
+    def test_a_day_counts_only_once_a_later_bar_exists(self) -> None:
+        self.assertEqual(finished_day(SERIES, LAST), LAST - timedelta(days=1))  # today's bar is forming
+        self.assertEqual(finished_day(SERIES, LAST + timedelta(days=1)), LAST - timedelta(days=1))  # no sync since
+        self.assertEqual(finished_day(SERIES, LAST + timedelta(days=2)), LAST - timedelta(days=1))
 
     def test_stale_bars_do_nothing_but_say_so(self) -> None:
         result = self._step(LAST + timedelta(days=9))
@@ -2117,10 +2120,11 @@ class StepTests(unittest.TestCase):
             state, _ = self.store.load(_now(LAST))
             births = [e for e in self._events() if e["event"] == "swarm_birth"]
             self.assertEqual((len(state.living), state.trials, len(births)), (3, 3, 3))
-            self.assertEqual(state.last_step, LAST.isoformat())
-            self.assertTrue(all(a.born == (LAST + timedelta(days=1)).isoformat() for a in state.living))
+            as_of = LAST - timedelta(days=1)
+            self.assertEqual(state.last_step, as_of.isoformat())
+            self.assertTrue(all(a.born == LAST.isoformat() for a in state.living))
             status = self.store.read_status()
-            self.assertEqual((status["as_of"], status["alive"], status["trials"]), (LAST.isoformat(), 3, 3))
+            self.assertEqual((status["as_of"], status["alive"], status["trials"]), (as_of.isoformat(), 3, 3))
             self.assertEqual({a["state"] for a in status["agents"]}, {"nursery"})
             book_before = self.store.book_path.read_text()
             again = self._step(LAST + timedelta(days=1))
@@ -2134,8 +2138,24 @@ class StepTests(unittest.TestCase):
             self._step(LAST - timedelta(days=3), series=early)
             self._step(LAST + timedelta(days=1))
         book, _ = MemberBook.load(self.store.book_path, name="swarm", starting_equity=50)
-        days = [d for d, _ in book.samples]
-        self.assertEqual(days, [(LAST - timedelta(days=4 - i)).isoformat() for i in range(4)])
+        days = [d for d, _ in book.samples]  # first step: as_of LAST-5; second: LAST-4 .. LAST-1
+        self.assertEqual(days, [(LAST - timedelta(days=5 - i)).isoformat() for i in range(4)])
+
+    def test_a_replay_culls_each_missed_day_with_that_days_weekday(self) -> None:
+        early = {s: [b for b in bars if b.start.date() <= LAST - timedelta(days=9)] for s, bars in SERIES.items()}
+        seen = []
+
+        def spy(agents, *, today, **kw):
+            seen.append(today)
+            return []
+
+        with mock.patch("agentic_trading.swarm.step.screen", return_value=PASS):
+            self._step(LAST - timedelta(days=8), series=early)
+            with mock.patch("agentic_trading.swarm.step.cull", side_effect=spy):
+                self._step(LAST + timedelta(days=1))
+        expected = [LAST - timedelta(days=9 - i) for i in range(9)]  # LAST-9 .. LAST-1, a Monday among them
+        self.assertEqual(seen, expected)
+        self.assertIn(0, {d.weekday() for d in seen})
 
     def test_an_erroring_agent_sits_out_and_the_rest_carry_on(self) -> None:
         from agentic_trading.swarm import life
@@ -2157,7 +2177,7 @@ class StepTests(unittest.TestCase):
         self.assertEqual(states[victim], "errored")
 
     def test_a_held_lock_means_another_step_is_running(self) -> None:
-        self.assertTrue(self.store.lock(_now(LAST)))
+        self.assertTrue(self.store.lock(_now(LAST + timedelta(days=1))))  # held by a step running right now
         self.assertIn("another swarm step", self._step(LAST + timedelta(days=1)).message)
 
     def test_agents_age_out_of_the_nursery_over_weeks(self) -> None:
@@ -2193,8 +2213,10 @@ Expected: FAIL with `ModuleNotFoundError: agentic_trading.swarm.step`.
 """One daily step of the swarm: age, cull, keep the book, breed.
 
 The step only ever reads finished days (P2). It replays every day it missed,
-one at a time, so the book's daily samples are the same whether the machine
-was on or off. It holds a lock, so two timers can't step at once.
+in order, as a daily run would have: cull on what that day knew, with that
+day's weekday, then blend and trade at that day's close. A machine that was
+off loses no cull and no sample. Births are not replayed: they happen once, at
+the newest finished day. A lock stops two timers stepping at once.
 """
 
 from __future__ import annotations
@@ -2234,7 +2256,8 @@ class StepResult:
 
 def finished_day(series: dict[str, list[Bar]], today: date) -> Optional[date]:
     bars = series.get("BTCUSD") or []
-    return min(bars[-1].start.date(), today - timedelta(days=1)) if bars else None
+    # P2: a day is finished only once a later BTC bar exists (sync merges the forming candle)
+    return min(bars[-1].start.date() - timedelta(days=1), today - timedelta(days=1)) if bars else None
 
 
 def stale_note(series: dict[str, list[Bar]], today: date) -> str:
@@ -2301,8 +2324,7 @@ class _Step:
             return StepResult(0, f"already stepped through {as_of}; nothing to do")
         self.series = through(series, as_of)
         self._records(state, as_of)
-        deaths = self._cull(state, as_of)
-        agent_shares = self._book(state, as_of)
+        deaths, agent_shares = self._days(state, as_of)
         births, screens = self._breed(state, as_of)
         for agent in state.living:
             agent.signature.update(zip(agent.record.days, agent.record.returns))
@@ -2327,34 +2349,35 @@ class _Step:
                                                   f"({type(exc).__name__})", agent=agent.recipe.id)
                 agent.errored = f"{type(exc).__name__}: {str(exc)[:120]}"
 
-    def _cull(self, state: SwarmState, as_of: date) -> int:
-        doomed = cull(state.living, today=as_of, max_drawdown_pct=float(self.swarm.max_drawdown) * 100,
-                      cull_after_days=self.swarm.cull_after_days)
-        gone = {id(agent) for agent, _ in doomed}
-        state.living = [a for a in state.living if id(a) not in gone]
-        for agent, reason in doomed:
-            row = state.lineage.setdefault(agent.recipe.id, {"recipe": agent.recipe.to_dict(), "born": agent.born})
-            row.update(died=as_of.isoformat(), cause=reason, excess_pct=agent.record.excess_pct,
-                       days=len(agent.record.days))
-            self.say("swarm_death", f"{agent.recipe.name} died: {reason}", agent=agent.recipe.id)
-        return len(doomed)
-
-    def _book(self, state: SwarmState, as_of: date) -> dict[str, float]:
+    def _days(self, state: SwarmState, as_of: date) -> tuple[int, dict[str, float]]:
+        """Every day since the last step, in order: cull on what the day knew, then trade at its close."""
         book, reset = MemberBook.load(self.store.book_path, name="swarm", starting_equity=self.cash)
         if reset:
             self.say("swarm_store_reset", "the swarm's book was unreadable; it starts fresh")
         day = date.fromisoformat(state.last_step) + timedelta(days=1) if state.last_step else as_of
-        agent_shares: dict[str, float] = {}
+        deaths, agent_shares = 0, {}
         while day <= as_of:
-            view = [Agent(a.recipe, a.born, a.signature, a.errored, a.record.upto(day.isoformat()))
-                    for a in state.living]
-            agent_shares = shares(view, nursery_days=self.swarm.nursery_days)
-            weights = blend_weights(view, agent_shares, self.series, day)
+            known = (day + timedelta(days=1)).isoformat()  # records through this day's close
+            seen = [Agent(a.recipe, a.born, a.signature, a.errored, a.record.upto(known)) for a in state.living]
+            doomed = cull(seen, today=day, max_drawdown_pct=float(self.swarm.max_drawdown) * 100,
+                          cull_after_days=self.swarm.cull_after_days)
+            for agent, reason in doomed:
+                row = state.lineage.setdefault(agent.recipe.id, {"recipe": agent.recipe.to_dict(), "born": agent.born})
+                row.update(died=day.isoformat(), cause=reason, excess_pct=agent.record.excess_pct,
+                           days=len(agent.record.days))
+                self.say("swarm_death", f"{agent.recipe.name} died: {reason}", agent=agent.recipe.id)
+            gone = {agent.recipe.id for agent, _ in doomed}
+            state.living = [a for a in state.living if a.recipe.id not in gone]
+            deaths += len(doomed)
+            before = [Agent(a.recipe, a.born, a.signature, a.errored, a.record.upto(day.isoformat()))
+                      for a in state.living]  # shares use only days before this one
+            agent_shares = shares(before, nursery_days=self.swarm.nursery_days)
+            weights = blend_weights(before, agent_shares, self.series, day)
             advance(book, day, weights, closes_on(self.series, day), self.costs)
             day += timedelta(days=1)
         book.save()
         self.book = book
-        return agent_shares
+        return deaths, agent_shares
 
     def _scout(self) -> Optional[Scout]:
         if not self.swarm.llm_scout:
@@ -3212,6 +3235,42 @@ Then make two edits with the Edit tool. Read the file first, and never print `co
   llm_scout = true
   ```
 - Check it loads: `.venv/bin/agentic-trading selfcheck --offline --config config/agentic.toml` must not FAIL on config.
+
+- [ ] **Step 3b: Launch gate. Can anything be born on real bars at real costs?**
+
+The screen has never run on `data/bars` with `cost_model_for(state_dir)` and the real ~$50 starting cash. At that size, a measured fixed fee per order can sink every recipe, and a swarm where nothing is ever born holds the benchmark forever. Measure first. Save this as `<scratchpad>/dry_screen.py` and run it from the live checkout with `PYTHONPATH=src .venv/bin/python <scratchpad>/dry_screen.py` (about 8 minutes):
+
+```python
+import random
+from datetime import datetime, timedelta, timezone
+
+from agentic_trading.config import load_config
+from agentic_trading.evidence import load_series
+from agentic_trading.execution import cost_model_for
+from agentic_trading.fast.store import FastStore
+from agentic_trading.swarm.breed import immigrant
+from agentic_trading.swarm.life import through
+from agentic_trading.swarm.screen import screen
+from agentic_trading.swarm.step import finished_day
+
+config = load_config("config/agentic.toml")
+series = load_series(config)
+as_of = finished_day(series, datetime.now(timezone.utc).date())
+series = through(series, as_of)
+costs, cash = cost_model_for(config.state_dir), FastStore(config.state_dir).starting_equity()
+rng, passed = random.Random("dry-run"), 0
+for _ in range(20):
+    recipe = immigrant(rng)
+    result = screen(recipe, series, as_of + timedelta(days=1), costs=costs, cash=cash)
+    passed += result.passed
+    print(f"{recipe.name:16} {result.passed!s:5} {result.trades:4} trades {result.return_pct:+8.2f}% "
+          f"dd {result.drawdown_pct:5.1f}%  {result.reason}")
+print(f"passed {passed} of 20 (as_of {as_of}, cash {cash})")
+```
+
+How to read the result:
+- **Gate: if 0 of 20 pass, stop.** Don't enable the timer or change the config. Report the reasons to the user (the table above) and ask how to proceed, for example a different cash basis for agents or the fee model. Launching an empty swarm would not meet the user's goal.
+- **1 or more pass:** continue. These 20 dry screens used the same history as real trials, so note "20 dry-run screens before launch" in the PR and in the memory.
 
 - [ ] **Step 4: Install the timer and run the first step**
 
