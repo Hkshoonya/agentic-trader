@@ -76,7 +76,29 @@ const CockpitFmt = (() => {
   };
   const RANK = { unknown: 0, ok: 1, warn: 2, bad: 3 };
   const worst = (a, b) => ((RANK[a] || 0) >= (RANK[b] || 0) ? a : b);
-  return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst };
+  // The switchboard card's words.
+  const REGIME_WORDS = { trending: 'trending', squeeze: 'squeeze', choppy: 'choppy · standing aside',
+    unclear: 'unclear · standing aside', warming: 'warming up' };
+  const regimeWord = (regime) => REGIME_WORDS[regime] || 'unknown';
+  const signedPct = (x) => (x > 0 ? '+' : x < 0 ? '−' : '') + Math.abs(x).toFixed(2) + '%';
+  const fastCompare = (view) => {
+    const a = view && view.book, c = view && view.mirror;
+    if (!a || a.return_pct == null) return 'no trades yet';
+    let text = 'the same trades: ' + signedPct(a.return_pct) + ' at Alpaca';
+    if (c && c.return_pct != null) text += ', ' + signedPct(c.return_pct) + ' at Coinbase';
+    if (c && c.unpriced) text += ' (' + c.unpriced + ' not copied)';
+    return text;
+  };
+  const fundedBadge = (would) => 'judged only — not yet funded'
+    + (would == null ? '' : ' · would earn ' + Math.round(would * 100) + '%');
+  const tradeLine = (coin) => {
+    const t = coin && coin.trade;
+    if (!t) return coin && coin.standing_aside ? 'standing aside' : 'watching for a setup';
+    return t.playbook + ' open at ' + t.entry + ' · stop ' + t.stop
+      + (t.pnl_pct == null ? '' : ' · ' + signedPct(t.pnl_pct));
+  };
+  return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst,
+    regimeWord, fastCompare, fundedBadge, tradeLine };
 })();
 
 const Cockpit = (() => {
@@ -449,6 +471,38 @@ const Cockpit = (() => {
     applyDot();
   }
 
+  function renderFast(view) {
+    const box = $('fast');
+    if (!box) return;
+    if (!view || !view.enabled) {
+      box.innerHTML = '<div class="sub">' + esc((view && view.note) || 'the switchboard is not running') + '</div>';
+      return;
+    }
+    const head = '<div class="fhead"><span class="fbadge">' + esc(CockpitFmt.fundedBadge(view.would_earn))
+      + '</span><span class="sub">' + esc(CockpitFmt.fastCompare(view)) + '</span></div>';
+    let notes = '';
+    if (view.failed) notes += '<div class="sub">' + esc('stopped: ' + view.failed) + '</div>';
+    else if (view.stale) notes += '<div class="sub">' + esc('the switchboard has not reported for a while') + '</div>';
+    if (view.halted) notes += '<div class="sub">' + esc('daily loss stop: no new entries until tomorrow (UTC)') + '</div>';
+    const coins = (view.coins || []).map((c) => '<div class="fcoin"><b>' + esc(c.symbol) + '</b><span class="fchip '
+      + esc(c.regime) + '">' + esc(CockpitFmt.regimeWord(c.regime)) + '</span><span>' + esc(CockpitFmt.tradeLine(c))
+      + '</span></div>').join('');
+    const recent = (view.recent || []).map((r) => '<li>' + esc(r.text) + '</li>').join('');
+    box.innerHTML = head + notes + coins
+      + (recent ? '<ul class="frecent">' + recent + '</ul>' : '<div class="sub">no decisions yet</div>');
+  }
+
+  async function pollFast() {
+    if (document.hidden) return;
+    try {
+      const response = await fetch('/api/fast');
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      renderFast(await response.json());
+    } catch (e) {
+      // keep the last picture; the header dot already shows a lost console
+    }
+  }
+
   function render(data) {
     const story = data.story || {};
     say('say-now', story.right_now);
@@ -494,6 +548,8 @@ const Cockpit = (() => {
     setInterval(poll, 5000);
     pollVenues();
     setInterval(pollVenues, 5000);
+    pollFast();
+    setInterval(pollFast, 2000);
     setInterval(tick, 1000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
     // The overview's height is the screen minus the header, and the header's

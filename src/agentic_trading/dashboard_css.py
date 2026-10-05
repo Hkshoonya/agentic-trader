@@ -93,6 +93,18 @@ header .badge{font-size:clamp(11px,.4vw + 6px,17px)}
 .vstat.closed{background:var(--shadow)}
 .vstat.stale,.vstat.reconnecting,.vstat.starting,.vstat.error{background:var(--warn)}
 .vstat.auth_failed{background:var(--sell)}
+.fast{display:grid;gap:8px}
+.fhead{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.fbadge{padding:2px 10px;border-radius:999px;border:1px solid var(--shadow);color:var(--shadow);font-size:.85em}
+.fcoin{display:flex;gap:14px;flex-wrap:wrap;align-items:center;padding:6px 0;border-bottom:1px dashed #1a2330}
+.fcoin b{min-width:90px}
+.fchip{display:inline-block;padding:1px 9px;border-radius:999px;background:#1b2431;color:var(--muted);font-size:.85em}
+.fchip.trending{color:var(--buy)}
+.fchip.squeeze{color:var(--accent)}
+.fchip.choppy,.fchip.unclear{color:var(--warn)}
+.frecent{margin:4px 0 0;padding-left:18px;color:var(--muted)}
+.frecent li{margin:2px 0}
+.item.fast .dot{background:var(--accent)}
 /* Stacked: the page scrolls, so the race needs a height of its own (it was a
    150px strip), and the tiles pair up instead of stretching full width. */
 @media(max-width:1100px){#tab-overview.on{display:block;height:auto;min-height:0}.cockpit{grid-template-columns:1fr}.tiles{display:grid;grid-template-columns:1fr 1fr}#race{flex:none;height:clamp(260px,55vw,460px)}.tabs{margin-left:0}}

@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from agentic_trading.desk.allocator import MemberRecord, allocate
+from agentic_trading.desk.allocator import MemberRecord, allocate, hold_unfunded
 from agentic_trading.desk.book import ZERO, MemberBook
 from agentic_trading.desk.member import Member, broker_symbol
 from agentic_trading.desk.netting import MIN_USD, gap_intent, target_quantities
@@ -193,6 +193,10 @@ class StrategyDesk:
         week = rotation_anchor(stamp).date().isoformat()
         if week == self.allocation_week:
             return []
+        for member in self.members:
+            refresh = getattr(member.book, "refresh", None)
+            if callable(refresh):
+                refresh()  # a book another process writes (the switchboard's)
         records = [
             MemberRecord(
                 member.name,
@@ -202,7 +206,7 @@ class StrategyDesk:
             for member in self.members
         ]
         result = allocate(records, benchmark=self.benchmark, previous=self.allocations)
-        weights = self._drop_failed(result.weights)
+        weights, would_earn = hold_unfunded(self._drop_failed(result.weights), benchmark=self.benchmark)
         changed = weights != self.allocations
         self.allocation_week = week
         if changed:
@@ -216,6 +220,7 @@ class StrategyDesk:
                 "changed": changed,
                 "reasons": result.reasons,
                 "stats": result.stats,
+                **({"would_earn": would_earn} if would_earn else {}),
             }
         ]
 

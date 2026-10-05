@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1107%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1177%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -592,6 +592,25 @@ strategy orders. Live venues refuse every order until armed with
    `deploy/agentic-trading-venues.service` to `~/.config/systemd/user/`, then
    `systemctl --user enable --now agentic-trading-venues`.
 
+### Fast engine (the switchboard)
+
+The switchboard is a paper desk member that trades BTC, ETH and SOL on live Alpaca prices inside the
+venues service.
+- **Reading the market:** every minute it classifies each coin as trending, squeeze, choppy or unclear.
+  It runs a breakout or pullback playbook in a trend and a squeeze-break playbook in a squeeze, and
+  stands aside otherwise.
+- **Only when worth the fees:** it enters only when the expected move is at least 3× the round-trip cost.
+- **Honest fills:** at the real ask or bid, 250 ms after each decision, with Alpaca's fee. The same
+  trades are also priced at Coinbase costs for comparison.
+- **Judged, not funded:** the desk judges its book like any member's, but holds its weight at 0.
+  Funding it would need a live order path that does not exist yet.
+
+1. Add `[fast]` with `enabled = true` to `config/agentic.toml`, and add `"switchboard"` to `desk_members`.
+2. Restart `agentic-trading-venues` (it runs the switchboard) and `agentic-trading` (the desk reads it).
+3. `agentic-trading fast status --config config/agentic.toml` shows what it is doing.
+4. `agentic-trading fast replay --config config/agentic.toml --source bars --from 2026-07-01 --to 2026-09-30`
+   replays it over past 1-minute bars (approximate). `--source recorded` replays recorded prices exactly.
+
 ## How it decides
 
 ```mermaid
@@ -624,7 +643,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1107 tests, including the honesty tests for the rig
+tests/                   1177 tests, including the honesty tests for the rig
 ```
 
 ## Operations
