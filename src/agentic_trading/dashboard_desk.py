@@ -29,6 +29,7 @@ LABELS = {
     "trend_crypto": "Crypto trend",
     "dip_reversal": "Dip buyer",
     "switchboard": "Switchboard",
+    "swarm": "Swarm",
     "benchmark": "Buy-and-hold",
 }
 
@@ -212,6 +213,8 @@ TICKER_EVENTS = (
     "kill_switch",
     "fast_entry",
     "fast_exit",
+    "swarm_birth",
+    "swarm_death",
 )
 FRESH = timedelta(hours=6)
 
@@ -302,6 +305,9 @@ def ticker_item(record: dict[str, Any]) -> Optional[dict[str, str]]:
         text = f"Health check found a problem in {first or 'a check'}"
     elif event in ("fast_entry", "fast_exit"):
         kind = "fast"
+        text = str(record.get("text") or "")[:200]
+    elif event in ("swarm_birth", "swarm_death"):
+        kind = "swarm"
         text = str(record.get("text") or "")[:200]
     else:  # kill_switch
         kind = "error"
@@ -402,6 +408,17 @@ def _relevant_events(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+# Side journals whose events join the desk's ticker: the switchboard's and the swarm's.
+EVENT_PREFIXES = ("fast-", "swarm-")
+
+
+def _day_key(name: str) -> str:
+    for prefix in EVENT_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
 class DeskEventCache:
     """Desk news from the dated journals, re-read only from files that changed.
 
@@ -418,9 +435,9 @@ class DeskEventCache:
         try:
             paths = sorted(
                 (p for p in self.journal_dir.glob("*.jsonl")
-                 if p.name[:1].isdigit() or p.name.startswith("fast-")),
-                key=lambda p: p.name.removeprefix("fast-"),
-            )[-2 * days:]
+                 if p.name[:1].isdigit() or p.name.startswith(EVENT_PREFIXES)),
+                key=lambda p: _day_key(p.name),
+            )[-(len(EVENT_PREFIXES) + 1) * days:]
         except OSError:
             return []
         events: list[dict[str, Any]] = []

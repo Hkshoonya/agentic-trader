@@ -95,6 +95,9 @@ class CockpitPageTests(unittest.TestCase):
     def test_the_switchboard_card_is_on_the_strategies_tab(self) -> None:
         self.assertIn('id="fast"', _section("strategies"))
 
+    def test_the_swarm_card_is_on_the_strategies_tab(self) -> None:
+        self.assertIn('id="swarm"', _section("strategies"))
+
 
 class CockpitSizingTests(unittest.TestCase):
     """The cockpit adapts to the screen instead of assuming 1440x900.

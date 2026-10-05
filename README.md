@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1182%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1260%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -613,6 +613,29 @@ venues service.
    `--bar-minutes 15` tries another bar length without editing the config. The approximate replay's
    spread is the median of everything recorded so far, so its numbers drift as recordings grow.
 
+### Agent swarm
+
+The swarm is a population of up to 24 paper agents, each a *recipe*: a trend, rotation or reversal
+rule on daily bars, with its own parameters. A daily job does the work.
+- **Births:** mutation and crossover of proven agents, random newcomers, and optionally an AI scout's
+  proposals (schema-bound, 3 a week).
+- **The screen:** a filter on the 3 years before birth. It never counts as evidence.
+- **Life:** each agent is judged only on bars after its birth, against 60% QQQ / 40% BTC.
+- **The blend:** after 20 days, an agent beating the benchmark over its last 60 days earns a share of
+  the swarm's book.
+- **Deaths:** a 25% drawdown kills an agent at once. On Mondays, the losing bottom quarter of agents
+  over 60 days old dies.
+- **Judged, not funded:** the desk judges the swarm's one blended book like any member's, and holds its
+  weight at 0.
+- **Every recipe ever tried is counted** and shown.
+
+1. Add `[swarm]` with `enabled = true` to `config/agentic.toml` (`llm_scout = true` turns on the scout;
+   it needs `AGENTIC_LLM_API_KEY`). Put `"swarm"` in `desk_members`.
+2. Install `deploy/agentic-trading-swarm` to `~/.local/bin/`, and the `.service` and `.timer` to
+   `~/.config/systemd/user/`. Then run `systemctl --user enable --now agentic-trading-swarm.timer`.
+3. `agentic-trading swarm step --config config/agentic.toml` runs a step by hand.
+   `agentic-trading swarm status --config config/agentic.toml` shows who is alive.
+
 ## How it decides
 
 ```mermaid
@@ -645,7 +668,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1182 tests, including the honesty tests for the rig
+tests/                   1260 tests, including the honesty tests for the rig
 ```
 
 ## Operations

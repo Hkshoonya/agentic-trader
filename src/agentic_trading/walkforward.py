@@ -26,7 +26,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from agentic_trading.backtest import CostModel
 from agentic_trading.history import Bar
@@ -194,6 +194,8 @@ def rank_targets(
     min_vote: float = 0.5,
     max_positions: int = 5,
     rule: str = "trend",
+    books: Optional[Mapping[str, tuple[str, int, int, int]]] = None,
+    reversal: Optional[tuple[str, int, int, int, int]] = None,
 ) -> list[dict[str, Any]]:
     """Every symbol's vote and size, chosen or not, for the console.
 
@@ -205,9 +207,9 @@ def rank_targets(
     if rule == "none":
         return []
     if rule == "rotation":
-        return rank_rotation(series, when, max_positions=max_positions)
+        return rank_rotation(series, when, max_positions=max_positions, books=books)
     if rule == "reversal":
-        return rank_reversal(series, when, max_positions=max_positions)
+        return rank_reversal(series, when, max_positions=max_positions, book=reversal)
     rows: list[dict[str, Any]] = []
     for symbol, bars in series.items():
         closes = [float(bar.close) for bar in bars if bar.start < when]
@@ -285,6 +287,7 @@ def rank_rotation(
     when: datetime,
     *,
     max_positions: int = 5,
+    books: Optional[Mapping[str, tuple[str, int, int, int]]] = None,
 ) -> list[dict[str, Any]]:
     """Weekly momentum rotation: each book holds its strongest recent names.
 
@@ -304,7 +307,7 @@ def rank_rotation(
         return symbol.replace("-", "").upper()
 
     rows: list[dict[str, Any]] = []
-    for book, (regime_symbol, regime_bars, lookback, top) in ROTATION_BOOKS.items():
+    for book, (regime_symbol, regime_bars, lookback, top) in (books or ROTATION_BOOKS).items():
         crypto = book == "crypto"
         regime = next(
             (
@@ -381,6 +384,7 @@ def rank_reversal(
     when: datetime,
     *,
     max_positions: int = 5,
+    book: Optional[tuple[str, int, int, int, int]] = None,
 ) -> list[dict[str, Any]]:
     """Weekly dip reversal: hold last week's deepest pullbacks in rising names.
 
@@ -390,7 +394,7 @@ def rank_reversal(
     that rose, a name in a downtrend and every coin are left out. Each
     selected name has weight 1.0, one full per-order budget, like the rotation.
     """
-    regime_symbol, regime_bars, trend_bars, lookback, top = REVERSAL_BOOK
+    regime_symbol, regime_bars, trend_bars, lookback, top = book or REVERSAL_BOOK
     anchor = rotation_anchor(when)
     closes = {
         symbol: [float(bar.close) for bar in bars if bar.start < anchor]
@@ -472,6 +476,8 @@ def targets_as_of(
     max_positions: int = 5,
     normalise: bool = False,
     rule: str = "trend",
+    books: Optional[Mapping[str, tuple[str, int, int, int]]] = None,
+    reversal: Optional[tuple[str, int, int, int, int]] = None,
 ) -> dict[str, float]:
     """The production rule, evaluated with data strictly before ``when``.
 
@@ -496,6 +502,8 @@ def targets_as_of(
         min_vote=min_vote,
         max_positions=max_positions,
         rule=rule,
+        books=books,
+        reversal=reversal,
     )
     weights = {
         row["symbol"]: round(float(row["weight"]), 6) for row in rows if row["selected"]
@@ -524,6 +532,10 @@ def simulate(
     proportional: bool = False,
     small_account_floor: Optional[SmallAccountFloor] = None,
     rule: str = "trend",
+    horizons: tuple[int, ...] = (50, 100, 200, 252),
+    min_vote: float = 0.5,
+    books: Optional[Mapping[str, tuple[str, int, int, int]]] = None,
+    reversal: Optional[tuple[str, int, int, int, int]] = None,
 ) -> tuple[list[dict[str, Any]], list[float]]:
     """Trade the fixed rule forward through one window; return round-trip trades.
 
@@ -602,7 +614,8 @@ def simulate(
             if day in table and table[day] > 0
         }
         last_seen.update(prices)
-        targets = targets_as_of(series, when, max_positions=max_positions, rule=rule)
+        targets = targets_as_of(series, when, horizons=horizons, min_vote=min_vote, max_positions=max_positions,
+                                rule=rule, books=books, reversal=reversal)
 
         # Exit anything no longer targeted. Positions are held as units, so the
         # entry price already contains the entry cost and the exit price the

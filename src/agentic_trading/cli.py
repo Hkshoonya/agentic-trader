@@ -317,6 +317,11 @@ def build_strategy(
 
 
 
+# Members whose paper book another process writes: the venues service (switchboard)
+# and the swarm's daily job. The desk only reads them.
+READ_ONLY_MEMBERS = ("switchboard", "swarm")
+
+
 def build_desk(config: Config) -> Any:
     """The strategy desk, with every member's book and state under state/desk."""
     from agentic_trading import trial
@@ -347,7 +352,7 @@ def build_desk(config: Config) -> Any:
     equity = _current_equity(config.state_dir)
     members = []
     for name in config.desk_members:
-        if name == "switchboard":  # trades in the venues service; the desk only reads its book
+        if name in READ_ONLY_MEMBERS:
             book, reset = ReadOnlyBook.load(desk_dir / f"{name}.json", name=name, starting_equity=equity)
             if reset:
                 journal.append({"event": "desk_member_reset", "member": name})
@@ -1203,6 +1208,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from agentic_trading.fast.cli import add_fast_parser
 
     add_fast_parser(sub)
+    from agentic_trading.swarm.cli import add_swarm_parser
+
+    add_swarm_parser(sub)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -1311,6 +1319,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from agentic_trading.fast.cli import dispatch_fast
 
         return dispatch_fast(args)
+    if args.command == "swarm":
+        from agentic_trading.swarm.cli import dispatch_swarm
+
+        return dispatch_swarm(args)
     if args.command == "dashboard":
         return cmd_dashboard(
             args.config, host=args.host, port=args.port, open_browser=args.open_browser

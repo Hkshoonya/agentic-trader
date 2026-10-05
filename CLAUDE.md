@@ -11,7 +11,7 @@ Live trading system (real money via Robinhood MCP), shadow-first. CONTRIBUTING.m
 .venv/bin/agentic-trading fast replay --config config/agentic.toml --source bars --from YYYY-MM-DD --to YYYY-MM-DD
 systemctl --user restart agentic-trading-venues   # after changing venues/ or fast/ code
 ```
-systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboard` (loopback console), `agentic-trading-venues` (Alpaca/Coinbase streams, recorder, paper switchboard), `agentic-trading-alert`.
+systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboard` (loopback console), `agentic-trading-venues` (Alpaca/Coinbase streams, recorder, paper switchboard), `agentic-trading-alert`, and `agentic-trading-swarm.timer` (daily 00:30 UTC swarm step).
 
 ## Layout (`src/agentic_trading/`)
 - `cli.py` — the single `agentic-trading` entry point and all subcommands
@@ -19,6 +19,7 @@ systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboar
 - `strategies/` — desk members
 - `venues/` — SDK streams, TickBus, recorder, guard, arming, health
 - `fast/` — switchboard (paper only), runs inside the venues service
+- `swarm/` — the agent swarm: recipes (data), breed, screen, forward life, blend/cull, its member book; daily `swarm step`
 - `dashboard*.py` — console; HTML/CSS/JS live as Python string modules
 - `llm/` — advisor and regime gates; `rh_mcp/` — Robinhood MCP client + OAuth
 - `windows/` — PyInstaller build; lazily imported modules need `hiddenimports` in `AgenticTrader.spec`

@@ -137,6 +137,7 @@ __COCKPIT_CSS__
 <main>
 <div class="card span12"><h2>Strategies · each one's paper record against buy-and-hold</h2><div id="members" class="members"><div class="sub">reading the desk…</div></div></div>
 <div class="card span12"><h2>Switchboard · fast crypto playbooks on live prices (paper)</h2><div id="fast" class="fast"><div class="sub">reading the switchboard…</div></div></div>
+<div class="card span12"><h2>Swarm · agents born, judged and culled on daily bars (paper)</h2><div id="swarm" class="swarm"><div class="sub">reading the swarm…</div></div></div>
 <div class="card span12"><h2>Candidates · what the rule wants right now</h2>
   <div class="tablewrap"><table id="candidates">
     <thead><tr><th>symbol</th><th>how the price is moving</th><th>how wildly it moves</th><th>in the book</th><th>held back by</th><th>why</th></tr></thead>
