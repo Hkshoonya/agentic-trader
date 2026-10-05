@@ -74,6 +74,21 @@ class EntryTests(unittest.TestCase):
         [skip] = [e for e in events if e.kind == "fast_skipped"]
         self.assertIn("cost gate", skip.text)
 
+    def test_on_fifteen_minute_bars_a_skip_counts_once_per_bar(self) -> None:
+        board = _board(FastConfig(enabled=True, symbols=("BTC/USD",), bar_minutes=15))
+        self.assertEqual((board.bars.minutes, board.bars.keep), (15, 240))
+        step = timedelta(minutes=15)
+        for i, close in enumerate([100, 100.4] * 16):
+            board.bars.add("BTC/USD", float(close), T0 + i * step)
+        board.regimes["BTC/USD"] = TRENDING
+        start = T0 + 32 * step  # the bar still open after seeding
+        for seconds in range(1, 15 * 60 + 20, 20):  # a price every 20 s, past the bar's end
+            board.on_tick(quote("BTC/USD", 100.49, 100.51, start + seconds * SEC))
+            if 1 < seconds < 15 * 60:  # the first price never enters
+                self.assertEqual((board.trades, board.skipped_total), ({}, 1))
+        board.on_tick(quote("BTC/USD", 100.59, 100.61, start + step + 21 * SEC))  # a new high in the next bar
+        self.assertEqual((board.trades, board.skipped_total), ({}, 2))
+
     def test_the_position_cap(self) -> None:
         board = _board(FastConfig(enabled=True, symbols=("BTC/USD", "ETH/USD"), max_positions=1))
         _seed(board)

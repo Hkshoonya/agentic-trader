@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1177%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1182%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -596,7 +596,7 @@ strategy orders. Live venues refuse every order until armed with
 
 The switchboard is a paper desk member that trades BTC, ETH and SOL on live Alpaca prices inside the
 venues service.
-- **Reading the market:** every minute it classifies each coin as trending, squeeze, choppy or unclear.
+- **Reading the market:** as each bar closes (1-minute bars unless `bar_minutes` says 2–60) it classifies each coin as trending, squeeze, choppy or unclear.
   It runs a breakout or pullback playbook in a trend and a squeeze-break playbook in a squeeze, and
   stands aside otherwise.
 - **Only when worth the fees:** it enters only when the expected move is at least 3× the round-trip cost.
@@ -610,6 +610,8 @@ venues service.
 3. `agentic-trading fast status --config config/agentic.toml` shows what it is doing.
 4. `agentic-trading fast replay --config config/agentic.toml --source bars --from 2026-07-01 --to 2026-09-30`
    replays it over past 1-minute bars (approximate). `--source recorded` replays recorded prices exactly.
+   `--bar-minutes 15` tries another bar length without editing the config. The approximate replay's
+   spread is the median of everything recorded so far, so its numbers drift as recordings grow.
 
 ## How it decides
 
@@ -643,7 +645,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1177 tests, including the honesty tests for the rig
+tests/                   1182 tests, including the honesty tests for the rig
 ```
 
 ## Operations

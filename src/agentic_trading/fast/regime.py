@@ -1,9 +1,10 @@
-"""Each coin's market, read once a minute: trending, squeeze, choppy or unclear.
+"""Each coin's market, read as each bar closes: trending, squeeze, choppy or unclear.
 
 * **efficiency ratio** (Kaufman): net move / total path over 30 bars.
   At least 0.35 is trending; at most 0.20 is choppy.
-* **squeeze**: the 30-bar realized volatility sits in the bottom 20% of the
-  day's rolling values (needs at least 240 bars of history).
+* **squeeze**: the 30-bar realized volatility sits in the bottom 20% of its
+  rolling values over the bars kept: the last 24 h, or the last 240 bars when
+  a day holds fewer (``history_bars``). Needs at least 240 bars of history.
 * Precedence: squeeze, then trending, then choppy; anything else is unclear.
   Fewer than 60 bars is warming.
 
@@ -27,6 +28,11 @@ MIN_BARS = 60
 SQUEEZE_HISTORY = 240
 SQUEEZE_SHARE = 0.20
 VOL_STEP = 10
+
+
+def history_bars(bar_minutes: int) -> int:
+    """How many bars to keep: a day's worth, and never fewer than the squeeze needs."""
+    return max(SQUEEZE_HISTORY, 1440 // bar_minutes)
 
 
 def efficiency_ratio(closes: Sequence[float]) -> float:
