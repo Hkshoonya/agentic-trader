@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable, Iterable, Optional
 
 from agentic_trading.desk.book import MIN_NOTIONAL, MemberBook
 from agentic_trading.desk.member import broker_symbol
@@ -39,10 +39,20 @@ def closes_on(series: dict[str, list[Bar]], day: date) -> dict[str, Decimal]:
 
 
 def advance(book: MemberBook, day: date, weights: dict[str, float], closes: dict[str, Decimal],
-            costs: Any) -> dict[str, int]:
+            costs: Any, *, universe: Optional[Iterable[str]] = None,
+            minimum: Optional[Callable[[str], Decimal]] = None) -> dict[str, int]:
+    """``universe``: the symbols the trader still trades; anything else held is sold at its last price.
+    ``minimum``: the smallest buy the account could place per symbol (the book must not score
+    trades the account can't copy)."""
     book.mark(closes, datetime.combine(day, time(23, 59), tzinfo=timezone.utc))
     targets = {broker_symbol(s): Decimal(str(w)) for s, w in weights.items() if w > 0}
     sold = bought = 0
+    if universe is not None:
+        allowed = {broker_symbol(s) for s in universe}
+        for symbol in sorted(set(book.positions) - allowed):
+            price = book.prices.get(symbol)
+            if price and book.sell(symbol, book.positions[symbol], price, costs) > 0:
+                sold += 1
     if book.equity <= 0:
         return {"sold": sold, "bought": bought}
     current = book.weights()
@@ -64,6 +74,7 @@ def advance(book: MemberBook, day: date, weights: dict[str, float], closes: dict
             continue
         if symbol in book.positions and want - have <= REBALANCE_GAP:
             continue  # the gap stops churn on held positions; it never keeps a new target out
-        if book.buy(symbol, (want - have) * equity, price, costs, MIN_NOTIONAL) > 0:
+        floor = minimum(symbol) if minimum is not None else MIN_NOTIONAL
+        if book.buy(symbol, (want - have) * equity, price, costs, floor) > 0:
             bought += 1
     return {"sold": sold, "bought": bought}

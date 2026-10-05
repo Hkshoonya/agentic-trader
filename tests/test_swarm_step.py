@@ -306,3 +306,35 @@ class DeferredFixTests(unittest.TestCase):
                      cash=50)
         self.assertEqual(screened.call_count, 1)
         self.assertEqual(self.store.load(_now(LAST))[0].trials, 1)
+
+
+class BookSafetyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = load_config(_write_config(Path(self.tmp.name)))
+        self.store = SwarmStore(self.config.state_dir)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_a_corrupt_book_stops_the_step_and_is_never_overwritten(self) -> None:
+        early = {s: [b for b in bars if b.start.date() <= LAST - timedelta(days=4)] for s, bars in SERIES.items()}
+        with mock.patch("agentic_trading.swarm.step.screen", return_value=PASS):
+            run_step(self.config, SWARM, now=_now(LAST - timedelta(days=3)), series=early, costs=CostModel(), cash=50)
+            self.store.book_path.write_text("{garbage")
+            result = run_step(self.config, SWARM, now=_now(LAST + timedelta(days=1)), series=SERIES,
+                              costs=CostModel(), cash=50)
+        self.assertEqual(result.code, 1)
+        self.assertIn("unreadable", result.message)
+        self.assertEqual(self.store.book_path.read_text(), "{garbage")
+        self.assertEqual(self.store.load(_now(LAST))[0].last_step, (LAST - timedelta(days=5)).isoformat())
+
+    def test_a_long_market_weekend_does_not_stop_the_swarm(self) -> None:
+        from agentic_trading.swarm.step import stale_note
+        from tests.swarm_support import daily
+        start = LAST - timedelta(days=30)
+        series = {"QQQ": daily("QQQ", [400.0] * 20, start=start),  # its last close: start + 19
+                  "BTCUSD": daily("BTCUSD", [60000.0] * 25, start=start)}
+        today = start + timedelta(days=19 + 5)  # a Thursday holiday plus a weekend, and a day of sync lag
+        self.assertEqual(stale_note(series, today), "")
+        self.assertIn("QQQ", stale_note(series, today + timedelta(days=2)))

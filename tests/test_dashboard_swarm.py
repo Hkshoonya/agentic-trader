@@ -90,3 +90,14 @@ class SwarmTickerTests(unittest.TestCase):
                 {"event": "fast_exit", "at": "2026-10-05T12:00:00+00:00", "text": "out"}) + "\n")
             events = DeskEventCache(folder).read()
         self.assertEqual([e["event"] for e in events], ["swarm_birth", "desk_allocation", "fast_exit"])
+
+
+class SwarmWeightTests(unittest.TestCase):
+    def test_the_weight_is_the_desks_current_allocation(self) -> None:
+        events = [{"event": "desk_allocation", "allocations": {"swarm": 0.25, "benchmark": 0.75}}]
+        with tempfile.TemporaryDirectory() as name:
+            _state(Path(name), T0)
+            (Path(name) / "desk").mkdir()
+            (Path(name) / "desk" / "desk.json").write_text(json.dumps({"allocations": {"swarm": 0.3}}))
+            view = swarm_view(Path(name), events, now=T0)
+        self.assertEqual(view["weight"], 0.3)

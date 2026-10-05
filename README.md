@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1271%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1279%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -628,7 +628,7 @@ rule on daily bars, with its own parameters. A daily job does the work.
 - **Funded by results:** the desk judges the swarm's one blended book like any member's, and gives it capital
   only when its record earns it at the weekly allocation (20 daily samples first). The desk re-reads the book
   when it changes (checked once a minute). An unreadable book keeps its last good copy, and a book not updated
-  for over 4 days hands its weight to the benchmark. In shadow mode that capital is simulated.
+  for over 6 days lends its weight to the benchmark until it is fresh again. In shadow mode that capital is simulated.
 - **Every recipe ever tried is counted** and shown.
 
 1. Add `[swarm]` with `enabled = true` to `config/agentic.toml` (`llm_scout = true` turns on the scout;
@@ -670,7 +670,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1271 tests, including the honesty tests for the rig
+tests/                   1279 tests, including the honesty tests for the rig
 ```
 
 ## Operations

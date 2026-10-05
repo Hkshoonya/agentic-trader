@@ -36,6 +36,15 @@ def _weight(events: Iterable[dict[str, Any]]) -> Optional[float]:
     return None
 
 
+def _current_weight(state_dir: Path, events: Iterable[dict[str, Any]]) -> Optional[float]:
+    """The desk's saved allocation (current, mid-week too); the latest weekly event if it can't be read."""
+    try:
+        saved = json.loads((state_dir / "desk" / "desk.json").read_text(encoding="utf-8"))
+        return float(saved["allocations"]["swarm"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return _weight(events)
+
+
 def swarm_view(state_dir: Path | str, events: Iterable[dict[str, Any]] = (), *,
                now: Optional[datetime] = None) -> dict[str, Any]:
     current = now or datetime.now(timezone.utc)
@@ -64,5 +73,5 @@ def swarm_view(state_dir: Path | str, events: Iterable[dict[str, Any]] = (), *,
         "agents": agents,
         "recent": recent,
         "scout": _pick(data.get("scout"), SCOUT_FIELDS),
-        "weight": _weight(events),
+        "weight": _current_weight(Path(state_dir), events),
     }

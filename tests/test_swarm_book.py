@@ -64,3 +64,21 @@ class SmallTargetTests(unittest.TestCase):
         result = advance(book, date(2024, 1, 5), weights, names, CostModel())
         self.assertEqual(result["bought"], 6)
         self.assertGreater(len(book.positions), 0)
+
+
+class UniverseAndMinimumTests(unittest.TestCase):
+    def test_a_symbol_that_left_the_universe_is_sold_at_its_last_price(self) -> None:
+        book = _book()
+        advance(book, date(2024, 1, 5), {"QQQ": 0.5, "AMD": 0.3}, {"QQQ": D("400"), "AMD": D("100")}, CostModel())
+        self.assertIn("AMD", book.positions)
+        result = advance(book, date(2024, 1, 8), {"QQQ": 0.5}, {"QQQ": D("401")}, CostModel(),
+                         universe={"QQQ", "BTC-USD"})
+        self.assertNotIn("AMD", book.positions)
+        self.assertEqual(result["sold"], 1)
+
+    def test_the_desk_minimum_order_applies(self) -> None:
+        book = _book()
+        result = advance(book, date(2024, 1, 5), {"QQQ": 0.06, "SPY": 0.5}, {"QQQ": D("400"), "SPY": D("500")},
+                         CostModel(), minimum=lambda symbol: D("5"))
+        self.assertEqual(set(book.positions), {"SPY"})  # $3 of QQQ is under the $5 the account can buy
+        self.assertEqual(result["bought"], 1)
