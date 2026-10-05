@@ -116,6 +116,7 @@ class CommandTests(unittest.TestCase):
                                   fetch=fake, today=DAY + timedelta(days=1))
         self.assertEqual(code, 0)
         self.assertIn("approximate", out.getvalue())
+        self.assertIn("spread (the median of recordings so far)", out.getvalue())
         self.assertIn(f"{DAY.isoformat()} → {DAY.isoformat()}", out.getvalue())  # clamped to finished days
 
     def test_a_replay_can_try_another_bar_length_without_editing_the_config(self) -> None:

@@ -64,7 +64,8 @@ def cmd_replay(config_path: str, source: str, start_text: str, end_text: str, *,
             return 2
         cache = Path(config.state_dir).parent / "fastbars"
         rows = fetch_bars(fast.symbols, start, end, cache, **({"fetch": fetch} if fetch else {}))
-        ticks = bar_ticks(rows, median_spread(venues.stream_dir, fast.symbols))
+        spread = median_spread(venues.stream_dir, fast.symbols)
+        ticks = bar_ticks(rows, spread)
         label = "approximate, from 1-minute bars"
     label += f"; trading {fast.bar_minutes}-minute bars"
     report = replay(ticks, fast, label=label, start=start.isoformat(), end=end.isoformat(),
@@ -73,6 +74,8 @@ def cmd_replay(config_path: str, source: str, start_text: str, end_text: str, *,
         print(f"fast replay: no prices between {start} and {end}")
         return 1
     print("\n".join(report.lines()))
+    if source == "bars":  # the median moves as recordings grow; without it the numbers can't be reproduced
+        print(f"  prices built at a {spread:.4%} spread (the median of recordings so far)")
     return 0
 
 
