@@ -13,18 +13,23 @@ from __future__ import annotations
 import json
 import math
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from agentic_trading.desk.allocator import MemberRecord, allocate, hold_unfunded
+from agentic_trading.desk.allocator import UNFUNDED, MemberRecord, allocate, hold_unfunded
 from agentic_trading.desk.book import ZERO, MemberBook
-from agentic_trading.desk.member import Member, broker_symbol
+from agentic_trading.desk.member import Member, ReadOnlyMember, broker_symbol
 from agentic_trading.desk.netting import MIN_USD, gap_intent, target_quantities
 from agentic_trading.types import OrderIntent
 
 COSTS_REFRESH_SECONDS = 60.0
+# How often the desk checks whether a book another process writes has changed.
+BOOK_POLL_SECONDS = 60.0
+# A book another process writes that hasn't been marked for this many days is stale:
+# its weight goes to the benchmark, so a dead job's frozen holdings are never funded.
+STALE_BOOK_DAYS = 4
 
 
 def _decimal(value: Any) -> Optional[Decimal]:
@@ -90,6 +95,8 @@ class StrategyDesk:
         self._last_emit: dict[str, tuple[float, Decimal]] = {}
         self._costs: Any = None
         self._costs_at = -math.inf
+        self._polled_at = -math.inf
+        self._noted: set[tuple[str, str]] = set()  # (member, problem) already journaled
         self._load()
 
     # -- runtime strategy interface ---------------------------------------
@@ -152,6 +159,7 @@ class StrategyDesk:
                 sampled = True
 
         events: list[dict[str, Any]] = []
+        self._poll_read_only()
         for member in self.members:
             events.extend(member.on_quote(quote, self.quotes, costs))
         if any(event["event"] == "member_fill" for event in events):
@@ -175,18 +183,61 @@ class StrategyDesk:
             self._costs_at = now
         return self._costs
 
-    def _drop_failed(self, weights: dict[str, float]) -> dict[str, float]:
+    def _note(self, member: str, problem: str, event: dict[str, Any]) -> None:
+        """Journal a member's problem once, until it clears."""
+        if (member, problem) not in self._noted:
+            self._noted.add((member, problem))
+            self.journal(event)
+
+    def _poll_read_only(self) -> None:
+        """Follow books other processes write (the swarm's changes daily), at most once a minute."""
+        now = self._monotonic()
+        if now - self._polled_at < BOOK_POLL_SECONDS:
+            return
+        self._polled_at = now
+        for member in self.members:
+            check = getattr(member.book, "refresh_if_changed", None)
+            if not callable(check):
+                continue
+            if check():
+                self._pending = True
+            error = getattr(member.book, "read_error", "")
+            if error:
+                self._note(member.name, "unreadable", {
+                    "event": "desk_member_unreadable", "member": member.name, "problem": error,
+                    "note": "keeping its last good book"})
+            else:
+                self._noted.discard((member.name, "unreadable"))
+
+    def _stale(self, member: Member, stamp: datetime) -> bool:
+        if not isinstance(member, ReadOnlyMember) or member.name in UNFUNDED:
+            return False  # staleness guards funded money; an unfunded member's would-earn is only a record
+        day = str(member.book.to_dict().get("mark_day") or "")
+        try:
+            return (stamp.date() - date.fromisoformat(day)).days > STALE_BOOK_DAYS
+        except ValueError:
+            return True
+
+    def _drop_failed(self, weights: dict[str, float], stamp: datetime) -> dict[str, float]:
         out = dict(weights)
         for member in self.members:
-            if member.failed and out.get(member.name, 0.0) > 0:
+            if out.get(member.name, 0.0) <= 0:
+                continue
+            stale = self._stale(member, stamp)
+            if member.failed or stale:
                 out[self.benchmark] = round(out.get(self.benchmark, 0.0) + out[member.name], 6)
                 out[member.name] = 0.0
+            if stale:
+                self._note(member.name, "stale", {
+                    "event": "desk_member_stale", "member": member.name,
+                    "mark_day": member.book.to_dict().get("mark_day"),
+                    "note": f"not updated for over {STALE_BOOK_DAYS} days: its weight went to the benchmark"})
         return out
 
     def _reallocate(self, stamp: datetime) -> list[dict[str, Any]]:
         from agentic_trading.walkforward import rotation_anchor
 
-        cleaned = self._drop_failed(self.allocations)
+        cleaned = self._drop_failed(self.allocations, stamp)
         if cleaned != self.allocations:
             self.allocations = cleaned
             self._pending = True
@@ -206,7 +257,7 @@ class StrategyDesk:
             for member in self.members
         ]
         result = allocate(records, benchmark=self.benchmark, previous=self.allocations)
-        weights, would_earn = hold_unfunded(self._drop_failed(result.weights), benchmark=self.benchmark)
+        weights, would_earn = hold_unfunded(self._drop_failed(result.weights, stamp), benchmark=self.benchmark)
         changed = weights != self.allocations
         self.allocation_week = week
         if changed:

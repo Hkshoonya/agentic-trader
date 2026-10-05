@@ -47,8 +47,8 @@ class ReadOnlyBookTests(unittest.TestCase):
             reader.refresh()
             self.assertEqual((len(reader.samples), reader.entries, reader.path), (2, 2, path))
             path.write_text("garbage")
-            reader.refresh()
-            self.assertEqual(reader.samples, [])
+            reader.refresh()  # a bad read keeps the last good copy: "nothing held" would sell it all
+            self.assertEqual((len(reader.samples), reader.read_error), (2, "unreadable"))
 
 
 class UnfundedTests(unittest.TestCase):
