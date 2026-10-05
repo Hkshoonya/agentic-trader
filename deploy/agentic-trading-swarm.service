@@ -1,0 +1,13 @@
+[Unit]
+Description=Agentic Trading swarm step (age, cull, keep the swarm's paper book, breed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/doczeus/.local/bin/agentic-trading-swarm
+# twelve screens take ~5 minutes; a long catch-up after days offline takes longer
+TimeoutStartSec=45min
+Nice=10
+StandardOutput=append:/home/doczeus/Projects/Agnetic TraDING/data/state/swarm.log
+StandardError=append:/home/doczeus/Projects/Agnetic TraDING/data/state/swarm.log
