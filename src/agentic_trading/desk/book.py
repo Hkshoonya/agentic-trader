@@ -246,9 +246,34 @@ class MemberBook:
         return book, False
 
 
+def _stat(path: Optional[Path]) -> Optional[tuple[int, int]]:
+    try:
+        info = path.stat() if path is not None else None
+    except OSError:
+        return None
+    return None if info is None else (info.st_mtime_ns, info.st_size)
+
+
 class ReadOnlyBook(MemberBook):
-    """A member book another process owns: the switchboard's, written by the
-    venues service. The desk reads it, and never marks or writes it."""
+    """A member book another process owns: the switchboard's (the venues service)
+    or the swarm's (its daily job). The desk reads it, and never marks or writes it.
+
+    A file that can't be read keeps the last good copy and sets ``read_error``:
+    for a funded member, reading "nothing held" would sell everything it holds.
+    """
+
+    seen: Optional[tuple[int, int]] = None
+    read_error = ""
+    good = False  # read successfully at least once: until then the desk must not act on it
+
+    @classmethod
+    def load(cls, path: Path | str, *, name: str, starting_equity: Decimal) -> tuple["MemberBook", bool]:
+        book, broken = super().load(path, name=name, starting_equity=starting_equity)
+        present = Path(path).is_file()
+        book.good = present and not broken
+        book.seen = _stat(Path(path)) if book.good else None
+        book.read_error = "" if book.good else ("unreadable" if broken else "missing")
+        return book, broken
 
     def mark(self, prices: dict[str, Decimal], stamp: datetime) -> bool:
         return False
@@ -256,11 +281,32 @@ class ReadOnlyBook(MemberBook):
     def save(self) -> None:
         return None
 
-    def refresh(self) -> None:
-        """Re-read the owner's latest file. An unreadable file reads as empty."""
+    def refresh(self) -> bool:
+        """Re-read the owner's latest file; on a missing or unreadable file keep the last good copy."""
         if self.path is None:
-            return
-        fresh, _ = MemberBook.load(self.path, name=self.name, starting_equity=self.starting_equity)
+            return False
+        if not self.path.is_file():
+            self.read_error = "missing"
+            return False
+        fresh, broken = MemberBook.load(self.path, name=self.name, starting_equity=self.starting_equity)
+        if broken:
+            self.read_error = "unreadable"
+            return False
         for key, value in vars(fresh).items():
             if key != "path":
                 setattr(self, key, value)
+        self.read_error = ""
+        self.good = True
+        self.seen = _stat(self.path)
+        return True
+
+    def refresh_if_changed(self) -> bool:
+        """Re-read only when the file changed; True when the holdings changed (a retarget is due)."""
+        stat = _stat(self.path)
+        if stat is None:
+            self.read_error = "missing" if self.path is not None else ""
+            return False
+        if stat == self.seen:
+            return False
+        before = dict(self.positions)
+        return self.refresh() and self.positions != before  # a failed read is retried on the next poll

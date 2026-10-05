@@ -54,6 +54,10 @@ class Scout:
         if hasattr(client, "timeout"):
             client.timeout = TIMEOUT
 
+    def exhausted(self, memory: dict[str, Any], today: date) -> bool:
+        """True when this week's proposals are all spent (nothing to ask, nothing to say)."""
+        return memory.get("week") == week_key(today) and int(memory.get("spent") or 0) >= self.budget
+
     def propose(self, memory: dict[str, Any], *, today: date, living: list[dict[str, Any]],
                 trials: int) -> tuple[Optional[Recipe], str]:
         week = week_key(today)

@@ -14,7 +14,7 @@ from datetime import date
 from typing import Iterable
 
 from agentic_trading.history import Bar
-from agentic_trading.swarm.life import Agent, agent_weights
+from agentic_trading.swarm.life import Agent, agent_weights, compounded_excess
 
 TRAILING_DAYS = 60
 BENCHMARK_WEIGHTS = {"QQQ": 0.6, "BTCUSD": 0.4}
@@ -24,7 +24,7 @@ MONDAY = 0
 def contributing(agent: Agent, *, nursery_days: int) -> bool:
     record = agent.record
     return (not agent.errored and len(record.days) >= nursery_days
-            and math.fsum(record.excess[-TRAILING_DAYS:]) > 0)
+            and compounded_excess(record.returns[-TRAILING_DAYS:], record.excess[-TRAILING_DAYS:]) > 0)
 
 
 def _vol(returns: tuple[float, ...]) -> float:

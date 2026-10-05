@@ -259,3 +259,82 @@ class ReviewFixTests(unittest.TestCase):
         for path in sorted(Path(self.config.journal_dir).glob("swarm-*.jsonl")):
             out += [json.loads(line) for line in path.read_text().splitlines()]
         return out
+
+
+class DeferredFixTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = load_config(_write_config(Path(self.tmp.name)))
+        self.store = SwarmStore(self.config.state_dir)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _events(self) -> list[dict]:
+        out = []
+        for path in sorted(Path(self.config.journal_dir).glob("swarm-*.jsonl")):
+            out += [json.loads(line) for line in path.read_text().splitlines()]
+        return out
+
+    def test_a_spent_scout_stays_quiet(self) -> None:
+        from agentic_trading.llm.client import FakeLlmClient
+        from agentic_trading.swarm.scout import week_key
+        from agentic_trading.swarm.store import SwarmState
+
+        as_of = LAST - timedelta(days=1)
+        self.store.save(SwarmState(scout={"week": week_key(as_of), "spent": 3}))
+        client = FakeLlmClient("{}")
+        with mock.patch("agentic_trading.swarm.step.screen", return_value=PASS):
+            run_step(self.config, SwarmConfig(enabled=True, max_agents=6, screens_per_day=3, llm_scout=True),
+                     now=_now(LAST + timedelta(days=1)), series=SERIES, costs=CostModel(), cash=50,
+                     scout_client=client)
+        self.assertEqual([e for e in self._events() if e["event"] == "swarm_scout"], [])
+        self.assertEqual(client.calls, [])
+
+    def test_a_rejected_recipe_is_never_screened_again(self) -> None:
+        from agentic_trading.swarm.recipe import validate
+
+        same = validate({"family": "trend", "params": {"horizons": [10, 20, 50, 100], "min_vote": 0.5,
+                                                       "max_positions": 4},
+                         "universe": "all", "per_order_pct": 0.2, "inverse_vol": False})
+        fail = Screen(False, "lost -1.0% after costs")
+        early = {s: [b for b in bars if b.start.date() <= LAST - timedelta(days=4)] for s, bars in SERIES.items()}
+        with mock.patch("agentic_trading.swarm.step.immigrant", return_value=same), \
+                mock.patch("agentic_trading.swarm.step.screen", return_value=fail) as screened:
+            run_step(self.config, SWARM, now=_now(LAST - timedelta(days=3)), series=early, costs=CostModel(), cash=50)
+            run_step(self.config, SWARM, now=_now(LAST + timedelta(days=1)), series=SERIES, costs=CostModel(),
+                     cash=50)
+        self.assertEqual(screened.call_count, 1)
+        self.assertEqual(self.store.load(_now(LAST))[0].trials, 1)
+
+
+class BookSafetyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = load_config(_write_config(Path(self.tmp.name)))
+        self.store = SwarmStore(self.config.state_dir)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_a_corrupt_book_stops_the_step_and_is_never_overwritten(self) -> None:
+        early = {s: [b for b in bars if b.start.date() <= LAST - timedelta(days=4)] for s, bars in SERIES.items()}
+        with mock.patch("agentic_trading.swarm.step.screen", return_value=PASS):
+            run_step(self.config, SWARM, now=_now(LAST - timedelta(days=3)), series=early, costs=CostModel(), cash=50)
+            self.store.book_path.write_text("{garbage")
+            result = run_step(self.config, SWARM, now=_now(LAST + timedelta(days=1)), series=SERIES,
+                              costs=CostModel(), cash=50)
+        self.assertEqual(result.code, 1)
+        self.assertIn("unreadable", result.message)
+        self.assertEqual(self.store.book_path.read_text(), "{garbage")
+        self.assertEqual(self.store.load(_now(LAST))[0].last_step, (LAST - timedelta(days=5)).isoformat())
+
+    def test_a_long_market_weekend_does_not_stop_the_swarm(self) -> None:
+        from agentic_trading.swarm.step import stale_note
+        from tests.swarm_support import daily
+        start = LAST - timedelta(days=30)
+        series = {"QQQ": daily("QQQ", [400.0] * 20, start=start),  # its last close: start + 19
+                  "BTCUSD": daily("BTCUSD", [60000.0] * 25, start=start)}
+        today = start + timedelta(days=19 + 5)  # a Thursday holiday plus a weekend, and a day of sync lag
+        self.assertEqual(stale_note(series, today), "")
+        self.assertIn("QQQ", stale_note(series, today + timedelta(days=2)))

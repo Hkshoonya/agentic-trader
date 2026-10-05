@@ -12,6 +12,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Optional
 
 from agentic_trading.desk.book import MemberBook
@@ -28,7 +29,7 @@ from agentic_trading.swarm.screen import duplicate_of, screen
 from agentic_trading.swarm.settings import SwarmConfig
 from agentic_trading.swarm.store import SwarmState, SwarmStore
 
-STALE_DAYS = 4
+STALE_DAYS = 6  # a Thursday holiday, a weekend and a day of sync lag still leave the swarm running
 RECENT = 20
 SIGNATURE_KEEP = 250
 MAX_TRIES = 50
@@ -83,6 +84,7 @@ class _Step:
         self.scout_client = scout_client
         self.journal = FastJournal(config.journal_dir, prefix="swarm")
         self.events: list[dict[str, Any]] = []
+        self._floors: dict[str, Decimal] = {}
 
     def say(self, event: str, text: str, **extra: Any) -> None:
         record = {"event": event, "at": self.now.isoformat(), "text": text, **extra}
@@ -112,6 +114,13 @@ class _Step:
             self.say("swarm_store_reset", text)
         if state.last_step and state.last_step >= as_of.isoformat():
             return StepResult(0, f"already stepped through {as_of}; nothing to do")
+        book, reset = MemberBook.load(self.store.book_path, name="swarm", starting_equity=self.cash)
+        if reset:  # never replace a funded book with fresh cash: the desk would sell its whole share
+            text = ("the swarm's book is unreadable; nothing was changed. Move data/state/desk/swarm.json "
+                    "aside to start a fresh book (the desk will then follow the fresh book)")
+            self.say("swarm_book_unreadable", text)
+            return StepResult(1, text)
+        self.book = book
         self.series = through(series, as_of)
         self._records(state, as_of)
         deaths, agent_shares = self._days(state, as_of)
@@ -144,9 +153,8 @@ class _Step:
 
     def _days(self, state: SwarmState, as_of: date) -> tuple[int, dict[str, float]]:
         """Every day since the last step, in order: cull on what the day knew, then trade at its close."""
-        book, reset = MemberBook.load(self.store.book_path, name="swarm", starting_equity=self.cash)
-        if reset:
-            self.say("swarm_store_reset", "the swarm's book was unreadable; it starts fresh")
+        book = self.book
+        universe = set(self.series)
         day = date.fromisoformat(state.last_step) + timedelta(days=1) if state.last_step else as_of
         deaths, agent_shares = 0, {}
         taken = str(book.to_dict().get("mark_day") or "")
@@ -170,11 +178,22 @@ class _Step:
                       for a in state.living]  # shares use only days before this one
             agent_shares = shares(before, nursery_days=self.swarm.nursery_days)
             weights = blend_weights(before, agent_shares, self.series, day)
-            advance(book, day, weights, closes_on(self.series, day), self.costs)
+            advance(book, day, weights, closes_on(self.series, day), self.costs, universe=universe,
+                    minimum=self._minimum)
             day += timedelta(days=1)
         book.save()
-        self.book = book
         return deaths, agent_shares
+
+    def _minimum(self, symbol: str) -> Decimal:
+        """The account's smallest buy for ``symbol``, as the desk computes it (cost floor included)."""
+        from agentic_trading.execution import required_notional_for_cost
+
+        if symbol not in self._floors:
+            floor = Decimal(str(getattr(self.config, "min_order_notional", "1") or "1"))
+            share = float(getattr(self.config, "max_cost_share_of_order", 0) or 0)
+            required = required_notional_for_cost(self.config.state_dir, max_share=share, symbol=symbol)
+            self._floors[symbol] = max(floor, Decimal(str(required))) if required else floor
+        return self._floors[symbol]
 
     def _scout(self) -> Optional[Scout]:
         if not self.swarm.llm_scout:
@@ -201,7 +220,9 @@ class _Step:
         rng = random.Random(f"{self.swarm.seed}:{as_of.isoformat()}:{state.trials}")
         birth = as_of + timedelta(days=1)
         scout = self._scout()
-        known = set(state.lineage) | {a.recipe.id for a in state.living}
+        if scout is not None and scout.exhausted(state.scout, as_of):
+            scout = None  # spent for the week: say nothing until Monday
+        known = set(state.lineage) | {a.recipe.id for a in state.living} | set(state.rejected)
         births = screens = tries = 0
         while (len(state.living) < self.swarm.max_agents and screens < self.swarm.screens_per_day
                and tries < MAX_TRIES):
@@ -235,6 +256,8 @@ class _Step:
                 if twin:
                     reason = f"a near-copy of {twin}"
             if reason != "passed":
+                if not result.passed:
+                    state.rejected.append(candidate.id)  # the screen's verdict: never screened (or counted) again
                 self.say("swarm_rejected", f"{candidate.name} was not born: {reason}", agent=candidate.id)
                 continue
             state.living.append(Agent(candidate, birth.isoformat(), dict(result.signature)))

@@ -13,18 +13,23 @@ from __future__ import annotations
 import json
 import math
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from agentic_trading.desk.allocator import MemberRecord, allocate, hold_unfunded
+from agentic_trading.desk.allocator import UNFUNDED, MemberRecord, allocate, hold_unfunded
 from agentic_trading.desk.book import ZERO, MemberBook
-from agentic_trading.desk.member import Member, broker_symbol
+from agentic_trading.desk.member import Member, ReadOnlyMember, broker_symbol
 from agentic_trading.desk.netting import MIN_USD, gap_intent, target_quantities
 from agentic_trading.types import OrderIntent
 
 COSTS_REFRESH_SECONDS = 60.0
+# How often the desk checks whether a book another process writes has changed.
+BOOK_POLL_SECONDS = 60.0
+# A book another process writes that hasn't been marked for this many days is stale:
+# its weight goes to the benchmark, so a dead job's frozen holdings are never funded.
+STALE_BOOK_DAYS = 6  # the swarm marks 1-2 days behind; leave room for a long market weekend
 
 
 def _decimal(value: Any) -> Optional[Decimal]:
@@ -90,6 +95,10 @@ class StrategyDesk:
         self._last_emit: dict[str, tuple[float, Decimal]] = {}
         self._costs: Any = None
         self._costs_at = -math.inf
+        self._polled_at = -math.inf
+        self._noted: set[tuple[str, str]] = set()  # (member, problem) already journaled
+        self._scope: set[str] = set()  # symbols a funded read-only book changed: retarget just these
+        self._stale_now: set[str] = set()  # funded read-only members whose weight is lent to the benchmark
         self._load()
 
     # -- runtime strategy interface ---------------------------------------
@@ -152,14 +161,21 @@ class StrategyDesk:
                 sampled = True
 
         events: list[dict[str, Any]] = []
+        self._poll_read_only()
         for member in self.members:
             events.extend(member.on_quote(quote, self.quotes, costs))
         if any(event["event"] == "member_fill" for event in events):
             self._pending = True
 
         events.extend(self._reallocate(stamp))
+        stale = self._stale_members(stamp)
+        if stale != self._stale_now:
+            self._stale_now = stale
+            self._pending = True
         if self._pending:
             events.extend(self._retarget())
+        elif self._scope:
+            events.extend(self._retarget(only=self._scope))
         if events or sampled:
             self._persist(self._save, events)
         for event in events:
@@ -174,6 +190,70 @@ class StrategyDesk:
             self._costs = self._costs_source()
             self._costs_at = now
         return self._costs
+
+    def _note(self, member: str, problem: str, event: dict[str, Any]) -> None:
+        """Journal a member's problem once, until it clears."""
+        if (member, problem) not in self._noted:
+            self._noted.add((member, problem))
+            self.journal(event)
+
+    def _poll_read_only(self, force: bool = False) -> None:
+        """Follow books other processes write (the swarm's changes daily), at most once a minute.
+
+        Only a funded member's change retargets, and only its own symbols: an unfunded book
+        changing must never re-size the account.
+        """
+        now = self._monotonic()
+        if not force and now - self._polled_at < BOOK_POLL_SECONDS:
+            return
+        self._polled_at = now
+        for member in self.members:
+            check = getattr(member.book, "refresh_if_changed", None)
+            if not callable(check):
+                continue
+            before = set(member.book.positions)
+            if check() and self.allocations.get(member.name, 0.0) > 0:
+                self._scope |= before | set(member.book.positions)
+            error = getattr(member.book, "read_error", "")
+            if error:
+                self._note(member.name, "unreadable", {
+                    "event": "desk_member_unreadable", "member": member.name, "problem": error,
+                    "note": "keeping its last good book" if getattr(member.book, "good", True)
+                    else "never read: holding the account's targets until it is"})
+            else:
+                self._noted.discard((member.name, "unreadable"))
+
+    def _funded_read_only(self) -> list[Member]:
+        return [m for m in self.members if isinstance(m, ReadOnlyMember) and m.name not in UNFUNDED
+                and self.allocations.get(m.name, 0.0) > 0]
+
+    def _stale_members(self, stamp: datetime) -> set[str]:
+        """Funded read-only members not marked for over STALE_BOOK_DAYS: their weight goes to the
+        benchmark while they stay stale (never saved, so it returns the moment a fresh book is read)."""
+        stale = set()
+        for member in self._funded_read_only():
+            if not getattr(member.book, "good", True):
+                continue  # never read: frozen, not stale (see _retarget)
+            day = str(getattr(member.book, "_mark_day", "") or "")
+            try:
+                old = (stamp.date() - date.fromisoformat(day)).days > STALE_BOOK_DAYS
+            except ValueError:
+                old = True
+            if old:
+                stale.add(member.name)
+                self._note(member.name, "stale", {
+                    "event": "desk_member_stale", "member": member.name, "mark_day": day or None,
+                    "note": f"not updated for over {STALE_BOOK_DAYS} days: its weight is lent to the benchmark"})
+            else:
+                self._noted.discard((member.name, "stale"))
+        return stale
+
+    def _effective(self) -> dict[str, float]:
+        out = dict(self.allocations)
+        for name in self._stale_now:
+            out[self.benchmark] = round(out.get(self.benchmark, 0.0) + out.get(name, 0.0), 6)
+            out[name] = 0.0
+        return out
 
     def _drop_failed(self, weights: dict[str, float]) -> dict[str, float]:
         out = dict(weights)
@@ -193,10 +273,7 @@ class StrategyDesk:
         week = rotation_anchor(stamp).date().isoformat()
         if week == self.allocation_week:
             return []
-        for member in self.members:
-            refresh = getattr(member.book, "refresh", None)
-            if callable(refresh):
-                refresh()  # a book another process writes (the switchboard's)
+        self._poll_read_only(force=True)  # books other processes write, read fresh for the allocation
         records = [
             MemberRecord(
                 member.name,
@@ -224,19 +301,31 @@ class StrategyDesk:
             }
         ]
 
-    def _retarget(self) -> list[dict[str, Any]]:
+    def _retarget(self, only: Optional[set[str]] = None) -> list[dict[str, Any]]:
         if self.account.cash_pending:
             return []  # the account's value is unknown until every holding is priced
+        if any(not getattr(m.book, "good", True) for m in self._funded_read_only()):
+            return []  # a funded book never read: hold every target rather than sell its share
         prices = {s: m for s, q in self.quotes.items() if (m := _mid(q)) is not None}
         weights = {member.name: member.book.weights() for member in self.members}
         targets, unpriced = target_quantities(
-            self.allocations, weights, self.account.equity, prices
+            self._effective(), weights, self.account.equity, prices
         )
         for symbol in unpriced:
             if symbol in self.targets:
                 targets[symbol] = self.targets[symbol]
+        if only is not None:  # a funded book changed: re-size its symbols, hold every other quantity
+            scoped = dict(self.targets)
+            for symbol in only:
+                if symbol in targets:
+                    scoped[symbol] = targets[symbol]
+                else:
+                    scoped.pop(symbol, None)
+            targets = scoped
+            unpriced = [s for s in unpriced if s in only]
         self._pending = False
-        self._awaiting = set(unpriced)
+        self._scope = set()
+        self._awaiting = (self._awaiting - only) | set(unpriced) if only is not None else set(unpriced)
         if targets == self.targets:
             return []
         self.targets = targets

@@ -27,6 +27,7 @@ from agentic_trading.fast.store import FastStore
 from agentic_trading.swarm.life import Agent
 
 STALE_LOCK_SECONDS = 3 * 3600
+REJECTED_KEEP = 20_000  # ~12 refusals a day for years; enough never to re-screen an idea
 
 
 @dataclass
@@ -36,6 +37,7 @@ class SwarmState:
     trials: int = 0
     last_step: str = ""
     scout: dict[str, Any] = field(default_factory=dict)
+    rejected: list[str] = field(default_factory=list)  # recipe ids screened and refused
 
 
 class SwarmStore:
@@ -76,7 +78,8 @@ class SwarmStore:
                 notes.append("an unreadable agent was dropped from population.json")
         trials = max(_count(ledger.get("trials")), _count(lineage.get("trials")))
         agents = lineage.get("agents") if isinstance(lineage.get("agents"), dict) else {}
-        return SwarmState(living, agents, trials, str(ledger.get("last_step") or ""), scout), notes
+        rejected = [str(r) for r in ledger.get("rejected") or [] if isinstance(r, str)]
+        return SwarmState(living, agents, trials, str(ledger.get("last_step") or ""), scout, rejected), notes
 
     def _write(self, path: Path, payload: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +88,8 @@ class SwarmStore:
     def save(self, state: SwarmState) -> None:
         self._write(self.population_path, {"agents": [a.to_row() for a in state.living]})
         self._write(self.lineage_path, {"trials": state.trials, "agents": state.lineage})
-        self._write(self.ledger_path, {"trials": state.trials, "last_step": state.last_step})
+        self._write(self.ledger_path, {"trials": state.trials, "last_step": state.last_step,
+                                       "rejected": state.rejected[-REJECTED_KEEP:]})
         self._write(self.scout_path, state.scout)
 
     def write_status(self, status: dict[str, Any]) -> None:

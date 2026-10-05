@@ -30,7 +30,7 @@ BASE_MEMBERS = 2
 # another process, and no live order path exists for them. Lifting this is a
 # code change in the live sub-project, never a config switch. The swarm's book is
 # written by its daily job.
-UNFUNDED = frozenset({"switchboard", "swarm"})
+UNFUNDED = frozenset({"switchboard"})  # the swarm was funded on 2026-10-05, at the operator's request
 
 
 def hold_unfunded(weights: dict[str, float], *, benchmark: str) -> tuple[dict[str, float], dict[str, float]]:

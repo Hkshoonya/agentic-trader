@@ -78,3 +78,11 @@ class LifeTests(unittest.TestCase):
         again = Agent.from_row(agent.to_row())
         self.assertEqual((again.recipe.id, again.born, again.signature, again.errored),
                          (TREND.id, BIRTH.isoformat(), {"2024-10-01": 0.01}, ""))
+
+
+class CompoundingTests(unittest.TestCase):
+    def test_excess_compounds_like_the_desk(self) -> None:
+        record = Record(("d1", "d2"), (0.1, 0.1), (0.1, 0.1), 2, 0.0, 21.0)  # the benchmark stood still
+        self.assertAlmostEqual(record.excess_pct, 21.0)
+        flat = Record(("d1", "d2"), (0.1, -0.1), (0.0, 0.0), 2, 0.0, -1.0)  # matched the benchmark exactly
+        self.assertAlmostEqual(flat.excess_pct, 0.0)

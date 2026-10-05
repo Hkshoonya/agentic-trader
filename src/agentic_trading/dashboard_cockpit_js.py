@@ -99,11 +99,13 @@ const CockpitFmt = (() => {
   };
   const swarmHead = (view) => (view.alive || 0) + ' alive · ' + (view.trials || 0) + ' recipes tried · book '
     + (view.book && view.book.return_pct != null ? signedPct(view.book.return_pct) : 'not started');
+  const swarmBadge = (weight) => 'funded by results · ' + (weight == null
+    ? 'its first allocation comes on a Monday' : 'desk weight ' + Math.round(weight * 100) + '%');
   const swarmLine = (a) => a.forward_days + ' days · ' + a.state
     + (a.state === 'contributing' ? ' ' + Math.round((a.share || 0) * 100) + '%' : '')
     + ' · ' + signedPct(a.excess_pct || 0) + ' vs 60/40';
   return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst,
-    regimeWord, fastCompare, fundedBadge, tradeLine, swarmHead, swarmLine };
+    regimeWord, fastCompare, fundedBadge, tradeLine, swarmHead, swarmLine, swarmBadge };
 })();
 
 const Cockpit = (() => {
@@ -515,7 +517,7 @@ const Cockpit = (() => {
       box.innerHTML = '<div class="sub">' + esc((view && view.note) || 'the swarm has not run yet') + '</div>';
       return;
     }
-    const head = '<div class="fhead"><span class="fbadge">' + esc(CockpitFmt.fundedBadge(view.would_earn))
+    const head = '<div class="fhead"><span class="fbadge">' + esc(CockpitFmt.swarmBadge(view.weight))
       + '</span><span class="sub">' + esc(CockpitFmt.swarmHead(view)) + '</span></div>';
     const notes = view.stale ? '<div class="sub">' + esc(view.note || 'the swarm has not stepped for a while') + '</div>' : '';
     const tiles = (view.agents || []).map((a) => '<div class="stile ' + esc(a.state) + ' '

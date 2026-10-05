@@ -1,4 +1,4 @@
-"""The desk reads the swarm's book like the switchboard's: judged, never written, never funded."""
+"""The desk reads the swarm's book like the switchboard's: judged and never written; the swarm is funded."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ MEMBERS = 'desk_members = ["momentum_rotation", "trend_crypto", "swarm", "benchm
 
 
 class SwarmDeskTests(unittest.TestCase):
-    def test_the_swarm_is_unfunded_and_its_weight_goes_to_the_benchmark(self) -> None:
-        self.assertEqual(UNFUNDED, frozenset({"switchboard", "swarm"}))
+    def test_the_swarm_is_funded_and_keeps_its_weight(self) -> None:
+        self.assertNotIn("swarm", UNFUNDED)
         held, would = hold_unfunded({"swarm": 0.5, "benchmark": 0.5}, benchmark="benchmark")
-        self.assertEqual((held, would), ({"swarm": 0.0, "benchmark": 1.0}, {"swarm": 0.5}))
+        self.assertEqual((held, would), ({"swarm": 0.5, "benchmark": 0.5}, {}))
 
     def test_the_swarm_is_a_read_only_member(self) -> None:
         from agentic_trading.cli import build_strategy

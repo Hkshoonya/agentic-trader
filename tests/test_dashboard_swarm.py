@@ -39,13 +39,15 @@ class SwarmViewTests(unittest.TestCase):
         self.assertFalse(view["enabled"])
         self.assertIn("[swarm] enabled = true", view["note"])
 
-    def test_only_whitelisted_fields_pass_and_would_earn_comes_from_the_desk(self) -> None:
-        events = [{"event": "desk_allocation", "would_earn": {"swarm": 0.25, "switchboard": 0.0}}]
+    def test_only_whitelisted_fields_pass_and_the_weight_comes_from_the_desk(self) -> None:
+        events = [{"event": "desk_allocation", "allocations": {"swarm": 0.1, "benchmark": 0.9}},
+                  {"event": "desk_allocation", "allocations": {"swarm": 0.25, "benchmark": 0.75}}]
         with tempfile.TemporaryDirectory() as name:
             _state(Path(name), T0)
             view = swarm_view(Path(name), events, now=T0 + timedelta(hours=1))
         self.assertNotIn("LEAK", json.dumps(view))
-        self.assertEqual((view["trials"], view["alive"], view["would_earn"], view["stale"]), (31, 1, 0.25, False))
+        self.assertEqual((view["trials"], view["alive"], view["weight"], view["stale"]), (31, 1, 0.25, False))
+        self.assertNotIn("would_earn", view)
         self.assertEqual(view["agents"][0]["state"], "contributing")
 
     def test_a_day_and_a_half_without_a_step_is_stale(self) -> None:
@@ -88,3 +90,14 @@ class SwarmTickerTests(unittest.TestCase):
                 {"event": "fast_exit", "at": "2026-10-05T12:00:00+00:00", "text": "out"}) + "\n")
             events = DeskEventCache(folder).read()
         self.assertEqual([e["event"] for e in events], ["swarm_birth", "desk_allocation", "fast_exit"])
+
+
+class SwarmWeightTests(unittest.TestCase):
+    def test_the_weight_is_the_desks_current_allocation(self) -> None:
+        events = [{"event": "desk_allocation", "allocations": {"swarm": 0.25, "benchmark": 0.75}}]
+        with tempfile.TemporaryDirectory() as name:
+            _state(Path(name), T0)
+            (Path(name) / "desk").mkdir()
+            (Path(name) / "desk" / "desk.json").write_text(json.dumps({"allocations": {"swarm": 0.3}}))
+            view = swarm_view(Path(name), events, now=T0)
+        self.assertEqual(view["weight"], 0.3)
