@@ -145,16 +145,63 @@ class FundingTests(unittest.TestCase):
             len([e for e in rig.log if e["event"] == "desk_member_unreadable"]), 1
         )
 
-    def test_a_stale_read_only_book_hands_its_weight_to_the_benchmark(self) -> None:
+    def test_a_stale_book_hands_its_weight_back_only_while_stale(self) -> None:
         with tempfile.TemporaryDirectory() as name:
-            rig = _Rig(
-                Path(name), 0.5, mark_day="2026-09-18"
-            )  # six days before Thursday's quote
-        self.assertEqual(rig.desk.allocations["swarm"], 0.0)
-        self.assertEqual(rig.desk.allocations["benchmark"], 1.0)
-        self.assertEqual(
-            len([e for e in rig.log if e["event"] == "desk_member_stale"]), 1
-        )
+            rig = _Rig(Path(name), 0.5, mark_day="2026-09-15")  # nine days before Thursday's quote
+            stale_btc = rig.targets()[-1]["targets"].get("BTC-USD")
+            self.assertEqual(rig.desk.allocations["swarm"], 0.5)  # the allocator's decision is kept
+            _write_swarm(rig.path, {"BTC-USD": "0.2"}, {"BTC-USD": "100"}, mark_day="2026-09-23")
+            rig.later_quote("BTC-USD", "99", "101")
+            fresh_btc = rig.targets()[-1]["targets"]["BTC-USD"]
+        self.assertAlmostEqual(float(D(stale_btc)), 0.0 + 1.0 * 50 * 0.4 / 100, delta=0.01)  # benchmark only
+        self.assertAlmostEqual(float(D(fresh_btc)), 0.2, delta=0.01)  # the swarm's share is back
+        self.assertEqual(len([e for e in rig.log if e["event"] == "desk_member_stale"]), 1)
+
+    def test_a_restart_with_a_missing_book_freezes_targets_and_keeps_the_weight(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            folder = Path(name)
+            rig = _Rig(folder, 0.5)
+            before = rig.targets()[-1]["targets"]
+            rig.path.unlink()
+            reader, _ = ReadOnlyBook.load(rig.path, name="swarm", starting_equity=D("50"))
+            bench, _ = MemberBook.load(folder / "desk" / "benchmark.json", name="benchmark", starting_equity=D("50"))
+            account, _ = MemberBook.load(folder / "desk" / "account.json", name="account", starting_equity=D("50"))
+            log: list[dict] = []
+            clock = _Clock()
+            desk = StrategyDesk(
+                members=[Member("benchmark", BenchmarkStrategy(), bench, order_pct=D("0.19")),
+                         ReadOnlyMember("swarm", reader)],
+                account=account, costs=lambda: FREE, journal=log.append,
+                state_path=folder / "desk" / "desk.json", monotonic=clock)
+            desk.on_quote(quote("BTC-USD", "99", "101", THU))
+            self.assertEqual(desk.allocations["swarm"], 0.5)
+            self.assertEqual(desk.targets, {s: D(q) for s, q in before.items()})
+            self.assertEqual([e for e in log if e["event"] == "desk_targets"], [])
+            _write_swarm(rig.path, {"BTC-USD": "0.2"}, {"BTC-USD": "100"})
+            clock.now += BOOK_POLL_SECONDS + 1
+            desk.on_quote(quote("BTC-USD", "99", "101", THU))
+        self.assertEqual(desk.allocations["swarm"], 0.5)
+
+    def test_an_unfunded_change_never_resizes_the_account_after_prices_move(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            rig = _Rig(Path(name), 0.0)
+            rig.desk.on_quote(quote("BTC-USD", "109", "111", THU))  # a 10% move: no event retargets
+            before = len(rig.targets())
+            _write_swarm(rig.path, {"ETH-USD": "1"}, {"ETH-USD": "20"})
+            rig.later_quote("ETH-USD", "19.9", "20.1")
+        self.assertEqual(len(rig.targets()), before)
+
+    def test_a_funded_change_resizes_only_that_members_symbols(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            rig = _Rig(Path(name), 0.5)
+            rig.desk.on_quote(quote("QQQ", "399", "401", THU))
+            qqq_before = rig.targets()[-1]["targets"].get("QQQ")
+            rig.desk.on_quote(quote("QQQ", "439", "441", THU))  # QQQ +10%: no retarget by itself
+            _write_swarm(rig.path, {"ETH-USD": "1"}, {"ETH-USD": "20"})
+            rig.later_quote("ETH-USD", "19.9", "20.1")
+            last = rig.targets()[-1]["targets"]
+        self.assertIn("ETH-USD", last)
+        self.assertEqual(last.get("QQQ"), qqq_before)  # untouched: not the swarm's symbol
 
 
 class RefreshTests(unittest.TestCase):

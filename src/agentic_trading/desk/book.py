@@ -264,12 +264,15 @@ class ReadOnlyBook(MemberBook):
 
     seen: Optional[tuple[int, int]] = None
     read_error = ""
+    good = False  # read successfully at least once: until then the desk must not act on it
 
     @classmethod
     def load(cls, path: Path | str, *, name: str, starting_equity: Decimal) -> tuple["MemberBook", bool]:
         book, broken = super().load(path, name=name, starting_equity=starting_equity)
-        book.seen = _stat(Path(path))
-        book.read_error = "unreadable" if broken else ""
+        present = Path(path).is_file()
+        book.good = present and not broken
+        book.seen = _stat(Path(path)) if book.good else None
+        book.read_error = "" if book.good else ("unreadable" if broken else "missing")
         return book, broken
 
     def mark(self, prices: dict[str, Decimal], stamp: datetime) -> bool:
@@ -293,6 +296,8 @@ class ReadOnlyBook(MemberBook):
             if key != "path":
                 setattr(self, key, value)
         self.read_error = ""
+        self.good = True
+        self.seen = _stat(self.path)
         return True
 
     def refresh_if_changed(self) -> bool:
@@ -303,6 +308,5 @@ class ReadOnlyBook(MemberBook):
             return False
         if stat == self.seen:
             return False
-        self.seen = stat
         before = dict(self.positions)
-        return self.refresh() and self.positions != before
+        return self.refresh() and self.positions != before  # a failed read is retried on the next poll
