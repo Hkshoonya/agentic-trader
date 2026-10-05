@@ -97,8 +97,13 @@ const CockpitFmt = (() => {
     return t.playbook + ' open at ' + t.entry + ' · stop ' + t.stop
       + (t.pnl_pct == null ? '' : ' · ' + signedPct(t.pnl_pct));
   };
+  const swarmHead = (view) => (view.alive || 0) + ' alive · ' + (view.trials || 0) + ' recipes tried · book '
+    + (view.book && view.book.return_pct != null ? signedPct(view.book.return_pct) : 'not started');
+  const swarmLine = (a) => a.forward_days + ' days · ' + a.state
+    + (a.state === 'contributing' ? ' ' + Math.round((a.share || 0) * 100) + '%' : '')
+    + ' · ' + signedPct(a.excess_pct || 0) + ' vs 60/40';
   return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst,
-    regimeWord, fastCompare, fundedBadge, tradeLine };
+    regimeWord, fastCompare, fundedBadge, tradeLine, swarmHead, swarmLine };
 })();
 
 const Cockpit = (() => {
@@ -503,6 +508,37 @@ const Cockpit = (() => {
     }
   }
 
+  function renderSwarm(view) {
+    const box = $('swarm');
+    if (!box) return;
+    if (!view || !view.enabled) {
+      box.innerHTML = '<div class="sub">' + esc((view && view.note) || 'the swarm has not run yet') + '</div>';
+      return;
+    }
+    const head = '<div class="fhead"><span class="fbadge">' + esc(CockpitFmt.fundedBadge(view.would_earn))
+      + '</span><span class="sub">' + esc(CockpitFmt.swarmHead(view)) + '</span></div>';
+    const notes = view.stale ? '<div class="sub">' + esc(view.note || 'the swarm has not stepped for a while') + '</div>' : '';
+    const tiles = (view.agents || []).map((a) => '<div class="stile ' + esc(a.state) + ' '
+      + ((a.excess_pct || 0) >= 0 ? 'up' : 'down') + '"><b title="' + esc(a.family + ' · ' + a.universe + ' · ' + a.origin)
+      + '">' + esc(a.name) + '</b><span class="sub">' + esc(CockpitFmt.swarmLine(a)) + '</span></div>').join('');
+    const scout = view.scout && view.scout.enabled && view.scout.last_rationale
+      ? '<div class="squote">' + esc('scout: “' + view.scout.last_rationale + '”') + '</div>' : '';
+    const recent = (view.recent || []).map((r) => '<li>' + esc(r.text) + '</li>').join('');
+    box.innerHTML = head + notes + (tiles ? '<div class="sgrid">' + tiles + '</div>' : '<div class="sub">no agents alive yet</div>')
+      + scout + (recent ? '<ul class="frecent">' + recent + '</ul>' : '');
+  }
+
+  async function pollSwarm() {
+    if (document.hidden) return;
+    try {
+      const response = await fetch('/api/swarm');
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      renderSwarm(await response.json());
+    } catch (e) {
+      // keep the last picture; the header dot already shows a lost console
+    }
+  }
+
   function render(data) {
     const story = data.story || {};
     say('say-now', story.right_now);
@@ -550,6 +586,8 @@ const Cockpit = (() => {
     setInterval(pollVenues, 5000);
     pollFast();
     setInterval(pollFast, 2000);
+    pollSwarm();
+    setInterval(pollSwarm, 30000);
     setInterval(tick, 1000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
     // The overview's height is the screen minus the header, and the header's

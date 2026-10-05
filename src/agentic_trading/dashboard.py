@@ -28,6 +28,7 @@ from agentic_trading.config import Config, load_config
 from agentic_trading.dashboard_desk import DeskEventCache, build_desk_view
 from agentic_trading.dashboard_html import HTML
 from agentic_trading.dashboard_fast import fast_view
+from agentic_trading.dashboard_swarm import swarm_view
 from agentic_trading.dashboard_venues import venues_view
 from agentic_trading.jsonio import dumps as json_dumps
 from agentic_trading.promotion import load_state
@@ -1144,6 +1145,13 @@ class DashboardState:
             self._desk_events = DeskEventCache(self.journal_dir)
         return fast_view(self.state_dir, self._desk_events.read())
 
+    def swarm(self) -> dict[str, Any]:
+        """The swarm's population and book (``/api/swarm``)."""
+        self.refresh_config()
+        if self._desk_events.journal_dir != self.journal_dir:
+            self._desk_events = DeskEventCache(self.journal_dir)
+        return swarm_view(self.state_dir, self._desk_events.read())
+
     def venues(self) -> dict[str, Any]:
         """The Alpaca/Coinbase gateway's health (``/api/venues``)."""
         self.refresh_config()
@@ -1520,6 +1528,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/fast":
             self._json(self.state.fast())
+            return
+        if parsed.path == "/api/swarm":
+            self._json(self.state.swarm())
             return
         if parsed.path == "/api/activity":
             self._json(self.state.activity())

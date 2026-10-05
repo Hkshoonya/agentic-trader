@@ -105,6 +105,16 @@ header .badge{font-size:clamp(11px,.4vw + 6px,17px)}
 .frecent{margin:4px 0 0;padding-left:18px;color:var(--muted)}
 .frecent li{margin:2px 0}
 .item.fast .dot{background:var(--accent)}
+.swarm{display:grid;gap:8px}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px}
+.stile{border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:var(--panel);min-width:0}
+.stile b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stile.up{border-color:var(--buy)}
+.stile.down{border-color:var(--sell)}
+.stile.nursery{opacity:.7}
+.stile.errored{border-style:dashed;color:var(--warn)}
+.squote{color:var(--muted);font-style:italic}
+.item.swarm .dot{background:var(--buy)}
 /* Stacked: the page scrolls, so the race needs a height of its own (it was a
    150px strip), and the tiles pair up instead of stretching full width. */
 @media(max-width:1100px){#tab-overview.on{display:block;height:auto;min-height:0}.cockpit{grid-template-columns:1fr}.tiles{display:grid;grid-template-columns:1fr 1fr}#race{flex:none;height:clamp(260px,55vw,460px)}.tabs{margin-left:0}}
