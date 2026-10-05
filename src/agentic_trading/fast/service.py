@@ -25,17 +25,20 @@ RECENT = 20
 
 
 class FastJournal:
-    """``fast-<date>.jsonl`` beside the trader's journals; dated readers skip it by name."""
+    """``<prefix>-<date>.jsonl`` beside the trader's journals ("fast" or "swarm").
 
-    def __init__(self, journal_dir: Path | str) -> None:
+    Dated readers skip it by name."""
+
+    def __init__(self, journal_dir: Path | str, prefix: str = "fast") -> None:
         self.journal_dir = Path(journal_dir)
+        self.prefix = prefix
         self.errors = 0
 
     def append(self, record: dict[str, Any]) -> None:
         day = str(record.get("at") or "")[:10] or datetime.now(timezone.utc).date().isoformat()
         try:
             self.journal_dir.mkdir(parents=True, exist_ok=True)
-            with (self.journal_dir / f"fast-{day}.jsonl").open("a", encoding="utf-8") as handle:
+            with (self.journal_dir / f"{self.prefix}-{day}.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, separators=(",", ":"), default=str) + "\n")
         except OSError:
             self.errors += 1  # a full disk must not stop the switchboard
