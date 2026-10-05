@@ -39,13 +39,15 @@ class SwarmViewTests(unittest.TestCase):
         self.assertFalse(view["enabled"])
         self.assertIn("[swarm] enabled = true", view["note"])
 
-    def test_only_whitelisted_fields_pass_and_would_earn_comes_from_the_desk(self) -> None:
-        events = [{"event": "desk_allocation", "would_earn": {"swarm": 0.25, "switchboard": 0.0}}]
+    def test_only_whitelisted_fields_pass_and_the_weight_comes_from_the_desk(self) -> None:
+        events = [{"event": "desk_allocation", "allocations": {"swarm": 0.1, "benchmark": 0.9}},
+                  {"event": "desk_allocation", "allocations": {"swarm": 0.25, "benchmark": 0.75}}]
         with tempfile.TemporaryDirectory() as name:
             _state(Path(name), T0)
             view = swarm_view(Path(name), events, now=T0 + timedelta(hours=1))
         self.assertNotIn("LEAK", json.dumps(view))
-        self.assertEqual((view["trials"], view["alive"], view["would_earn"], view["stale"]), (31, 1, 0.25, False))
+        self.assertEqual((view["trials"], view["alive"], view["weight"], view["stale"]), (31, 1, 0.25, False))
+        self.assertNotIn("would_earn", view)
         self.assertEqual(view["agents"][0]["state"], "contributing")
 
     def test_a_day_and_a_half_without_a_step_is_stale(self) -> None:

@@ -1,8 +1,8 @@
 """The swarm as the console sees it: named fields from ``data/state/swarm.json``.
 
 Only named fields pass through, so nothing the step writes later (error
-texts, signatures) can reach the page by accident. ``would_earn`` comes from the
-desk's latest weekly allocation event, not from the swarm.
+texts, signatures) can reach the page by accident. ``weight`` (the swarm is
+funded) comes from the desk's latest weekly allocation event, not from the swarm.
 """
 
 from __future__ import annotations
@@ -25,11 +25,12 @@ def _pick(raw: Any, names: tuple[str, ...]) -> Optional[dict[str, Any]]:
     return {name: raw.get(name) for name in names} if isinstance(raw, dict) else None
 
 
-def _would_earn(events: Iterable[dict[str, Any]]) -> Optional[float]:
+def _weight(events: Iterable[dict[str, Any]]) -> Optional[float]:
+    """The swarm's share of the desk's (simulated or live) account at the latest weekly allocation."""
     for record in reversed(list(events)):
-        if record.get("event") == "desk_allocation" and isinstance(record.get("would_earn"), dict):
+        if record.get("event") == "desk_allocation" and isinstance(record.get("allocations"), dict):
             try:
-                return float(record["would_earn"].get("swarm"))
+                return float(record["allocations"].get("swarm"))
             except (TypeError, ValueError):
                 return None
     return None
@@ -63,5 +64,5 @@ def swarm_view(state_dir: Path | str, events: Iterable[dict[str, Any]] = (), *,
         "agents": agents,
         "recent": recent,
         "scout": _pick(data.get("scout"), SCOUT_FIELDS),
-        "would_earn": _would_earn(events),
+        "weight": _weight(events),
     }

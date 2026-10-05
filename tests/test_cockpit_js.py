@@ -143,6 +143,11 @@ class CockpitFormatTests(unittest.TestCase):
                     " CockpitFmt.swarmLine({forward_days: 3, state: 'nursery', excess_pct: -0.4, share: 0})]"),
             ["33 days · contributing 50% · +1.20% vs 60/40", "3 days · nursery · −0.40% vs 60/40"],
         )
+        self.assertEqual(
+            self.js("[CockpitFmt.swarmBadge(null), CockpitFmt.swarmBadge(0), CockpitFmt.swarmBadge(0.25)]"),
+            ["funded by results · its first allocation comes on a Monday",
+             "funded by results · desk weight 0%", "funded by results · desk weight 25%"],
+        )
 
 
 class CockpitPageWiringTests(unittest.TestCase):
