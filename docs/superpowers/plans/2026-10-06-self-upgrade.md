@@ -1466,3 +1466,1361 @@ class Shipyard:
 - [ ] **Step 5: Commit:** `feat(upgrade): ship by fast-forward with a PR record; roll back by revert plus a store restore`.
 
 ---
+### Task 7: The watchdog (canary and rollback), plus its alert
+
+**Files:**
+- Create: `src/agentic_trading/upgrade/watchdog.py`
+- Modify: `src/agentic_trading/notify.py`. Add to `ALERT_EVENTS` `"upgrade_rolled_back": (0.0, "critical")` and `"upgrade_rollback_failed": (0.0, "critical")`, and give `alert_for` one branch returning `Alert(key=event, title="Automatic upgrade rolled back" or "Upgrade rollback FAILED", body=str(record.get("reason"))[:300], urgency="critical")`.
+- Test: `tests/test_upgrade_watchdog.py`
+
+**Interfaces:**
+- Consumes: `Control`, `load_control`, `save_control` (Task 1); `Shipyard` (Task 6); `Task`, `record`, `note_health` (Task 4).
+- **Produces:**
+  - `checks(runner, *, journal_dir, since, now, http_get) -> list[str]`
+  - `watch(*, state_dir, journal_dir, now, runner, shipyard, journal, notify, http_get) -> str`, which returns one of `idle`, `watching`, `passed`, `rolled_back`, `rollback_failed` or `nothing to roll back`
+
+**What `checks` looks at:**
+- `systemctl --user is-active <svc>` must print `active` for each of `SERVICES`;
+- `journalctl --user -u <svc> --since <since> --no-pager -o cat` must not contain `Traceback (most recent call last)`;
+- 15 minutes after the deploy, today's trader journal (`<journal_dir>/<UTC date>.jsonl`) must have been modified within the last 15 minutes;
+- `http_get("http://127.0.0.1:8787/api/desk" | "/api/swarm" | "/api/fast")` must return 200;
+- `systemctl --user show agentic-trading-swarm.service -p Result --value` must print `success` or nothing.
+
+**What `watch` does:**
+1. If `rollback_requested` is set, it rolls back the open canary or `last_shipped`. If neither exists, it clears the request and returns `nothing to roll back`.
+2. With an open canary and problems found, it rolls back and calls `note_health` for each problem.
+3. With an open canary, no problems, and `now >= until`, it closes the canary and journals `upgrade_canary_passed`.
+
+**A rollback** calls `shipyard.rollback(target["commit"])`.
+- **On success:** the canary, `last_shipped` and the request are cleared; it pauses with the reason `rolled back: <why>`; the task is recorded as `rolled_back` (by `target["task"]`, `target["title"]`); and `upgrade_rolled_back` is journaled and notified.
+- **On failure:** it pauses with `rollback failed: <note>`, then journals and notifies `upgrade_rollback_failed`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_upgrade_watchdog.py
+"""The canary: healthy passes after 24 h; any failure, or the operator, rolls back and pauses."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from agentic_trading.upgrade.control import load_control, request_rollback, save_control
+from agentic_trading.upgrade.run import RunResult
+from agentic_trading.upgrade.watchdog import checks, watch
+
+T0 = datetime(2026, 10, 7, 2, 0, tzinfo=timezone.utc)
+
+
+class _Runner:
+    def __init__(self, inactive: str = "", traceback: str = "") -> None:
+        self.inactive, self.traceback = inactive, traceback
+
+    def __call__(self, argv, cwd=None, timeout=600.0) -> RunResult:
+        line = " ".join(argv)
+        if "is-active" in line:
+            return RunResult(0 if self.inactive not in line or not self.inactive else 3,
+                             "inactive" if self.inactive and self.inactive in line else "active")
+        if "journalctl" in line and self.traceback and self.traceback in line:
+            return RunResult(0, "Traceback (most recent call last):\n  boom")
+        if "show agentic-trading-swarm" in line:
+            return RunResult(0, "success")
+        return RunResult(0, "")
+
+
+class _Yard:
+    def __init__(self, ok: bool = True) -> None:
+        self.ok, self.rolled = ok, []
+
+    def rollback(self, commit: str):
+        self.rolled.append(commit)
+        return self.ok, "reverted and restarted" if self.ok else "git revert failed"
+
+
+def _canary(state: Path, started: datetime) -> None:
+    control = load_control(state)
+    control.canary = {"commit": "abc", "task": "k", "title": "t", "started_at": started.isoformat(),
+                      "until": (started + timedelta(hours=24)).isoformat()}
+    control.last_shipped = dict(control.canary)
+    save_control(state, control)
+
+
+class WatchdogTests(unittest.TestCase):
+    def _watch(self, state, journal, now, runner, yard, http=lambda url: 200):
+        events, alerts = [], []
+        result = watch(state_dir=state, journal_dir=journal, now=now, runner=runner, shipyard=yard,
+                       journal=events.append, notify=alerts.append, http_get=http)
+        return result, events, alerts
+
+    def test_checks_name_each_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            journal = Path(name)
+            (journal / f"{T0:%Y-%m-%d}.jsonl").write_text("{}\n")
+            fine = checks(_Runner(), journal_dir=journal, since=T0, now=T0 + timedelta(minutes=5),
+                          http_get=lambda url: 200)
+            self.assertEqual(fine, [])
+            bad = checks(_Runner(inactive="agentic-trading-venues", traceback="agentic-trading-dashboard"),
+                         journal_dir=journal, since=T0, now=T0 + timedelta(minutes=5),
+                         http_get=lambda url: 500 if url.endswith("/api/swarm") else 200)
+        self.assertEqual(len(bad), 3)
+
+    def test_idle_without_a_canary(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            self.assertEqual(self._watch(Path(name), Path(name), T0, _Runner(), _Yard())[0], "idle")
+
+    def test_a_failing_canary_rolls_back_pauses_and_alerts(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            _canary(state, T0)
+            yard = _Yard()
+            result, events, alerts = self._watch(state, state, T0 + timedelta(minutes=5),
+                                                 _Runner(inactive="agentic-trading"), yard)
+            control = load_control(state)
+        self.assertEqual((result, yard.rolled), ("rolled_back", ["abc"]))
+        self.assertTrue(control.paused)
+        self.assertIn("rolled back", control.reason)
+        self.assertEqual(control.canary, {})
+        self.assertEqual([e["event"] for e in alerts], ["upgrade_rolled_back"])
+
+    def test_a_healthy_canary_passes_after_24_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            (state / f"{T0:%Y-%m-%d}.jsonl").write_text("{}\n")
+            late = state / f"{T0 + timedelta(hours=25):%Y-%m-%d}.jsonl"
+            late.write_text("{}\n")
+            stamp = (T0 + timedelta(hours=25)).timestamp()
+            os.utime(late, (stamp, stamp))  # the trader wrote its journal just now (test clock)
+            _canary(state, T0)
+            self.assertEqual(self._watch(state, state, T0 + timedelta(minutes=5), _Runner(), _Yard())[0], "watching")
+            result, events, _ = self._watch(state, state, T0 + timedelta(hours=25), _Runner(), _Yard())
+            self.assertEqual(result, "passed")
+            self.assertEqual(load_control(state).canary, {})
+            self.assertEqual(load_control(state).last_shipped["commit"], "abc")
+
+    def test_the_operator_rolls_back_the_last_shipped_change(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            _canary(state, T0)
+            control = load_control(state)
+            control.canary = {}
+            save_control(state, control)  # the canary passed; the change is still the last shipped
+            request_rollback(state)
+            yard = _Yard()
+            result, _, _ = self._watch(state, state, T0 + timedelta(days=3), _Runner(), yard)
+            self.assertEqual((result, yard.rolled), ("rolled_back", ["abc"]))
+            request_rollback(state)
+            again, _, _ = self._watch(state, state, T0 + timedelta(days=3), _Runner(), _Yard())
+        self.assertEqual(again, "nothing to roll back")  # never reverts something else
+
+    def test_a_failed_rollback_pauses_loudly(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            _canary(state, T0)
+            result, _, alerts = self._watch(state, state, T0 + timedelta(minutes=5), _Runner(inactive="agentic-trading"),
+                                            _Yard(ok=False))
+            control = load_control(state)
+        self.assertEqual(result, "rollback_failed")
+        self.assertIn("rollback failed", control.reason)
+        self.assertEqual(alerts[0]["event"], "upgrade_rollback_failed")
+```
+
+- [ ] **Step 2: Run them and confirm they fail.** Expected: `ModuleNotFoundError`.
+
+- [ ] **Step 3: Implement `upgrade/watchdog.py`**
+
+```python
+"""The canary: every 5 minutes, check that an upgrade broke nothing; if it did, or the operator
+asks, take it back and pause (spec U6, U8). It checks crashes, not decisions."""
+
+from __future__ import annotations
+
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from agentic_trading.upgrade.control import load_control, save_control
+from agentic_trading.upgrade.run import Runner
+from agentic_trading.upgrade.ship import SERVICES
+from agentic_trading.upgrade.tasks import Task, note_health, record
+
+GRACE = timedelta(minutes=15)
+APIS = ("/api/desk", "/api/swarm", "/api/fast")
+
+
+def http_status(url: str) -> int:
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:  # loopback only
+            return int(response.status)
+    except Exception:  # noqa: BLE001 — any failure is "not 200"
+        return 0
+
+
+def checks(runner: Runner, *, journal_dir: Path, since: datetime, now: datetime,
+           http_get: Callable[[str], int]) -> list[str]:
+    problems = []
+    stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    for service in SERVICES:
+        if runner(["systemctl", "--user", "is-active", service], timeout=30.0).out.strip() != "active":
+            problems.append(f"{service} is not active")
+        logs = runner(["journalctl", "--user", "-u", service, "--since", stamp, "--no-pager", "-o", "cat"],
+                      timeout=60.0).out
+        if "Traceback (most recent call last)" in logs:
+            problems.append(f"{service} logged a traceback")
+    if now - since >= GRACE:
+        today = Path(journal_dir) / f"{now.astimezone(timezone.utc):%Y-%m-%d}.jsonl"
+        fresh = today.is_file() and now.timestamp() - today.stat().st_mtime < GRACE.total_seconds()
+        if not fresh:
+            problems.append("the trader has not written its journal for 15 minutes")
+    for path in APIS:
+        if http_get(f"http://127.0.0.1:8787{path}") != 200:
+            problems.append(f"the dashboard's {path} does not answer")
+    result = runner(["systemctl", "--user", "show", "agentic-trading-swarm.service", "-p", "Result", "--value"],
+                    timeout=30.0).out.strip()
+    if result not in ("success", ""):
+        problems.append(f"the last swarm step ended with {result}")
+    return problems
+
+
+def watch(*, state_dir: Path, journal_dir: Path, now: datetime, runner: Runner, shipyard: Any,
+          journal: Callable[[dict], None], notify: Callable[[dict], Any],
+          http_get: Callable[[str], int] = http_status) -> str:
+    control = load_control(state_dir)
+    if control.rollback_requested:
+        target = control.canary or control.last_shipped
+        if not target:
+            control.rollback_requested = False
+            save_control(state_dir, control)
+            return "nothing to roll back"
+        return _rollback(state_dir, control, target, "the operator asked for a rollback", now, shipyard, journal,
+                         notify)
+    if not control.canary:
+        return "idle"
+    since = datetime.fromisoformat(control.canary["started_at"])
+    problems = checks(runner, journal_dir=journal_dir, since=since, now=now, http_get=http_get)
+    if problems:
+        for problem in problems:
+            note_health(state_dir, problem)
+        return _rollback(state_dir, control, control.canary, "; ".join(problems), now, shipyard, journal, notify)
+    if now >= datetime.fromisoformat(control.canary["until"]):
+        title = control.canary.get("title", "")
+        control.canary = {}
+        save_control(state_dir, control)
+        journal({"event": "upgrade_canary_passed", "at": now.isoformat(), "text": f"the canary passed: {title}"})
+        return "passed"
+    return "watching"
+
+
+def _rollback(state_dir: Path, control: Any, target: dict, why: str, now: datetime, shipyard: Any,
+              journal: Callable[[dict], None], notify: Callable[[dict], Any]) -> str:
+    ok, note = shipyard.rollback(str(target["commit"]))
+    if not ok:
+        control.paused, control.reason = True, f"rollback failed: {note}"
+        save_control(state_dir, control)
+        event = {"event": "upgrade_rollback_failed", "at": now.isoformat(), "reason": f"{why} — {note}",
+                 "text": f"rolling back {target.get('title', '')} FAILED: {note}"}
+        journal(event)
+        notify(event)
+        return "rollback_failed"
+    control.canary, control.last_shipped, control.rollback_requested = {}, {}, False
+    control.paused, control.reason = True, f"rolled back: {why}"[:300]
+    save_control(state_dir, control)
+    record(state_dir, Task(str(target.get("task", "")), str(target.get("title", "")), "", "upgrade"),
+           "rolled_back", now, why)
+    event = {"event": "upgrade_rolled_back", "at": now.isoformat(), "reason": why,
+             "text": f"rolled back {target.get('title', '')}: {why}"[:300]}
+    journal(event)
+    notify(event)
+    return "rolled_back"
+```
+
+- [ ] **Step 4: Implement the alert, then run the tests.** Add the two `ALERT_EVENTS` entries and an `alert_for` branch in `notify.py`, placed before its final `return`:
+
+```python
+    if event in ("upgrade_rolled_back", "upgrade_rollback_failed"):
+        return Alert(key=event, title="Automatic upgrade rolled back" if event == "upgrade_rolled_back"
+                     else "Upgrade rollback FAILED", body=str(record.get("reason") or "")[:300], urgency=urgency)
+```
+
+Run: `... -m pytest tests/test_upgrade_watchdog.py tests/test_notify*.py -q`. Expected: PASS.
+
+- [ ] **Step 5: Commit:** `feat(upgrade): the canary watchdog — rolls back and pauses on any failure or on request; alerts`.
+
+---
+### Task 8: The daily cycle and the `upgrade` CLI
+
+**Files:**
+- Create: `src/agentic_trading/upgrade/cycle.py`, `upgrade/cli.py`
+- Modify: `src/agentic_trading/cli.py` (register beside `add_swarm_parser`/`dispatch_swarm`), `windows/AgenticTrader.spec` (add `"agentic_trading.upgrade.cli"`)
+- Test: `tests/test_upgrade_cycle.py`
+
+**Interfaces:**
+- Consumes: everything in Tasks 1–7.
+- **Produces:**
+  - `Outcome(code: int, message: str)`
+  - `run_cycle(*, state_dir, journal_dir, repo, venv, settings, mode, now, runner, shipyard, write, review, probe_paths) -> Outcome`. `probe_paths` is `(secrets_path, home_file)`; `mode` is `"shadow"` or `"live"`.
+  - It writes `state/upgrade.json` as `{"enabled", "updated_at", "last": {"at", "outcome", "message", "task"}}`.
+  - `add_upgrade_parser(sub)` and `dispatch_upgrade(args) -> int`.
+
+**The order inside a cycle:**
+1. **Refusals (U11):** disabled, paused, canary open, kill switch (`state/risk_guard.json` `kill_switch`), not on `live`, dirty outside `data/`, sandbox probe failing.
+2. **Pick and prepare:** `pick` (none: "nothing to work on"); prepare the worktree; count the tests before.
+3. **Write:** if the engine reports not-applicable, record `out_of_scope`; if it fails, record `failed`.
+4. **Check:** take the diff (no changes counts as `failed`); run the policy against the trusted closure; count the tests after; run the suite; run the doc counts; get the review.
+5. **Pause check:** if paused now, abandon with no failure recorded.
+6. **Ship:** commit, publish, deploy (tagged with the candidate's commit), open the canary, record `shipped`, clean up.
+
+Every outcome is journaled to `upgrade-<day>.jsonl` (`FastJournal(prefix="upgrade")`) and written to `upgrade.json`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_upgrade_cycle.py
+"""One daily cycle: every refusal stops it before anything changes; a clean run ships with a canary."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from agentic_trading.upgrade.control import load_control, pause
+from agentic_trading.upgrade.cycle import run_cycle
+from agentic_trading.upgrade.engines import EngineResult, Verdict
+from agentic_trading.upgrade.run import RunResult
+from agentic_trading.upgrade.settings import UpgradeConfig
+
+NOW = datetime(2026, 10, 7, 2, 0, tzinfo=timezone.utc)
+ON = UpgradeConfig(enabled=True)
+SWARM_FILE = "src/agentic_trading/swarm/blend.py"
+
+
+class _Runner:
+    """git/bwrap stand-in: a clean live checkout, a sandbox that holds, a suite that passes."""
+
+    def __init__(self, branch="live", dirty="", probe_leaks=False, suite_code=0) -> None:
+        self.branch, self.dirty, self.leaks, self.suite_code, self.calls = branch, dirty, probe_leaks, suite_code, []
+        self.counted = 0
+
+    def __call__(self, argv, cwd=None, timeout=600.0) -> RunResult:
+        self.calls.append(list(argv))
+        line = " ".join(argv)
+        if "rev-parse --abbrev-ref HEAD" in line:
+            return RunResult(0, self.branch + "\n")
+        if "status --porcelain" in line:
+            return RunResult(0, self.dirty)
+        if "socket.create_connection" in line:  # the sandbox probe
+            return RunResult(0, json.dumps({"network": self.leaks, "secrets": False, "home": False,
+                                            "write_outside": False}))
+        if "--collect-only" in line:
+            self.counted += 1
+            return RunResult(0, "10 tests collected\n" if self.counted == 1 else "11 tests collected\n")
+        if "pytest" in line:
+            return RunResult(self.suite_code, "passed" if self.suite_code == 0 else "1 failed")
+        return RunResult(0, "")
+
+
+class _Yard:
+    def __init__(self, ok: bool = True) -> None:
+        self.ok, self.rolled = ok, []
+
+    def rollback(self, commit: str):
+        self.rolled.append(commit)
+        return self.ok, "reverted and restarted" if self.ok else "git revert failed"
+
+
+def _canary(state: Path, started: datetime) -> None:
+    control = load_control(state)
+    control.canary = {"commit": "abc", "task": "k", "title": "t", "started_at": started.isoformat(),
+                      "until": (started + timedelta(hours=24)).isoformat()}
+    control.last_shipped = dict(control.canary)
+    save_control(state, control)
+
+
+class WatchdogTests(unittest.TestCase):
+    def _watch(self, state, journal, now, runner, yard, http=lambda url: 200):
+        events, alerts = [], []
+        result = watch(state_dir=state, journal_dir=journal, now=now, runner=runner, shipyard=yard,
+                       journal=events.append, notify=alerts.append, http_get=http)
+        return result, events, alerts
+
+    def test_checks_name_each_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            journal = Path(name)
+            (journal / f"{T0:%Y-%m-%d}.jsonl").write_text("{}\n")
+            fine = checks(_Runner(), journal_dir=journal, since=T0, now=T0 + timedelta(minutes=5),
+                          http_get=lambda url: 200)
+            self.assertEqual(fine, [])
+            bad = checks(_Runner(inactive="agentic-trading-venues", traceback="agentic-trading-dashboard"),
+                         journal_dir=journal, since=T0, now=T0 + timedelta(minutes=5),
+                         http_get=lambda url: 500 if url.endswith("/api/swarm") else 200)
+        self.assertEqual(len(bad), 3)
+
+    def test_idle_without_a_canary(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            self.assertEqual(self._watch(Path(name), Path(name), T0, _Runner(), _Yard())[0], "idle")
+
+    def test_a_failing_canary_rolls_back_pauses_and_alerts(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            _canary(state, T0)
+            yard = _Yard()
+            result, events, alerts = self._watch(state, state, T0 + timedelta(minutes=5),
+                                                 _Runner(inactive="agentic-trading"), yard)
+            control = load_control(state)
+        self.assertEqual((result, yard.rolled), ("rolled_back", ["abc"]))
+        self.assertTrue(control.paused)
+        self.assertIn("rolled back", control.reason)
+        self.assertEqual(control.canary, {})
+        self.assertEqual([e["event"] for e in alerts], ["upgrade_rolled_back"])
+
+    def test_a_healthy_canary_passes_after_24_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            (state / f"{T0:%Y-%m-%d}.jsonl").write_text("{}\n")
+            late = state / f"{T0 + timedelta(hours=25):%Y-%m-%d}.jsonl"
+            late.write_text("{}\n")
+            stamp = (T0 + timedelta(hours=25)).timestamp()
+            os.utime(late, (stamp, stamp))  # the trader wrote its journal just now (test clock)
+            _canary(state, T0)
+            self.assertEqual(self._watch(state, state, T0 + timedelta(minutes=5), _Runner(), _Yard())[0], "watching")
+            result, events, _ = self._watch(state, state, T0 + timedelta(hours=25), _Runner(), _Yard())
+            self.assertEqual(result, "passed")
+            self.assertEqual(load_control(state).canary, {})
+            self.assertEqual(load_control(state).last_shipped["commit"], "abc")
+
+    def test_the_operator_rolls_back_the_last_shipped_change(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            _canary(state, T0)
+            control = load_control(state)
+            control.canary = {}
+            save_control(state, control)  # the canary passed; the change is still the last shipped
+            request_rollback(state)
+            yard = _Yard()
+            result, _, _ = self._watch(state, state, T0 + timedelta(days=3), _Runner(), yard)
+            self.assertEqual((result, yard.rolled), ("rolled_back", ["abc"]))
+            request_rollback(state)
+            again, _, _ = self._watch(state, state, T0 + timedelta(days=3), _Runner(), _Yard())
+        self.assertEqual(again, "nothing to roll back")  # never reverts something else
+
+    def test_a_failed_rollback_pauses_loudly(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            _canary(state, T0)
+            result, _, alerts = self._watch(state, state, T0 + timedelta(minutes=5), _Runner(inactive="agentic-trading"),
+                                            _Yard(ok=False))
+            control = load_control(state)
+        self.assertEqual(result, "rollback_failed")
+        self.assertIn("rollback failed", control.reason)
+        self.assertEqual(alerts[0]["event"], "upgrade_rollback_failed")
+```
+
+- [ ] **Step 2: Run them and confirm they fail.** Expected: `ModuleNotFoundError`.
+
+- [ ] **Step 3: Implement `upgrade/watchdog.py`**
+
+```python
+"""The canary: every 5 minutes, check that an upgrade broke nothing; if it did, or the operator
+asks, take it back and pause (spec U6, U8). It checks crashes, not decisions."""
+
+from __future__ import annotations
+
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from agentic_trading.upgrade.control import load_control, save_control
+from agentic_trading.upgrade.run import Runner
+from agentic_trading.upgrade.ship import SERVICES
+from agentic_trading.upgrade.tasks import Task, note_health, record
+
+GRACE = timedelta(minutes=15)
+APIS = ("/api/desk", "/api/swarm", "/api/fast")
+
+
+def http_status(url: str) -> int:
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:  # loopback only
+            return int(response.status)
+    except Exception:  # noqa: BLE001 — any failure is "not 200"
+        return 0
+
+
+def checks(runner: Runner, *, journal_dir: Path, since: datetime, now: datetime,
+           http_get: Callable[[str], int]) -> list[str]:
+    problems = []
+    stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    for service in SERVICES:
+        if runner(["systemctl", "--user", "is-active", service], timeout=30.0).out.strip() != "active":
+            problems.append(f"{service} is not active")
+        logs = runner(["journalctl", "--user", "-u", service, "--since", stamp, "--no-pager", "-o", "cat"],
+                      timeout=60.0).out
+        if "Traceback (most recent call last)" in logs:
+            problems.append(f"{service} logged a traceback")
+    if now - since >= GRACE:
+        today = Path(journal_dir) / f"{now.astimezone(timezone.utc):%Y-%m-%d}.jsonl"
+        fresh = today.is_file() and now.timestamp() - today.stat().st_mtime < GRACE.total_seconds()
+        if not fresh:
+            problems.append("the trader has not written its journal for 15 minutes")
+    for path in APIS:
+        if http_get(f"http://127.0.0.1:8787{path}") != 200:
+            problems.append(f"the dashboard's {path} does not answer")
+    result = runner(["systemctl", "--user", "show", "agentic-trading-swarm.service", "-p", "Result", "--value"],
+                    timeout=30.0).out.strip()
+    if result not in ("success", ""):
+        problems.append(f"the last swarm step ended with {result}")
+    return problems
+
+
+def watch(*, state_dir: Path, journal_dir: Path, now: datetime, runner: Runner, shipyard: Any,
+          journal: Callable[[dict], None], notify: Callable[[dict], Any],
+          http_get: Callable[[str], int] = http_status) -> str:
+    control = load_control(state_dir)
+    if control.rollback_requested:
+        target = control.canary or control.last_shipped
+        if not target:
+            control.rollback_requested = False
+            save_control(state_dir, control)
+            return "nothing to roll back"
+        return _rollback(state_dir, control, target, "the operator asked for a rollback", now, shipyard, journal,
+                         notify)
+    if not control.canary:
+        return "idle"
+    since = datetime.fromisoformat(control.canary["started_at"])
+    problems = checks(runner, journal_dir=journal_dir, since=since, now=now, http_get=http_get)
+    if problems:
+        for problem in problems:
+            note_health(state_dir, problem)
+        return _rollback(state_dir, control, control.canary, "; ".join(problems), now, shipyard, journal, notify)
+    if now >= datetime.fromisoformat(control.canary["until"]):
+        title = control.canary.get("title", "")
+        control.canary = {}
+        save_control(state_dir, control)
+        journal({"event": "upgrade_canary_passed", "at": now.isoformat(), "text": f"the canary passed: {title}"})
+        return "passed"
+    return "watching"
+
+
+def _rollback(state_dir: Path, control: Any, target: dict, why: str, now: datetime, shipyard: Any,
+              journal: Callable[[dict], None], notify: Callable[[dict], Any]) -> str:
+    ok, note = shipyard.rollback(str(target["commit"]))
+    if not ok:
+        control.paused, control.reason = True, f"rollback failed: {note}"
+        save_control(state_dir, control)
+        event = {"event": "upgrade_rollback_failed", "at": now.isoformat(), "reason": f"{why} — {note}",
+                 "text": f"rolling back {target.get('title', '')} FAILED: {note}"}
+        journal(event)
+        notify(event)
+        return "rollback_failed"
+    control.canary, control.last_shipped, control.rollback_requested = {}, {}, False
+    control.paused, control.reason = True, f"rolled back: {why}"[:300]
+    save_control(state_dir, control)
+    record(state_dir, Task(str(target.get("task", "")), str(target.get("title", "")), "", "upgrade"),
+           "rolled_back", now, why)
+    event = {"event": "upgrade_rolled_back", "at": now.isoformat(), "reason": why,
+             "text": f"rolled back {target.get('title', '')}: {why}"[:300]}
+    journal(event)
+    notify(event)
+    return "rolled_back"
+```
+
+- [ ] **Step 4: Implement the alert, then run the tests.** Add the two `ALERT_EVENTS` entries and an `alert_for` branch in `notify.py`, placed before its final `return`:
+
+```python
+    if event in ("upgrade_rolled_back", "upgrade_rollback_failed"):
+        return Alert(key=event, title="Automatic upgrade rolled back" if event == "upgrade_rolled_back"
+                     else "Upgrade rollback FAILED", body=str(record.get("reason") or "")[:300], urgency=urgency)
+```
+
+Run: `... -m pytest tests/test_upgrade_watchdog.py tests/test_notify*.py -q`. Expected: PASS.
+
+- [ ] **Step 5: Commit:** `feat(upgrade): the canary watchdog — rolls back and pauses on any failure or on request; alerts`.
+
+---
+### Task 8: The daily cycle and the `upgrade` CLI
+
+**Files:**
+- Create: `src/agentic_trading/upgrade/cycle.py`, `upgrade/cli.py`
+- Modify: `src/agentic_trading/cli.py` (register beside `add_swarm_parser`/`dispatch_swarm`), `windows/AgenticTrader.spec` (add `"agentic_trading.upgrade.cli"`)
+- Test: `tests/test_upgrade_cycle.py`
+
+**Interfaces:**
+- Consumes: everything in Tasks 1–7.
+- **Produces:**
+  - `Outcome(code: int, message: str)`
+  - `run_cycle(*, state_dir, journal_dir, repo, venv, settings, mode, now, runner, shipyard, write, review, probe_paths) -> Outcome`. `probe_paths` is `(secrets_path, home_file)`; `mode` is `"shadow"` or `"live"`.
+  - It writes `state/upgrade.json` as `{"enabled", "updated_at", "last": {"at", "outcome", "message", "task"}}`.
+  - `add_upgrade_parser(sub)` and `dispatch_upgrade(args) -> int`.
+
+**The order inside a cycle:**
+1. **Refusals (U11):** disabled, paused, canary open, kill switch (`state/risk_guard.json` `kill_switch`), not on `live`, dirty outside `data/`, sandbox probe failing.
+2. **Pick and prepare:** `pick` (none: "nothing to work on"); prepare the worktree; count the tests before.
+3. **Write:** if the engine reports not-applicable, record `out_of_scope`; if it fails, record `failed`.
+4. **Check:** take the diff (no changes counts as `failed`); run the policy against the trusted closure; count the tests after; run the suite; run the doc counts; get the review.
+5. **Pause check:** if paused now, abandon with no failure recorded.
+6. **Ship:** commit, publish, deploy (tagged with the candidate's commit), open the canary, record `shipped`, clean up.
+
+Every outcome is journaled to `upgrade-<day>.jsonl` (`FastJournal(prefix="upgrade")`) and written to `upgrade.json`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_upgrade_cycle.py
+"""One daily cycle: every refusal stops it before anything changes; a clean run ships with a canary."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from agentic_trading.upgrade.control import load_control, pause
+from agentic_trading.upgrade.cycle import run_cycle
+from agentic_trading.upgrade.engines import EngineResult, Verdict
+from agentic_trading.upgrade.run import RunResult
+from agentic_trading.upgrade.settings import UpgradeConfig
+
+NOW = datetime(2026, 10, 7, 2, 0, tzinfo=timezone.utc)
+ON = UpgradeConfig(enabled=True)
+SWARM_FILE = "src/agentic_trading/swarm/blend.py"
+
+
+class _Runner:
+    """git/bwrap stand-in: a clean live checkout, a sandbox that holds, a suite that passes."""
+
+    def __init__(self, branch="live", dirty="", probe_leaks=False, suite_code=0) -> None:
+        self.branch, self.dirty, self.leaks, self.suite_code, self.calls = branch, dirty, probe_leaks, suite_code, []
+
+    def __call__(self, argv, cwd=None, timeout=600.0) -> RunResult:
+        self.calls.append(list(argv))
+        line = " ".join(argv)
+        if "rev-parse --abbrev-ref HEAD" in line:
+            return RunResult(0, self.branch + "\n")
+        if "status --porcelain" in line:
+            return RunResult(0, self.dirty)
+        if "socket.create_connection" in line:  # the probe
+            leak = "true" if self.leaks else "false"
+            return RunResult(0, json.dumps({"network": self.leaks, "secrets": False, "home": False,
+                                            "write_outside": False}).replace("false", "false"))
+        if "--collect-only" in line:
+            return RunResult(0, "10 tests collected in 1s\n" if not hasattr(self, "_counted") else "11 tests collected\n") \
+                if not setattr(self, "_counted", True) else RunResult(0, "11 tests collected\n")
+        if "pytest" in line:
+            return RunResult(self.suite_code, "passed" if self.suite_code == 0 else "1 failed")
+        return RunResult(0, "")
+
+
+class _Yard:
+    def __init__(self, root: Path, change: str = SWARM_FILE) -> None:
+        self.root, self.change, self.calls = root, change, []
+
+    def prepare(self, branch):
+        self.calls.append(("prepare", branch))
+        wt = self.root / "wt"
+        (wt / Path(self.change).parent).mkdir(parents=True, exist_ok=True)
+        (wt / self.change).write_text("X = 2\n")
+        return wt
+
+    def diff(self, wt):
+        return f"M\t{self.change}\n", f"diff --git a/{self.change} b/{self.change}\n-X = 1\n+X = 2\n"
+
+    def file_at(self, path):
+        return "X = 1\n"
+
+    def head(self, path=None):
+        return "abc123"
+
+    def commit(self, wt, title):
+        self.calls.append(("commit", title))
+        return True
+
+    def publish(self, wt, branch, title, body):
+        self.calls.append(("publish", branch))
+        return "https://github.com/x/y/pull/7"
+
+    def deploy(self, branch, tag):
+        self.calls.append(("deploy", branch, tag))
+        return True
+
+    def cleanup(self, wt):
+        self.calls.append(("cleanup",))
+
+
+class CycleTests(unittest.TestCase):
+    def _run(self, state, *, runner=None, yard=None, settings=ON, mode="shadow", write=None, review=None):
+        (state / "proposals.json").write_text(json.dumps({"proposals": [
+            {"title": "Better shares", "category": "strategy", "confidence": 0.9, "status": "proposed",
+             "change": "c"}]}))
+        repo = state / "repo"
+        (repo / "src" / "agentic_trading").mkdir(parents=True, exist_ok=True)
+        return run_cycle(state_dir=state, journal_dir=state / "journal", repo=repo, venv=state / "venv",
+                         settings=settings, mode=mode, now=NOW, runner=runner or _Runner(),
+                         shipyard=yard or _Yard(state),
+                         write=write or (lambda task, **kw: EngineResult("changed", "shares grow")),
+                         review=review or (lambda task, **kw: Verdict(True, "small and tested")),
+                         probe_paths=(state / "secrets.toml", state / "home.txt"))
+
+    def test_each_refusal_changes_nothing(self) -> None:
+        cases = {
+            "off": dict(settings=UpgradeConfig(enabled=False)),
+            "not on live": dict(runner=_Runner(branch="feat/x")),
+            "uncommitted": dict(runner=_Runner(dirty=" M src/agentic_trading/risk.py\n")),
+            "sandbox": dict(runner=_Runner(probe_leaks=True)),
+        }
+        for needle, kw in cases.items():
+            with self.subTest(needle=needle), tempfile.TemporaryDirectory() as name:
+                yard = _Yard(Path(name))
+                outcome = self._run(Path(name), yard=yard, **kw)
+                self.assertIn(needle, outcome.message)
+                self.assertEqual(yard.calls, [])
+        with tempfile.TemporaryDirectory() as name:
+            pause(Path(name), "operator")
+            self.assertIn("paused", self._run(Path(name)).message)
+        with tempfile.TemporaryDirectory() as name:
+            (Path(name) / "risk_guard.json").write_text('{"kill_switch": true}')
+            self.assertIn("kill switch", self._run(Path(name)).message)
+
+    def test_data_changes_alone_are_not_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            outcome = self._run(Path(name), runner=_Runner(dirty=" M data/bars/SPY_day.jsonl\n"))
+        self.assertIn("shipped", outcome.message)
+
+    def test_a_clean_run_ships_and_opens_a_canary(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            yard = _Yard(state)
+            outcome = self._run(state, yard=yard)
+            control = load_control(state)
+            status = json.loads((state / "upgrade.json").read_text())
+        self.assertEqual(outcome.code, 0)
+        self.assertEqual([c[0] for c in yard.calls], ["prepare", "commit", "publish", "deploy", "cleanup"])
+        self.assertEqual(control.canary["commit"], "abc123")
+        self.assertEqual(control.last_shipped["pr"], "https://github.com/x/y/pull/7")
+        self.assertEqual(status["last"]["outcome"], "shipped")
+
+    def test_each_failure_stops_before_shipping(self) -> None:
+        cases = {
+            "policy": dict(yard_change="src/agentic_trading/risk.py"),
+            "tests": dict(runner=_Runner(suite_code=1)),
+            "review": dict(review=lambda task, **kw: Verdict(False, "weakens a test")),
+            "out of scope": dict(write=lambda task, **kw: EngineResult("not_applicable", "runtime.py")),
+            "live mode": dict(mode="live"),
+        }
+        for needle, kw in cases.items():
+            with self.subTest(needle=needle), tempfile.TemporaryDirectory() as name:
+                state = Path(name)
+                yard = _Yard(state, change=kw.pop("yard_change", SWARM_FILE))
+                self._run(state, yard=yard, **kw)
+                self.assertNotIn("deploy", [c[0] for c in yard.calls])
+                self.assertEqual(load_control(state).canary, {})
+
+    def test_pause_pressed_mid_run_stops_before_deploy(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            yard = _Yard(state)
+
+            def reviewer(task, **kw):
+                pause(state, "operator pressed pause during review")
+                return Verdict(True, "fine")
+
+            outcome = self._run(state, yard=yard, review=reviewer)
+        self.assertIn("paused", outcome.message)
+        self.assertNotIn("deploy", [c[0] for c in yard.calls])
+```
+
+- [ ] **Step 2: Run them and confirm they fail.** Expected: `ModuleNotFoundError`.
+
+- [ ] **Step 3: Implement `upgrade/cycle.py`**
+
+```python
+"""One daily upgrade: refuse unless every guard holds, then write, check, test, review, ship, watch."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Callable
+
+from agentic_trading import jsonio
+from agentic_trading.fast.service import FastJournal
+from agentic_trading.upgrade import engines as engine_module
+from agentic_trading.upgrade.control import load_control, save_control
+from agentic_trading.upgrade.policy import check, control_closure, parse_diff
+from agentic_trading.upgrade.run import Runner
+from agentic_trading.upgrade.sandbox import count_tests, probe, run_doc_counts, run_suite
+from agentic_trading.upgrade.settings import UpgradeConfig
+from agentic_trading.upgrade.tasks import Task, pick, record
+
+
+@dataclass(frozen=True)
+class Outcome:
+    code: int
+    message: str
+
+
+def _slug(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "change"
+
+
+def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, settings: UpgradeConfig, mode: str,
+              now: datetime, runner: Runner, shipyard: Any, write: Callable[..., Any] = engine_module.write,
+              review: Callable[..., Any] = engine_module.review, probe_paths: tuple[Path, Path]) -> Outcome:
+    journal = FastJournal(journal_dir, prefix="upgrade")
+    task_holder: dict[str, Task] = {}
+
+    def finish(code: int, outcome: str, message: str) -> Outcome:
+        task = task_holder.get("task")
+        journal.append({"event": f"upgrade_{outcome}", "at": now.isoformat(), "text": message,
+                        "task": task.title if task else ""})
+        path = Path(state_dir) / "upgrade.json"
+        jsonio.write_text(path, jsonio.dumps({"enabled": settings.enabled, "updated_at": now.isoformat(), "last": {
+            "at": now.isoformat(), "outcome": outcome, "message": message,
+            "task": task.title if task else ""}}, indent=2) + "\n")
+        return Outcome(code, message)
+
+    if not settings.enabled:
+        return finish(0, "off", "the upgrader is off ([upgrade] enabled = false)")
+    control = load_control(state_dir)
+    if control.paused:
+        return finish(0, "paused", f"paused: {control.reason}")
+    if control.canary:
+        return finish(0, "waiting", f"a canary is open until {control.canary.get('until')}")
+    try:
+        guard = json.loads((Path(state_dir) / "risk_guard.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        guard = {}
+    if guard.get("kill_switch"):
+        return finish(0, "refused", "the kill switch is engaged")
+    branch_now = runner(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"], timeout=30.0).out.strip()
+    if branch_now != "live":
+        return finish(1, "refused", f"the live checkout is on {branch_now or '?'}, not on live")
+    dirty = [line for line in runner(["git", "-C", str(repo), "status", "--porcelain"], timeout=60.0).out.splitlines()
+             if line.strip() and not line[3:].startswith("data/")]
+    if dirty:
+        return finish(1, "refused", f"the live checkout has uncommitted changes outside data/: {dirty[0][3:]}")
+    problems = probe(runner, worktree=repo, venv=venv, secrets=probe_paths[0], home_file=probe_paths[1])
+    if problems:
+        return finish(1, "refused", "the sandbox is not safe: " + "; ".join(problems))
+
+    task = pick(state_dir, now)
+    if task is None:
+        return finish(0, "idle", "nothing to work on")
+    task_holder["task"] = task
+    branch = f"auto/{now:%Y-%m-%d}-{_slug(task.title)}"
+    wt = shipyard.prepare(branch)
+
+    def fail(outcome: str, message: str, failure: bool = True) -> Outcome:
+        record(state_dir, task, "failed" if failure else outcome, now, message)
+        shipyard.cleanup(wt)
+        return finish(0, outcome, message)
+
+    tests_before = count_tests(runner, worktree=wt, venv=venv)
+    scratch = Path(state_dir) / "upgrade"
+    scratch.mkdir(parents=True, exist_ok=True)
+    written = write(task, worktree=wt, scratch=scratch, runner=runner)
+    if written.status == "not_applicable":
+        record(state_dir, task, "out_of_scope", now, written.summary)
+        shipyard.cleanup(wt)
+        return finish(0, "out_of_scope", f"{task.title}: out of scope ({written.summary})")
+    if written.status != "changed":
+        return fail("failed", f"{task.title}: the writer failed ({written.summary})")
+    names, unified = shipyard.diff(wt)
+    changes = parse_diff(names, unified)
+    if not changes:
+        return fail("failed", f"{task.title}: the writer changed nothing")
+    before = {c.path: shipyard.file_at(c.old_path or c.path) for c in changes if c.path.endswith(".py")}
+    after = {c.path: (wt / c.path).read_text(encoding="utf-8") if (wt / c.path).is_file() else ""
+             for c in changes if c.path.endswith(".py")}
+    tests_after = count_tests(runner, worktree=wt, venv=venv)
+    reasons = check(changes, live=(mode == "live"), closure=control_closure(Path(repo) / "src"), before=before,
+                    after=after, tests_before=tests_before or 0, tests_after=tests_after or 0,
+                    max_files=settings.max_files, max_lines=settings.max_lines)
+    if tests_before is None or tests_after is None:
+        reasons.append("the tests could not be counted")
+    if reasons:
+        return fail("refused", f"{task.title}: refused by the walls: " + "; ".join(reasons))
+    suite = run_suite(runner, worktree=wt, venv=venv)
+    if suite.code != 0:
+        return fail("failed", f"{task.title}: the tests failed: {suite.out.strip()[-300:]}")
+    docs = run_doc_counts(runner, worktree=wt, venv=venv)
+    if docs.code != 0:
+        return fail("failed", f"{task.title}: the doc counts disagree: {docs.out.strip()[-200:]}")
+    verdict = review(task, worktree=wt, base="live", runner=runner)
+    if not verdict.approved:
+        return fail("rejected", f"{task.title}: the reviewer rejected it: {verdict.reason}")
+    if load_control(state_dir).paused:
+        shipyard.cleanup(wt)
+        return finish(0, "paused", f"paused before deploying {task.title}")
+    if not shipyard.commit(wt, task.title):
+        return fail("failed", f"{task.title}: the commit failed")
+    body = (f"Automatic upgrade.\n\nTask: {task.title}\n\n{task.detail}\n\nWriter: {written.summary}\n"
+            f"Reviewer: {verdict.reason}\nTests: {tests_before} → {tests_after}, all passing in the sandbox.")
+    pr = shipyard.publish(wt, branch, task.title, body)
+    commit = shipyard.head(wt)
+    if not shipyard.deploy(branch, tag=commit):
+        return fail("failed", f"{task.title}: the deploy failed; live is unchanged")
+    control = load_control(state_dir)
+    control.canary = {"commit": commit, "branch": branch, "task": task.key, "title": task.title, "pr": pr,
+                      "started_at": now.isoformat(),
+                      "until": (now + timedelta(hours=settings.canary_hours)).isoformat()}
+    control.last_shipped = dict(control.canary)
+    save_control(state_dir, control)
+    record(state_dir, task, "shipped", now, written.summary)
+    shipyard.cleanup(wt)
+    return finish(0, "shipped", f"shipped {task.title} ({pr or 'no PR'}); canary open for "
+                                f"{settings.canary_hours} h")
+```
+
+- [ ] **Step 4: Implement `upgrade/cli.py` and register it**
+
+```python
+"""``agentic-trading upgrade``: run today's upgrade, watch the canary, or flip the switches."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ACTIONS = ("run", "watch", "pause", "resume", "rollback", "status")
+
+
+def add_upgrade_parser(sub: Any) -> None:
+    parser = sub.add_parser("upgrade", help="The self-upgrader: run, watch, pause, resume, rollback, status")
+    actions = parser.add_subparsers(dest="upgrade_action", required=True)
+    for name in ACTIONS:
+        actions.add_parser(name).add_argument("--config", required=True)
+
+
+def dispatch_upgrade(args: Any) -> int:
+    from agentic_trading.config import load_config
+    from agentic_trading.journal import DecisionJournal
+    from agentic_trading.upgrade import control as switches
+    from agentic_trading.upgrade.run import real_runner
+    from agentic_trading.upgrade.settings import load_upgrade_config
+    from agentic_trading.upgrade.ship import Shipyard
+
+    config = load_config(args.config)
+    state, journal_dir = Path(config.state_dir), Path(config.journal_dir)
+    repo = Path(args.config).resolve().parent.parent
+    action = args.upgrade_action
+    if action in ("pause", "resume", "rollback"):
+        {"pause": lambda: switches.pause(state, "paused from the command line"),
+         "resume": lambda: switches.resume(state), "rollback": lambda: switches.request_rollback(state)}[action]()
+        DecisionJournal(journal_dir).append({"event": "upgrade_control", "action": action, "source": "cli"})
+        print(f"upgrade {action}: done" + (" (the watchdog rolls back within 5 minutes)" if action == "rollback" else ""))
+        return 0
+    if action == "status":
+        control = switches.load_control(state)
+        try:
+            last = json.loads((state / "upgrade.json").read_text(encoding="utf-8")).get("last") or {}
+        except (OSError, ValueError):
+            last = {}
+        print(f"paused: {control.paused} {control.reason}".rstrip())
+        print(f"canary: {control.canary.get('title', '-')} until {control.canary.get('until', '-')}")
+        print(f"last: {last.get('outcome', '-')} — {last.get('message', '-')}")
+        return 0
+    now = datetime.now(timezone.utc)
+    yard = Shipyard(repo, state, real_runner)
+    if action == "watch":
+        from agentic_trading.notify import build_notifier
+        from agentic_trading.upgrade.watchdog import watch
+        from agentic_trading.fast.service import FastJournal
+
+        notifier = build_notifier()
+        result = watch(state_dir=state, journal_dir=journal_dir, now=now, runner=real_runner, shipyard=yard,
+                       journal=FastJournal(journal_dir, prefix="upgrade").append,
+                       notify=(notifier.dispatch if notifier else (lambda record: None)))
+        print(f"upgrade watch: {result}")
+        return 0
+    from agentic_trading.upgrade.cycle import run_cycle
+
+    mode_file = state / "mode"
+    mode = mode_file.read_text().strip() if mode_file.is_file() else str(config.mode)
+    outcome = run_cycle(state_dir=state, journal_dir=journal_dir, repo=repo, venv=repo / ".venv",
+                        settings=load_upgrade_config(args.config), mode=mode, now=now, runner=real_runner,
+                        shipyard=yard, probe_paths=(repo / "config" / "secrets.toml", Path.home() / ".bashrc"))
+    print(f"upgrade run: {outcome.message}")
+    return outcome.code
+```
+
+In `cli.py`, after `add_swarm_parser(sub)`, add:
+```python
+    from agentic_trading.upgrade.cli import add_upgrade_parser
+
+    add_upgrade_parser(sub)
+```
+After the `swarm` dispatch, add:
+```python
+    if args.command == "upgrade":
+        from agentic_trading.upgrade.cli import dispatch_upgrade
+
+        return dispatch_upgrade(args)
+```
+
+- [ ] **Step 5: Run the tests and the suite.** Expected: PASS.
+
+- [ ] **Step 6: Commit:** `feat(upgrade): the daily cycle (every refusal first, pause checked before deploy) and the upgrade CLI`.
+
+---
+### Task 9: The Evolution card and the one-click buttons
+
+**Files:**
+- Create: `src/agentic_trading/dashboard_upgrade.py`
+- Modify: `dashboard.py`. Add a `DashboardState.upgrade()` method, the `GET /api/upgrade` route beside `/api/swarm`, and `POST /api/upgrade` inside `do_POST`, behind the same fences.
+- Modify: `dashboard_html.py` (the card after the Swarm card), `dashboard_css.py`, `dashboard_cockpit_js.py`.
+- Test: `tests/test_dashboard_upgrade.py`; add a line to `tests/test_cockpit_page.py`.
+
+**Interfaces:**
+- Consumes: `load_control`, `pause`, `resume`, `request_rollback` (Task 1); `state/upgrade.json` (Task 8).
+- **Produces:**
+  - `upgrade_view(state_dir) -> dict` with `paused`, `reason`, `rollback_requested`, `canary{title, until, pr}`, `last_shipped{title, pr}`, `last{at, outcome, message, task}` and `enabled`;
+  - `POST /api/upgrade {"action": "pause"|"resume"|"rollback"}`, which returns the view;
+  - `CockpitFmt.upgradeLine(view)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_dashboard_upgrade.py
+"""The Evolution card: the state, and three fenced buttons that only flip switches."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from agentic_trading.dashboard_upgrade import upgrade_view
+from agentic_trading.upgrade.control import load_control, pause
+
+
+def _post(port: int, body: dict, *, content_type: str = "application/json", origin: str | None = None):
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/upgrade", data=json.dumps(body).encode(),
+                                     method="POST", headers={"Content-Type": content_type,
+                                                             **({"Origin": origin} if origin else {})})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, {}
+
+
+class UpgradeViewTests(unittest.TestCase):
+    def test_the_view_whitelists_and_reads_the_switches(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            pause(state, "operator")
+            (state / "upgrade.json").write_text(json.dumps({"enabled": True, "secret": "LEAK", "last": {
+                "at": "t", "outcome": "shipped", "message": "m", "task": "x", "token": "LEAK"}}))
+            view = upgrade_view(state)
+        self.assertNotIn("LEAK", json.dumps(view))
+        self.assertEqual((view["paused"], view["enabled"], view["last"]["outcome"]), (True, True, "shipped"))
+
+    def test_the_buttons_flip_switches_behind_the_fences(self) -> None:
+        from agentic_trading.config import load_config
+        from agentic_trading.dashboard import serve
+        from tests.test_runtime_daemon import _write_config
+
+        with tempfile.TemporaryDirectory() as name:
+            config = load_config(_write_config(Path(name)))
+            server = serve(config, host="127.0.0.1", port=0)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            port = server.server_address[1]
+            try:
+                self.assertEqual(_post(port, {"action": "pause"})[0], 200)
+                self.assertTrue(load_control(config.state_dir).paused)
+                self.assertEqual(_post(port, {"action": "rollback"})[0], 200)
+                self.assertTrue(load_control(config.state_dir).rollback_requested)
+                self.assertEqual(_post(port, {"action": "resume"})[0], 200)
+                self.assertFalse(load_control(config.state_dir).paused)
+                self.assertEqual(_post(port, {"action": "deploy"})[0], 400)
+                self.assertEqual(_post(port, {"action": "pause"}, content_type="text/plain")[0], 415)
+                self.assertEqual(_post(port, {"action": "pause"}, origin="http://evil.example")[0], 403)
+            finally:
+                server.shutdown()
+                server.server_close()
+```
+
+Add to the page tests: `self.assertIn('id="upgrade"', _section("strategies"))`, and add a JS test calling `CockpitFmt.upgradeLine(...)`:
+- `{paused: true, reason: "rolled back: x"}` gives `"paused — rolled back: x"`;
+- `{canary: {title: "T", until: "2026-10-08T02:00:00+00:00"}}` gives a string starting `"watching T until"`;
+- `{enabled: false}` gives `"off — set [upgrade] enabled = true"`;
+- otherwise `"running daily"`.
+
+- [ ] **Step 2: Run them and confirm they fail.**
+
+- [ ] **Step 3: Implement**
+
+`dashboard_upgrade.py`:
+```python
+"""The self-upgrader as the console sees it: named fields only."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from agentic_trading.upgrade.control import load_control
+
+LAST_FIELDS = ("at", "outcome", "message", "task")
+
+
+def upgrade_view(state_dir: Path | str) -> dict[str, Any]:
+    control = load_control(state_dir)
+    try:
+        status = json.loads((Path(state_dir) / "upgrade.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        status = {}
+    last = status.get("last") if isinstance(status.get("last"), dict) else {}
+    pick = lambda raw, names: {n: raw.get(n) for n in names} if raw else {}  # noqa: E731
+    return {"enabled": bool(status.get("enabled")), "paused": control.paused, "reason": control.reason,
+            "rollback_requested": control.rollback_requested,
+            "canary": pick(control.canary, ("title", "until", "pr")),
+            "last_shipped": pick(control.last_shipped, ("title", "pr")),
+            "last": {n: last.get(n) for n in LAST_FIELDS}}
+```
+
+In `dashboard.py`:
+- Add the `upgrade()` method: `return upgrade_view(self.state_dir)`, after `refresh_config()`.
+- Add the GET route: `if parsed.path == "/api/upgrade": self._json(self.state.upgrade()); return`.
+- In `do_POST`:
+  - change the path test to `parsed.path not in ("/api/arm", "/api/disarm", "/api/upgrade")`;
+  - change the loopback message to `"console writes are local-only"`;
+  - after the payload is read, add:
+    ```python
+    if parsed.path == "/api/upgrade":
+        action = str(payload.get("action", "")).strip().lower()
+        moves = {"pause": lambda: upgrade_control.pause(self.state.state_dir, "paused from the console"),
+                 "resume": lambda: upgrade_control.resume(self.state.state_dir),
+                 "rollback": lambda: upgrade_control.request_rollback(self.state.state_dir)}
+        if action not in moves:
+            self._json({"error": 'action must be "pause", "resume" or "rollback"'}, status=400)
+            return
+        moves[action]()
+        self._journal_upgrade(action)
+        self._json(self.state.upgrade())
+        return
+    ```
+  - add `_journal_upgrade(action)`, which appends `{"event": "upgrade_control", "action": action, "source": "console"}` through the same journal `_journal_arming` uses;
+  - import `from agentic_trading.upgrade import control as upgrade_control` and `from agentic_trading.dashboard_upgrade import upgrade_view`.
+
+`dashboard_html.py`, after the Swarm card:
+```html
+<div class="card span12"><h2>Evolution · the system upgrading itself (Codex writes, Claude reviews)</h2><div id="upgrade" class="swarm"><div class="sub">reading the upgrader…</div></div></div>
+```
+`dashboard_css.py`:
+```css
+.ubtns{display:flex;gap:8px;flex-wrap:wrap}
+.ubtns button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+.ubtns button.stop{border-color:var(--sell)}
+```
+`dashboard_cockpit_js.py`:
+- add `upgradeLine` to `CockpitFmt`:
+  ```javascript
+    const upgradeLine = (v) => !v || v.enabled === false ? 'off — set [upgrade] enabled = true'
+      : v.paused ? 'paused — ' + (v.reason || 'by the operator')
+      : v.canary && v.canary.title ? 'watching ' + v.canary.title + ' until ' + v.canary.until
+      : 'running daily';
+  ```
+  Export it, add `renderUpgrade` and `pollUpgrade`, and start the poll every 30 s in `start()`:
+  ```javascript
+    function renderUpgrade(view) {
+      const box = $('upgrade');
+      if (!box || !view) return;
+      const last = view.last || {};
+      const shipped = view.last_shipped && view.last_shipped.title
+        ? '<div class="sub">' + esc('last shipped: ' + view.last_shipped.title) + (view.last_shipped.pr
+          ? ' · <a href="' + esc(view.last_shipped.pr) + '" target="_blank" rel="noopener">PR</a>' : '') + '</div>' : '';
+      box.innerHTML = '<div class="fhead"><span class="fbadge">' + esc(CockpitFmt.upgradeLine(view)) + '</span></div>'
+        + shipped + (last.message ? '<div class="sub">' + esc('latest: ' + last.message) + '</div>' : '')
+        + '<div class="ubtns">' + (view.paused ? '<button data-act="resume">Resume</button>'
+          : '<button class="stop" data-act="pause">Pause</button>')
+        + '<button class="stop" data-act="rollback">Roll back last upgrade</button></div>';
+      box.querySelectorAll('button[data-act]').forEach((b) => b.addEventListener('click', async () => {
+        const act = b.getAttribute('data-act');
+        if (act === 'rollback' && !window.confirm('Roll back the last automatic upgrade?')) return;
+        try {
+          const r = await fetch('/api/upgrade', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: act }) });
+          renderUpgrade(await r.json());
+        } catch (e) { /* the next poll shows the truth */ }
+      }));
+    }
+
+    async function pollUpgrade() {
+      if (document.hidden) return;
+      try {
+        const r = await fetch('/api/upgrade');
+        if (r.ok) renderUpgrade(await r.json());
+      } catch (e) { /* keep the last picture */ }
+    }
+  ```
+
+- [ ] **Step 4: Run the tests and the suite.** Expected: PASS.
+
+- [ ] **Step 5: Commit:** `feat(dashboard): the Evolution card with fenced one-click Pause, Resume and Roll back`.
+
+---
+
+### Task 10: The follow gap (paper vs account)
+
+**Files:**
+- Modify: `src/agentic_trading/desk/desk.py` (`_retarget`, `_save`, `_load`), `src/agentic_trading/dashboard_swarm.py`, and the swarm card JS (`swarmHead` gains the gap).
+- Test: add to `tests/test_swarm_funding.py` and `tests/test_dashboard_swarm.py`.
+
+**Interfaces:**
+- **Produces:**
+  - `StrategyDesk.follow: list[float]` (the last 60 gaps, in bp), saved in `desk.json["follow"]`;
+  - `swarm_view(...)["follow_gap_bps"]`: the median, or `None`;
+  - `["follow_count"]`.
+
+**Rule (P4):** in a scoped `_retarget(only=...)`, for each symbol in `only` that a funded read-only member holds with a known book price `p`, where the live mid `m` is known, append `round((m / p - 1) * 10000, 1)`. Keep the last 60.
+
+- [ ] **Step 1: Write the failing tests.** Add to `FundingTests`:
+
+```python
+    def test_a_follow_records_the_gap_from_the_swarms_paper_price(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            rig = _Rig(Path(name), 0.5)
+            _write_swarm(rig.path, {"ETH-USD": "1"}, {"ETH-USD": "20"})
+            rig.later_quote("ETH-USD", "20.1", "20.3")  # mid 20.2: 1% above the swarm's close
+            gaps = list(rig.desk.follow)
+            saved = json.loads((Path(name) / "desk" / "desk.json").read_text())["follow"]
+        self.assertEqual(gaps, [100.0])
+        self.assertEqual(saved, [100.0])
+```
+
+Add to `tests/test_dashboard_swarm.py`:
+
+```python
+    def test_the_follow_gap_is_the_median_of_the_desks_record(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            _state(Path(name), T0)
+            (Path(name) / "desk").mkdir()
+            (Path(name) / "desk" / "desk.json").write_text(json.dumps({"allocations": {}, "follow": [10, -30, 50]}))
+            view = swarm_view(Path(name), [], now=T0)
+        self.assertEqual((view["follow_gap_bps"], view["follow_count"]), (10, 3))
+```
+
+- [ ] **Step 2: Run them and confirm they fail.**
+
+- [ ] **Step 3: Implement**
+
+In `desk.py`:
+- add `self.follow: list[float] = []` in `__init__`, before `self._load()`;
+- in `_retarget`, inside the `if only is not None:` block and before `targets = scoped`, add:
+  ```python
+  for member in self._funded_read_only():
+      for symbol in only & set(member.book.positions):
+          book_price, live = member.book.prices.get(symbol), prices.get(symbol)
+          if book_price and live:
+              self.follow.append(round(float((live / book_price - 1) * 10000), 1))
+  self.follow = self.follow[-60:]
+  ```
+- in `_save`'s payload, add `"follow": self.follow`;
+- in `_load`, add `self.follow = [float(x) for x in raw.get("follow") or []][-60:]`.
+
+In `dashboard_swarm.py`, `swarm_view` reads `desk/desk.json` once and adds:
+```python
+    "follow_gap_bps": statistics.median(follow) if follow else None, "follow_count": len(follow),
+```
+`follow` is the saved list (empty on any read error).
+
+In the JS `swarmHead`, append `' · follows at ' + signedPct(view.follow_gap_bps / 100) + ' vs paper'` when `view.follow_gap_bps != null`.
+
+- [ ] **Step 4: Run the tests and the suite.** Expected: PASS.
+
+- [ ] **Step 5: Commit:** `feat(desk): measure how far the account's follows drift from the swarm's paper prices`.
+
+---
+
+### Task 11: Timers, docs, counts
+
+**Files:**
+- Create:
+  - `deploy/agentic-trading-upgrade` (a launcher running `upgrade run --config config/agentic.toml`);
+  - `deploy/agentic-trading-upgrade.service` (`Type=oneshot`, `TimeoutStartSec=90min`, `Nice=10`, logging to `data/state/upgrade.log`);
+  - `deploy/agentic-trading-upgrade.timer` (`OnCalendar=*-*-* 02:00:00 UTC`, `Persistent=true`);
+  - `deploy/agentic-trading-upgrade-watch` (a launcher running `upgrade watch ...`);
+  - `deploy/agentic-trading-upgrade-watch.service` (oneshot, 10 min);
+  - `deploy/agentic-trading-upgrade-watch.timer` (`OnBootSec=5min`, `OnUnitActiveSec=5min`).
+- Modify: `README.md` (an "Evolution (self-upgrader)" section: what it may change, the walls, the buttons, the AppArmor step), `CLAUDE.md` (layout: `upgrade/`; hard rule: the `live` branch, and never switch the main checkout), and the test counts.
+- Test: `tests/test_upgrade_deploy.py` checks the two timers' `OnCalendar`/`OnUnitActiveSec` and `Persistent`, and that the launchers call `upgrade run` and `upgrade watch`.
+
+Write the units with the same shape as `deploy/agentic-trading-swarm{,.service,.timer}`: launcher `cd`s into the repo, `exec .venv/bin/agentic-trading ...`. Run the suite and `tools/check_doc_counts.py`, then commit: `build(upgrade): daily and watchdog timers, and the evolution docs`.
+
+---
+
+### Task 12: Launch (operational)
+
+Do this only after the whole-branch review passes and its fixes are in.
+
+1. Push `feat/self-upgrade`, open the PR (base `feat/swarm-funding`), and run the Windows build until it is green.
+2. **Create the `live` branch:** in the main checkout, `git switch feat/self-upgrade`, then `git branch live`, `git push -u origin live`, `git switch live`. Remove the worktree first; Git refuses to check out a branch another worktree holds. From now on, all work branches from `live` in worktrees.
+3. **Config:** back up `config/agentic.toml` to `.bak-upgrade`, then add `[upgrade]` with `enabled = true`.
+4. **Timers:** install the four units and both launchers into `~/.local/bin`, then `daemon-reload` and `enable --now` both timers.
+5. **Verify the engines without shipping anything:**
+   - `claude -p --bare "Reply with exactly: OK"` must print `OK`. If `--bare` can't authenticate, rule on the closest flags that still skip hooks and memory, then record and test them.
+   - `codex exec --help` must work.
+6. **First run:** `agentic-trading upgrade run --config config/agentic.toml`. On this machine it must stop at the sandbox probe (`the sandbox is not safe: the sandbox would not start ... RTM_NEWADDR`) until the user adds the AppArmor profile. That refusal is the correct, safe outcome. Record it.
+7. **Restart and check:**
+   - restart the dashboard;
+   - `curl /api/upgrade`;
+   - press **Pause** and **Resume** on the card through Playwright, confirming `control.json` flips;
+   - run the size sweep.
+8. **The user's one step,** given in the final message:
+   ```bash
+   sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+   abi <abi/4.0>,
+   include <tunables/global>
+   profile bwrap /usr/bin/bwrap flags=(unconfined) {
+     userns,
+     include if exists <local/bwrap>
+   }
+   EOF
+   sudo systemctl reload apparmor
+   ```
+   After it, the next 02:00 UTC run passes the probe and starts upgrading.
+9. Update memory.
+
+---
+
+## Self-review notes
+
+**Spec coverage:**
+
+| Spec item | Where |
+|---|---|
+| U1–U3 | Task 2 |
+| U4 | Tasks 5 and 8 |
+| U5 | Tasks 6 and 8 |
+| U6 | Task 7 |
+| U7 | Task 6 |
+| U8 | Tasks 1, 8 and 9 |
+| U9 | Task 4 |
+| U10 | Tasks 3 and 5 |
+| U11 | Task 8 |
+| U12 | Tasks 3, 8 and 12 |
+| Follow gap | Task 10 |
+| Operations | Tasks 11 and 12 |
+
+**Deviations:** none. The CLI's watch path builds the notifier with `notify.build_notifier()`, as the trader does.
