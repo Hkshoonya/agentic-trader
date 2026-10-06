@@ -1211,6 +1211,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from agentic_trading.swarm.cli import add_swarm_parser
 
     add_swarm_parser(sub)
+    from agentic_trading.upgrade.cli import add_upgrade_parser
+
+    add_upgrade_parser(sub)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -1323,6 +1326,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from agentic_trading.swarm.cli import dispatch_swarm
 
         return dispatch_swarm(args)
+    if args.command == "upgrade":
+        from agentic_trading.upgrade.cli import dispatch_upgrade
+
+        return dispatch_upgrade(args)
     if args.command == "dashboard":
         return cmd_dashboard(
             args.config, host=args.host, port=args.port, open_browser=args.open_browser
