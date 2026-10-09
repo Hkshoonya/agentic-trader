@@ -53,6 +53,9 @@ class _Yard:
     def intact(self, wt):
         return self.whole
 
+    def gitdir(self, wt):
+        return self.root / "repo" / ".git" / "worktrees" / "wt"
+
     def prepare(self, branch):
         self.calls.append(("prepare", branch))
         wt = self.root / "wt"

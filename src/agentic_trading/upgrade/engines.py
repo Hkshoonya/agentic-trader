@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from agentic_trading.upgrade.run import Runner
 from agentic_trading.upgrade.tasks import Task
@@ -50,12 +51,23 @@ class Verdict:
     reason: str
 
 
-def write(task: Task, *, worktree: Path, scratch: Path, runner: Runner, timeout: float = 2700.0) -> EngineResult:
+def _pinned(argv: list[str], worktree: Path, gitdir: Optional[Path]) -> list[str]:
+    """Any git an engine runs is pinned to the real git directory (never the worktree's own ``.git``
+    link, which the writer could repoint) and runs no hook or fsmonitor: env config outranks repo config."""
+    pins = ["GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null",
+            "GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false"]
+    if gitdir is not None:
+        pins += [f"GIT_DIR={gitdir}", f"GIT_WORK_TREE={worktree}"]
+    return ["env", *pins, *argv]
+
+
+def write(task: Task, *, worktree: Path, scratch: Path, runner: Runner, timeout: float = 2700.0,
+          gitdir: Optional[Path] = None) -> EngineResult:
     last = scratch / "codex-last.txt"
     last.unlink(missing_ok=True)
     prompt = f"{WRITE_RULES}\nTASK: {task.title}\n{task.detail}\n"
-    done = runner(["codex", "exec", "-C", str(worktree), "-s", "workspace-write", "--skip-git-repo-check",
-                   "--ephemeral", "-o", str(last), prompt], cwd=worktree, timeout=timeout)
+    done = runner(_pinned(["codex", "exec", "-C", str(worktree), "-s", "workspace-write", "--skip-git-repo-check",
+                           "--ephemeral", "-o", str(last), prompt], worktree, gitdir), cwd=worktree, timeout=timeout)
     if done.code != 0:
         return EngineResult("failed", f"codex exited {done.code}: {done.out.strip()[-200:]}")
     text = last.read_text(encoding="utf-8") if last.is_file() else done.out
@@ -68,14 +80,15 @@ def write(task: Task, *, worktree: Path, scratch: Path, runner: Runner, timeout:
     return EngineResult("changed", (text.strip().splitlines() or ["no summary"])[-1][:300])
 
 
-def review(task: Task, *, worktree: Path, base: str, runner: Runner, timeout: float = 1200.0) -> Verdict:
+def review(task: Task, *, worktree: Path, base: str, runner: Runner, timeout: float = 1200.0,
+           gitdir: Optional[Path] = None) -> Verdict:
     prompt = (f"{REVIEW_RULES}\nTASK: {task.title}\n{task.detail}\n"
               f"See the change with: git diff --cached {base}\n")
     # Not --bare: it accepts only an API key, and this job is logged in by OAuth. These flags load no
     # settings file (so no hooks, nothing the worktree could plant), no MCP servers, no skills.
-    done = runner(["claude", "-p", prompt, "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
-                   "--no-session-persistence", "--allowedTools", REVIEW_TOOLS, "--output-format", "text"],
-                  cwd=worktree, timeout=timeout)
+    done = runner(_pinned(["claude", "-p", prompt, "--setting-sources", "", "--strict-mcp-config",
+                           "--disable-slash-commands", "--no-session-persistence", "--allowedTools", REVIEW_TOOLS,
+                           "--output-format", "text"], worktree, gitdir), cwd=worktree, timeout=timeout)
     if done.code != 0:
         return Verdict(False, f"the reviewer failed (exit {done.code}): {done.out.strip()[-200:]}")
     for line in reversed(done.out.strip().splitlines()):

@@ -24,7 +24,29 @@ class _Fake:
         return RunResult(self.code, self.out)
 
 
+def _from(argv: list, name: str) -> list:
+    """The engine's own command line, after the ``env`` pins that come before it."""
+    return argv[argv.index(name):]
+
+
+PINS = ("GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null", "GIT_CONFIG_KEY_1=core.fsmonitor",
+        "GIT_CONFIG_VALUE_1=false")
+
+
 class EngineTests(unittest.TestCase):
+    def test_the_engines_git_never_follows_the_worktrees_own_link(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            wt, scratch, gitdir = Path(name) / "wt", Path(name) / "s", Path(name) / "repo/.git/worktrees/wt"
+            wt.mkdir()
+            scratch.mkdir()
+            writer, reviewer = _Fake(0, "", "DONE: x"), _Fake(0, "VERDICT: APPROVE — ok")
+            write(TASK, worktree=wt, scratch=scratch, runner=writer, gitdir=gitdir)
+            review(TASK, worktree=wt, base="live", runner=reviewer, gitdir=gitdir)
+        for argv in (writer.calls[0], reviewer.calls[0]):
+            self.assertEqual(argv[0], "env")
+            for pin in (*PINS, f"GIT_DIR={gitdir}", f"GIT_WORK_TREE={wt}"):
+                self.assertIn(pin, argv)
+
     def test_codex_runs_sandboxed_in_the_worktree_and_reports(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             wt, scratch = Path(name) / "wt", Path(name) / "s"
@@ -32,7 +54,7 @@ class EngineTests(unittest.TestCase):
             scratch.mkdir()
             fake = _Fake(0, "", "work...\nDONE: shares now grow with evidence")
             result = write(TASK, worktree=wt, scratch=scratch, runner=fake)
-            argv = fake.calls[0]
+            argv = _from(fake.calls[0], "codex")
             self.assertEqual(argv[:2], ["codex", "exec"])
             self.assertEqual(argv[argv.index("-s") + 1], "workspace-write")
             self.assertEqual(argv[argv.index("-C") + 1], str(wt))
@@ -48,7 +70,7 @@ class EngineTests(unittest.TestCase):
         yes = _Fake(0, "looks right\nVERDICT: APPROVE — small and tested")
         verdict = review(TASK, worktree=wt, base="live", runner=yes)
         self.assertTrue(verdict.approved)
-        argv = yes.calls[0]
+        argv = _from(yes.calls[0], "claude")
         self.assertEqual(argv[:2], ["claude", "-p"])
         self.assertIn("untrusted", argv[2])  # the diff is data, never instructions
         self.assertNotIn("--bare", argv)  # --bare refuses OAuth; the job would never be logged in

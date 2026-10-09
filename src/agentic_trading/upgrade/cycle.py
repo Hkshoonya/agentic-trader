@@ -85,7 +85,7 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
     tests_before = count_tests(runner, worktree=wt, venv=venv)
     scratch = Path(state_dir) / "upgrade"
     scratch.mkdir(parents=True, exist_ok=True)
-    written = write(task, worktree=wt, scratch=scratch, runner=runner)
+    written = write(task, worktree=wt, scratch=scratch, runner=runner, gitdir=shipyard.gitdir(wt))
     if written.status == "not_applicable":
         record(state_dir, task, "out_of_scope", now, written.summary)
         shipyard.cleanup(wt)
@@ -121,7 +121,7 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
     if not shipyard.settle(wt):
         return fail("refused", f"{task.title}: the tests changed the worktree, so the review would not see "
                                "what the walls checked")
-    verdict = review(task, worktree=wt, base="live", runner=runner)
+    verdict = review(task, worktree=wt, base="live", runner=runner, gitdir=shipyard.gitdir(wt))
     if not verdict.approved:
         return fail("rejected", f"{task.title}: the reviewer rejected it: {verdict.reason}")
     if load_control(state_dir).paused:

@@ -39,11 +39,13 @@ class Shipyard:
             self._links[wt] = link.read_text(encoding="utf-8")
         return wt
 
+    def gitdir(self, wt: Path) -> Path:
+        return self.repo / ".git" / "worktrees" / wt.name
+
     def _wt(self, wt: Path, *args: str, timeout: float = 300.0, identity: bool = False):
         """Git in the worktree with its git directory named outright, so the worktree's own ``.git``
         link — a file the writer and the tests could replace — is never read."""
-        gitdir = self.repo / ".git" / "worktrees" / wt.name
-        return self.runner(["git", "-C", str(wt), f"--git-dir={gitdir}", f"--work-tree={wt}", *INERT,
+        return self.runner(["git", "-C", str(wt), f"--git-dir={self.gitdir(wt)}", f"--work-tree={wt}", *INERT,
                             *(IDENTITY if identity else []), *args], timeout=timeout)
 
     def intact(self, wt: Path) -> bool:
