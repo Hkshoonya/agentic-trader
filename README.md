@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1279%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1344%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -638,6 +638,37 @@ rule on daily bars, with its own parameters. A daily job does the work.
 3. `agentic-trading swarm step --config config/agentic.toml` runs a step by hand.
    `agentic-trading swarm status --config config/agentic.toml` shows who is alive.
 
+### Evolution (the self-upgrader)
+
+The evolution agent above writes proposals and cannot apply them. The self-upgrader can, one change a
+day, and only behind walls it cannot move:
+- **Who writes, who agrees:** Codex writes the change in a sandbox with no network, no secrets and no home
+  directory. Claude Code reviews the diff and must answer `VERDICT: APPROVE`. Either one can stop it.
+- **What it may change:** `strategies/`, `swarm/`, their tests, and `docs/`. It can never touch the console,
+  the upgrader itself, risk, arming, limits, config, the journal, alerts, the venue guard, or anything those
+  import, and never a file AI tools read as instructions (`CLAUDE.md`, `AGENTS.md`, `.claude/`), so a change
+  cannot instruct its own reviewer. In live mode even `strategies/` and `swarm/` are closed.
+- **The shape of a change:** at most 12 files and 400 lines. No test is deleted, and the test count never
+  falls. No subprocess, network, environment or `eval` calls, and nothing shaped like a key. Code under
+  `src/` may not write, rename or delete files, so a change can never flip the trader's mode, arm it, or
+  clear its kill switch.
+- **Shipping:** the full suite and the doc-count check pass in the sandbox, the change merges to the `live`
+  branch by fast-forward with a PR as its record, and the services restart.
+- **The canary:** a watchdog checks every 5 minutes for 24 hours: services up, no tracebacks, the trader
+  still writing its journal, the console answering. Any failure reverts the commit, restores the swarm's
+  book, pauses the upgrader and sends an alert.
+- **One click:** the Evolution card on the Strategies tab has **Pause**, **Resume** and **Roll back last
+  upgrade**. The same switches are `agentic-trading upgrade pause|resume|rollback --config ...`.
+
+It starts off. To turn it on:
+1. Add `[upgrade]` with `enabled = true` to `config/agentic.toml`.
+2. Install `deploy/agentic-trading-upgrade` and `deploy/agentic-trading-upgrade-watch` to `~/.local/bin/`,
+   and their `.service` and `.timer` files to `~/.config/systemd/user/`. Then enable both timers.
+3. On Ubuntu 24.04 the sandbox (`bwrap`) needs an AppArmor profile that allows user namespaces. Until it
+   works, `upgrade run` refuses at its sandbox probe and changes nothing.
+
+`agentic-trading upgrade status --config config/agentic.toml` shows the switches and the latest cycle.
+
 ## How it decides
 
 ```mermaid
@@ -670,7 +701,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1279 tests, including the honesty tests for the rig
+tests/                   1344 tests, including the honesty tests for the rig
 ```
 
 ## Operations

@@ -35,6 +35,8 @@ ALERT_EVENTS: dict[str, tuple[float, str]] = {
     "promotion_requires_consent": (0.0, "normal"),
     "live_gate_blocked": (3600.0, "normal"),
     "kill_switch": (0.0, "critical"),
+    "upgrade_rolled_back": (0.0, "critical"),
+    "upgrade_rollback_failed": (0.0, "critical"),
     "demotion": (0.0, "critical"),
     "placed": (0.0, "normal"),
 }
@@ -142,6 +144,9 @@ def alert_for(record: dict[str, Any]) -> Optional[Alert]:
             ),
             urgency=urgency,
         )
+    if event in ("upgrade_rolled_back", "upgrade_rollback_failed"):
+        return Alert(key=event, title="Automatic upgrade rolled back" if event == "upgrade_rolled_back"
+                     else "Upgrade rollback FAILED", body=str(record.get("reason") or "")[:300], urgency=urgency)
     return None
 
 

@@ -98,14 +98,19 @@ const CockpitFmt = (() => {
       + (t.pnl_pct == null ? '' : ' · ' + signedPct(t.pnl_pct));
   };
   const swarmHead = (view) => (view.alive || 0) + ' alive · ' + (view.trials || 0) + ' recipes tried · book '
-    + (view.book && view.book.return_pct != null ? signedPct(view.book.return_pct) : 'not started');
+    + (view.book && view.book.return_pct != null ? signedPct(view.book.return_pct) : 'not started')
+    + (view.follow_gap_bps != null ? ' · follows at ' + signedPct(view.follow_gap_bps / 100) + ' vs paper' : '');
   const swarmBadge = (weight) => 'funded by results · ' + (weight == null
     ? 'its first allocation comes on a Monday' : 'desk weight ' + Math.round(weight * 100) + '%');
   const swarmLine = (a) => a.forward_days + ' days · ' + a.state
     + (a.state === 'contributing' ? ' ' + Math.round((a.share || 0) * 100) + '%' : '')
     + ' · ' + signedPct(a.excess_pct || 0) + ' vs 60/40';
+  const upgradeLine = (v) => !v || v.enabled === false ? 'off — set [upgrade] enabled = true'
+    : v.paused ? 'paused — ' + (v.reason || 'by the operator')
+    : v.canary && v.canary.title ? 'watching ' + v.canary.title + ' until ' + v.canary.until
+    : 'running daily';
   return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst,
-    regimeWord, fastCompare, fundedBadge, tradeLine, swarmHead, swarmLine, swarmBadge };
+    regimeWord, fastCompare, fundedBadge, tradeLine, swarmHead, swarmLine, swarmBadge, upgradeLine };
 })();
 
 const Cockpit = (() => {
@@ -541,6 +546,42 @@ const Cockpit = (() => {
     }
   }
 
+  function renderUpgrade(view) {
+    const box = $('upgrade');
+    if (!box || !view) return;
+    const last = view.last || {};
+    const shipped = view.last_shipped && view.last_shipped.title
+      ? '<div class="sub">' + esc('last shipped: ' + view.last_shipped.title) + (view.last_shipped.pr
+        ? ' · <a href="' + esc(view.last_shipped.pr) + '" target="_blank" rel="noopener">PR</a>' : '') + '</div>' : '';
+    box.innerHTML = '<div class="fhead"><span class="fbadge">' + esc(CockpitFmt.upgradeLine(view)) + '</span></div>'
+      + shipped + (last.message ? '<div class="sub">' + esc('latest: ' + last.message) + '</div>' : '')
+      + '<div class="ubtns">' + (view.paused ? '<button data-act="resume">Resume</button>'
+        : '<button class="stop" data-act="pause">Pause</button>')
+      + '<button class="stop" data-act="rollback">Roll back last upgrade</button></div>';
+    box.querySelectorAll('button[data-act]').forEach((b) => b.addEventListener('click', async () => {
+      const act = b.getAttribute('data-act');
+      if (act === 'rollback' && !window.confirm('Roll back the last automatic upgrade?')) return;
+      try {
+        const response = await fetch('/api/upgrade', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: act }) });
+        if (response.ok) renderUpgrade(await response.json());
+      } catch (e) {
+        // the next poll shows the truth
+      }
+    }));
+  }
+
+  async function pollUpgrade() {
+    if (document.hidden) return;
+    try {
+      const response = await fetch('/api/upgrade');
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      renderUpgrade(await response.json());
+    } catch (e) {
+      // keep the last picture; the header dot already shows a lost console
+    }
+  }
+
   function render(data) {
     const story = data.story || {};
     say('say-now', story.right_now);
@@ -590,6 +631,8 @@ const Cockpit = (() => {
     setInterval(pollFast, 2000);
     pollSwarm();
     setInterval(pollSwarm, 30000);
+    pollUpgrade();
+    setInterval(pollUpgrade, 30000);
     setInterval(tick, 1000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
     // The overview's height is the screen minus the header, and the header's

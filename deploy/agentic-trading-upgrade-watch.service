@@ -1,0 +1,9 @@
+[Unit]
+Description=Agentic Trading upgrade watchdog (checks a canary; rolls back and pauses on any failure or on request)
+
+[Service]
+Type=oneshot
+ExecStart=/home/doczeus/.local/bin/agentic-trading-upgrade-watch
+TimeoutStartSec=10min
+StandardOutput=append:/home/doczeus/Projects/Agnetic TraDING/data/state/upgrade.log
+StandardError=append:/home/doczeus/Projects/Agnetic TraDING/data/state/upgrade.log

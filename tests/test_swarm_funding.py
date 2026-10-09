@@ -204,6 +204,17 @@ class FundingTests(unittest.TestCase):
         self.assertEqual(last.get("QQQ"), qqq_before)  # untouched: not the swarm's symbol
 
 
+    def test_a_follow_records_the_gap_from_the_swarms_paper_price(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            rig = _Rig(Path(name), 0.5)
+            _write_swarm(rig.path, {"ETH-USD": "1"}, {"ETH-USD": "20"})
+            rig.later_quote("ETH-USD", "20.1", "20.3")  # mid 20.2: 1% above the swarm's close
+            gaps = list(rig.desk.follow)
+            saved = json.loads((Path(name) / "desk" / "desk.json").read_text())["follow"]
+        self.assertEqual(gaps, [100.0])
+        self.assertEqual(saved, [100.0])
+
+
 class RefreshTests(unittest.TestCase):
     def test_refresh_if_changed_reads_only_a_changed_file(self) -> None:
         with tempfile.TemporaryDirectory() as name:

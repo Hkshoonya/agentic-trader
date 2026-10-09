@@ -106,6 +106,9 @@ header .badge{font-size:clamp(11px,.4vw + 6px,17px)}
 .frecent li{margin:2px 0}
 .item.fast .dot{background:var(--accent)}
 .swarm{display:grid;gap:8px}
+.ubtns{display:flex;gap:8px;flex-wrap:wrap}
+.ubtns button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+.ubtns button.stop{border-color:var(--sell)}
 .sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px}
 .stile{border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:var(--panel);min-width:0}
 .stile b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

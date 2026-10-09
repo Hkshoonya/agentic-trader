@@ -11,7 +11,7 @@ Live trading system (real money via Robinhood MCP), shadow-first. CONTRIBUTING.m
 .venv/bin/agentic-trading fast replay --config config/agentic.toml --source bars --from YYYY-MM-DD --to YYYY-MM-DD
 systemctl --user restart agentic-trading-venues   # after changing venues/ or fast/ code
 ```
-systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboard` (loopback console), `agentic-trading-venues` (Alpaca/Coinbase streams, recorder, paper switchboard), `agentic-trading-alert`, and `agentic-trading-swarm.timer` (daily 00:30 UTC swarm step).
+systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboard` (loopback console), `agentic-trading-venues` (Alpaca/Coinbase streams, recorder, paper switchboard), `agentic-trading-alert`, `agentic-trading-swarm.timer` (daily 00:30 UTC swarm step), `agentic-trading-upgrade.timer` (daily 02:00 UTC self-upgrade) and `agentic-trading-upgrade-watch.timer` (canary check every 5 min).
 
 ## Layout (`src/agentic_trading/`)
 - `cli.py` — the single `agentic-trading` entry point and all subcommands
@@ -20,6 +20,7 @@ systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboar
 - `venues/` — SDK streams, TickBus, recorder, guard, arming, health
 - `fast/` — switchboard (paper only), runs inside the venues service
 - `swarm/` — the agent swarm: recipes (data), breed, screen, forward life, blend/cull, its member book; daily `swarm step`
+- `upgrade/` — the self-upgrader: policy walls (allow-list + control-module import closure), bwrap sandbox, Codex write / Claude review, ship to `live`, canary watchdog, Pause/Resume/Rollback switches (`state/upgrade/control.json`)
 - `dashboard*.py` — console; HTML/CSS/JS live as Python string modules
 - `llm/` — advisor and regime gates; `rh_mcp/` — Robinhood MCP client + OAuth
 - `windows/` — PyInstaller build; lazily imported modules need `hiddenimports` in `AgenticTrader.spec`
@@ -31,6 +32,7 @@ systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboar
 - Never read or print `config/secrets.toml`; leak checks print counts only.
 - Tests never reach the network: `tests/conftest.py` tripwire refuses non-loopback connects. Use fakes (`tests/fast_support.py`).
 - Live venues refuse orders unless the user runs `agentic-trading venues arm <venue> --hours N --yes` themselves — never arm on your own. The switchboard never calls `Venue.submit`.
+- The main checkout runs the `live` branch, which the self-upgrader fast-forwards. Never switch it to another branch or commit there by hand; do all work in a worktree and land it on `live` through a PR.
 
 ## Gotchas
 - Adding tests changes the count written in README (3 places) and CONTRIBUTING; update them or Windows CI fails.

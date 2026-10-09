@@ -133,10 +133,24 @@ class CockpitFormatTests(unittest.TestCase):
         )
 
 
+    def test_upgrade_words(self) -> None:
+        self.assertEqual(
+            self.js("[CockpitFmt.upgradeLine({enabled: true, paused: true, reason: 'rolled back: x'}),"
+                    " CockpitFmt.upgradeLine({enabled: false}), CockpitFmt.upgradeLine({enabled: true})]"),
+            ["paused — rolled back: x", "off — set [upgrade] enabled = true", "running daily"],
+        )
+        self.assertTrue(self.js(
+            "CockpitFmt.upgradeLine({enabled: true, canary: {title: 'T', until: '2026-10-08T02:00:00+00:00'}})"
+        ).startswith("watching T until"))
+
     def test_swarm_words(self) -> None:
         self.assertEqual(
             self.js("CockpitFmt.swarmHead({alive: 5, trials: 31, book: {return_pct: 0.8}})"),
             "5 alive · 31 recipes tried · book +0.80%",
+        )
+        self.assertEqual(
+            self.js("CockpitFmt.swarmHead({alive: 5, trials: 31, book: {return_pct: 0.8}, follow_gap_bps: -12})"),
+            "5 alive · 31 recipes tried · book +0.80% · follows at −0.12% vs paper",
         )
         self.assertEqual(
             self.js("[CockpitFmt.swarmLine({forward_days: 33, state: 'contributing', excess_pct: 1.2, share: 0.5}),"

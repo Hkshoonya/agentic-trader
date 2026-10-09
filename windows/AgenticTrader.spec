@@ -44,6 +44,7 @@ hiddenimports = [
     "agentic_trading.dashboard_fast",
     "agentic_trading.swarm.cli",
     "agentic_trading.swarm.step",
+    "agentic_trading.upgrade.cli",
     "agentic_trading.dashboard_swarm",
     "agentic_trading.evidence",
     "agentic_trading.walkforward",

@@ -1,0 +1,13 @@
+[Unit]
+Description=Agentic Trading self-upgrade (one change: Codex writes, Claude reviews, walls and tests decide)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/doczeus/.local/bin/agentic-trading-upgrade
+# a write, the suite twice and a review; the engines each have their own timeouts
+TimeoutStartSec=90min
+Nice=10
+StandardOutput=append:/home/doczeus/Projects/Agnetic TraDING/data/state/upgrade.log
+StandardError=append:/home/doczeus/Projects/Agnetic TraDING/data/state/upgrade.log
