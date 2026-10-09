@@ -137,6 +137,29 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(scan("import subprocess\nimport subprocess as s\n")["subprocess"], 2)
         self.assertEqual(sum(scan("x = 1\n").values()), 0)
 
+    def test_shipped_code_cannot_write_files(self) -> None:
+        # A strategy runs inside the trader: if it could write files it could flip data/state/mode to live,
+        # arm itself, or clear the kill switch. Writing is counted by capability, whatever the path.
+        for snippet in ("(Path('data/state') / 'mode').write_text('live')\n", "Path(p).write_bytes(b'')\n",
+                        "Path('data/state/risk_guard.json').unlink()\n", "p.rename(q)\n", "p.replace(q)\n",
+                        "p.symlink_to(q)\n", "p.chmod(0o777)\n", "p.touch()\n", "jsonio.write_text(p, s)\n",
+                        "open(p, 'w')\n", "open(p, mode='a')\n", "open(p, m)\n", "p.open('w')\n",
+                        "os.remove(p)\n", "os.replace(p, q)\n", "os.rename(p, q)\n", "os.unlink(p)\n"):
+            with self.subTest(snippet=snippet):
+                self.assertGreater(sum(scan(snippet).values()), 0, snippet)
+        for fine in ("open(p)\n", "open(p, 'r', encoding='utf-8')\n", "p.open()\n", "p.read_text()\n",
+                     "'a-b'.replace('-', '+')\n", "name.replace('_', ' ').title()\n"):
+            with self.subTest(fine=fine):
+                self.assertEqual(sum(scan(fine).values()), 0, fine)
+
+    def test_tests_may_write_their_fixtures_but_shipped_code_may_not(self) -> None:
+        test_file, body = "tests/test_swarm_x.py", "def test_a():\n    (tmp / 'book.json').write_text('{}')\n"
+        fixture = [FileChange(test_file, "A", added=tuple(body.splitlines()))]
+        self.assertEqual(_check(fixture, {test_file: ""}, {test_file: body}, tests_after=11), [])
+        shipped = [FileChange(STRAT, "M", added=("(Path('data/state') / 'mode').write_text('live')",))]
+        reasons = _check(shipped, {STRAT: ""}, {STRAT: "(Path('data/state') / 'mode').write_text('live')\n"})
+        self.assertTrue(any("a file write" in r for r in reasons), reasons)
+
     def test_the_ways_around_the_scan_are_counted_too(self) -> None:
         for snippet in ("from os import system\nsystem('x')\n", "from os import *\n", "import os as o\n",
                         "import importlib\n", "from importlib import import_module\n", "import builtins\n",

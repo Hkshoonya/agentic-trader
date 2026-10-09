@@ -66,7 +66,11 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
              if line.strip() and not line[3:].startswith("data/")]
     if dirty:
         return finish(1, "refused", f"the live checkout has uncommitted changes outside data/: {dirty[0][3:]}")
-    problems = probe(runner, worktree=repo, venv=venv, secrets=probe_paths[0], home_file=probe_paths[1])
+    # An empty stand-in for the worktree: the probe asks what a sandboxed worktree can see, and mounting
+    # the live checkout itself would hand it config/secrets.toml.
+    probe_root = Path(state_dir) / "upgrade" / "probe-root"
+    probe_root.mkdir(parents=True, exist_ok=True)
+    problems = probe(runner, worktree=probe_root, venv=venv, secrets=probe_paths[0], home_file=probe_paths[1])
     if problems:
         return finish(1, "refused", "the sandbox is not safe: " + "; ".join(problems))
 

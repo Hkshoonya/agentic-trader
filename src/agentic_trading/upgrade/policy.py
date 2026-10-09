@@ -32,7 +32,13 @@ FORBIDDEN_MODULES = ("subprocess", "socket", "httpx", "requests", "urllib", "htt
 ESCAPES = ("__builtins__", "__subclasses__", "__globals__", "__code__", "__getattribute__")
 SENSITIVE = re.compile(r"secrets|(^|[/\\])\.env\b|tokens\.json|\.ssh\b|id_rsa|agentic\.toml|\.config[/\\]|\.codex|\.claude")
 FORBIDDEN_CALLS = ("eval", "exec", "__import__", "compile")
-FORBIDDEN_OS = ("environ", "getenv", "system", "popen", "putenv", "unsetenv", "execv", "execve", "spawnv", "fork")
+FORBIDDEN_OS = ("environ", "getenv", "system", "popen", "putenv", "unsetenv", "execv", "execve", "spawnv", "fork",
+                "remove", "unlink", "rename", "replace", "rmdir", "removedirs", "chmod", "chown", "symlink", "link",
+                "truncate", "open", "write", "mkfifo")
+# Shipped code runs inside the trader, so a file write could flip data/state/mode to live, arm, or clear the
+# kill switch. Writing is counted by capability, whatever the path or the object it is called on.
+WRITE_ATTRS = ("write_text", "write_bytes", "unlink", "rename", "symlink_to", "hardlink_to", "link_to", "chmod",
+               "lchmod", "touch", "rmdir")
 SECRET = re.compile(
     r"sk-[A-Za-z0-9_\-]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[abpr]-[A-Za-z0-9-]{10,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY|(?i:(api[_-]?key|secret|token|passw(or)?d)\s*[:=]\s*['\"][^'\"\s]{16,}['\"])")
@@ -147,7 +153,18 @@ def control_closure(src_root: Path) -> set[str]:
     return seen
 
 
-def scan(text: str) -> Counter:
+def _writes(call: ast.Call, position: int) -> bool:
+    """An ``open`` whose mode is not a literal read mode."""
+    mode = call.args[position] if len(call.args) > position else next(
+        (k.value for k in call.keywords if k.arg == "mode"), None)
+    if mode is None:
+        return False
+    return not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)) or bool(set(mode.value) & set("wax+"))
+
+
+def scan(text: str, *, shipped: bool = True) -> Counter:
+    """Count the risky constructs in ``text``. File writes count only in ``shipped`` code: tests run in
+    the sandbox alone and write their fixtures; strategy and swarm code runs inside the trader."""
     found: Counter = Counter()
     try:
         tree = ast.parse(text)
@@ -178,6 +195,15 @@ def scan(text: str) -> Counter:
             if not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)) \
                     or attr.value in FORBIDDEN_OS + FORBIDDEN_CALLS:
                 found["dynamic attribute"] += 1
+        if shipped and isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            attr = node.func.attr
+            if attr in WRITE_ATTRS or (attr == "replace" and len(node.args) == 1 and not node.keywords):
+                found["a file write"] += 1  # str.replace takes two arguments, Path.replace one
+            elif attr == "open" and _writes(node, 0):
+                found["a file write"] += 1
+        if shipped and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open" \
+                and _writes(node, 1):
+            found["a file write"] += 1
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and SENSITIVE.search(node.value):
             found["a secret or config path"] += 1
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
@@ -229,7 +255,8 @@ def check(changes: Iterable[FileChange], *, live: bool, closure: set[str], befor
         if module and module in closure:
             reasons.append(f"{change.path} is imported by a control module, so it is protected")
         if change.path.endswith(".py"):
-            new = scan(after.get(change.path, "")) - scan(before.get(change.path, ""))
+            shipped = not change.path.startswith("tests/")
+            new = scan(after.get(change.path, ""), shipped=shipped) - scan(before.get(change.path, ""), shipped=shipped)
             reasons.extend(f"adds {kind} to {change.path}" for kind in sorted(new))
             if change.path.startswith("tests/"):
                 gone = test_names(before.get(change.path, "")) - test_names(after.get(change.path, ""))

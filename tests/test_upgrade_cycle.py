@@ -121,6 +121,26 @@ class CycleTests(unittest.TestCase):
                 self.assertEqual(reviewed, [])
                 self.assertFalse(any(c[0] in ("commit", "deploy") for c in yard.calls))
 
+    def test_the_probe_sandbox_never_mounts_the_live_checkout(self) -> None:
+        # Mounting the live checkout would put config/secrets.toml inside the sandbox, and a correct
+        # probe would then refuse every run.
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            runner = _Runner()
+            repo = state / "repo"
+            (repo / "src" / "agentic_trading").mkdir(parents=True)
+            run_cycle(state_dir=state, journal_dir=state / "journal", repo=repo, venv=repo / ".venv",
+                      settings=ON, mode="shadow", now=NOW, runner=runner, shipyard=_Yard(state),
+                      write=lambda task, **kw: EngineResult("changed", "x"),
+                      review=lambda task, **kw: Verdict(True, "ok"),
+                      probe_paths=(repo / "config" / "secrets.toml", state / "home.txt"))
+            secrets = repo / "config" / "secrets.toml"
+        argv = next(c for c in runner.calls if "socket.create_connection" in " ".join(c))
+        mounted = [Path(argv[i + 1]) for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")]
+        self.assertTrue(mounted)
+        for source in mounted:
+            self.assertFalse(secrets.is_relative_to(source), source)
+
     def test_each_refusal_changes_nothing(self) -> None:
         cases = {
             "off": dict(settings=UpgradeConfig(enabled=False)),
