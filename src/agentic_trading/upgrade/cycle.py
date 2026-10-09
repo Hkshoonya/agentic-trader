@@ -92,6 +92,8 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
         return finish(0, "out_of_scope", f"{task.title}: out of scope ({written.summary})")
     if written.status != "changed":
         return fail("failed", f"{task.title}: the writer failed ({written.summary})")
+    if not shipyard.intact(wt):
+        return fail("refused", f"{task.title}: the writer replaced the worktree's git link")
     names, unified = shipyard.diff(wt)
     changes = parse_diff(names, unified)
     if not changes:

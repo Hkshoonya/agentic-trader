@@ -49,9 +49,12 @@ def wrap(argv: Sequence[str], *, worktree: Path, venv: Path) -> list[str]:
             system += ["--symlink", str(path.readlink()), top]
         elif path.is_dir():
             system += ["--ro-bind", top, top]
+    git_link = worktree / ".git"  # read-only over the writable worktree: no test can repoint git
+    link = ["--ro-bind", str(git_link), str(git_link)] if git_link.exists() else []
     return ["bwrap", *system,
             "--ro-bind", str(venv), str(venv),
             "--bind", str(worktree), str(worktree),
+            *link,
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
             "--unshare-net", "--unshare-pid", "--die-with-parent", "--clearenv",
             "--setenv", "PATH", f"{venv}/bin:/usr/bin:/bin", "--setenv", "HOME", "/tmp",

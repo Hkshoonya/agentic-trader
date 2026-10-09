@@ -33,6 +33,17 @@ class SandboxTests(unittest.TestCase):
         self.assertNotIn("/home/u", argv)
         self.assertEqual(argv[-2:], ["python", "-V"])
 
+    def test_the_tests_cannot_replace_the_worktrees_git_link(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as name:
+            wt = Path(name)
+            (wt / ".git").write_text("gitdir: /real/.git/worktrees/auto\n")
+            argv = wrap(["python", "-V"], worktree=wt, venv=VENV)
+        link = str(wt / ".git")
+        self.assertIn(["--ro-bind", link, link], [argv[i:i + 3] for i in range(len(argv))])
+        self.assertGreater(argv.index(link), argv.index("--bind"))  # mounted over the writable worktree
+
     def test_the_probe_reports_each_leak(self) -> None:
         clean = _Fake(RunResult(0, json.dumps({"network": False, "secrets": False, "home": False,
                                                 "write_outside": False}) + "\n"))

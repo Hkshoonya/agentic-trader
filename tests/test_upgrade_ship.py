@@ -12,10 +12,11 @@ from agentic_trading.upgrade.ship import SERVICES, Shipyard
 
 class _Fake:
     def __init__(self, fail: str = "") -> None:
-        self.calls, self.fail = [], fail
+        self.calls, self.fail, self.cwds = [], fail, []
 
     def __call__(self, argv, cwd=None, timeout=600.0) -> RunResult:
         self.calls.append(list(argv))
+        self.cwds.append(cwd)
         line = " ".join(argv)
         if self.fail and self.fail in line:
             return RunResult(1, "boom")
@@ -72,7 +73,7 @@ class ShipTests(unittest.TestCase):
             yard.diff(Path(name) / "wt")
             lines = [" ".join(c) for c in fake.calls]
             stage = next(i for i, l in enumerate(lines) if "add -A" in l)
-            clean = next(i for i, l in enumerate(lines) if "clean -fdxq" in l)
+            clean = next(i for i, l in enumerate(lines) if "clean -ffdxq" in l)  # -ff: nested repos too
             show = next(i for i, l in enumerate(lines) if "diff --cached" in l)
         self.assertLess(stage, clean)  # ignored files the walls never see are deleted, never staged
         self.assertLess(clean, show)
@@ -84,7 +85,42 @@ class ShipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             changed, _, _ = self._yard(name, fail="diff --quiet")
             self.assertFalse(changed.settle(Path(name) / "wt"))
-        self.assertTrue(any("clean -fdxq" in " ".join(c) for c in fake.calls))
+        self.assertTrue(any("clean -ffdxq" in " ".join(c) for c in fake.calls))
+
+    def test_git_in_the_worktree_never_trusts_the_worktrees_own_link(self) -> None:
+        # The worktree's .git is a file the writer and the tests could replace, pointing git at a config
+        # with hooks or an fsmonitor that would run outside the sandbox.
+        with tempfile.TemporaryDirectory() as name:
+            yard, fake, _ = self._yard(name)
+            wt = yard.prepare("auto/x")
+            fake.calls.clear()
+            fake.cwds.clear()
+            yard.diff(wt)
+            yard.settle(wt)
+            yard.commit(wt, "t")
+            yard.head(wt)
+            yard.publish(wt, "auto/x", "t", "b")
+            gits = [c for c in fake.calls if c[0] == "git"]
+            gh = [(c, cwd) for c, cwd in zip(fake.calls, fake.cwds) if c[0] == "gh"]
+        self.assertTrue(gits)
+        for call in gits:
+            line = " ".join(call)
+            self.assertIn("--git-dir=", line)
+            self.assertIn("core.hooksPath=/dev/null", line)
+            self.assertIn("core.fsmonitor=false", line)
+        self.assertEqual(gh[0][1], Path(name) / "repo")  # gh reads the main checkout, never the worktree
+
+    def test_a_swapped_git_link_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            yard, _, _ = self._yard(name)
+            wt = Path(name) / "agentic-trading-auto"
+            wt.mkdir()
+            (wt / ".git").write_text("gitdir: /real/.git/worktrees/agentic-trading-auto\n")
+            self.assertEqual(yard.prepare("auto/x"), wt)
+            self.assertTrue(yard.intact(wt))
+            (wt / ".git").write_text("gitdir: evil/g\n")
+            self.assertFalse(yard.intact(wt))
+            self.assertFalse(yard.settle(wt))
 
     def test_a_failed_revert_is_aborted_and_restarts_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as name:

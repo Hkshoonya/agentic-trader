@@ -45,8 +45,13 @@ class _Runner:
 
 
 class _Yard:
-    def __init__(self, root: Path, change: str = SWARM_FILE, settled: bool = True, link: bool = False) -> None:
+    def __init__(self, root: Path, change: str = SWARM_FILE, settled: bool = True, link: bool = False,
+                 whole: bool = True) -> None:
         self.root, self.change, self.calls, self.settled, self.link = root, change, [], settled, link
+        self.whole = whole
+
+    def intact(self, wt):
+        return self.whole
 
     def prepare(self, branch):
         self.calls.append(("prepare", branch))
@@ -102,7 +107,8 @@ class CycleTests(unittest.TestCase):
                          probe_paths=(state / "secrets.toml", state / "home.txt"))
 
     def test_the_reviewer_sees_only_what_the_walls_checked(self) -> None:
-        for needle, yard_kw in (("changed the worktree", dict(settled=False)), ("symlink", dict(link=True))):
+        for needle, yard_kw in (("changed the worktree", dict(settled=False)), ("symlink", dict(link=True)),
+                                ("git link", dict(whole=False))):
             with self.subTest(needle=needle), tempfile.TemporaryDirectory() as name:
                 reviewed = []
                 yard = _Yard(Path(name), **yard_kw)
