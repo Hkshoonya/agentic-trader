@@ -108,6 +108,8 @@ const CockpitFmt = (() => {
   const upgradeLine = (v) => !v || v.enabled === false ? 'off — set [upgrade] enabled = true'
     : v.paused ? 'paused — ' + (v.reason || 'by the operator')
     : v.canary && v.canary.title ? 'watching ' + v.canary.title + ' until ' + v.canary.until
+    : v.last && v.last.outcome === 'refused' ? 'blocked — the last run was refused'
+    : v.last && v.last.outcome === 'failed' ? 'running daily · the last attempt failed'
     : 'running daily';
   return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst,
     regimeWord, fastCompare, fundedBadge, tradeLine, swarmHead, swarmLine, swarmBadge, upgradeLine };
