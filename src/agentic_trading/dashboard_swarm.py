@@ -8,6 +8,7 @@ funded) comes from the desk's latest weekly allocation event, not from the swarm
 from __future__ import annotations
 
 import json
+import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -36,13 +37,26 @@ def _weight(events: Iterable[dict[str, Any]]) -> Optional[float]:
     return None
 
 
-def _current_weight(state_dir: Path, events: Iterable[dict[str, Any]]) -> Optional[float]:
-    """The desk's saved allocation (current, mid-week too); the latest weekly event if it can't be read."""
+def _saved_desk(state_dir: Path) -> dict[str, Any]:
     try:
         saved = json.loads((state_dir / "desk" / "desk.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def _current_weight(saved: dict[str, Any], events: Iterable[dict[str, Any]]) -> Optional[float]:
+    """The desk's saved allocation (current, mid-week too); the latest weekly event if it can't be read."""
+    try:
         return float(saved["allocations"]["swarm"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError):
         return _weight(events)
+
+
+def _follow(saved: dict[str, Any]) -> list[float]:
+    """The desk's record of how far its follows sat from the swarm's paper prices, in bp."""
+    raw = saved.get("follow")
+    return [float(x) for x in raw if isinstance(x, (int, float))] if isinstance(raw, list) else []
 
 
 def swarm_view(state_dir: Path | str, events: Iterable[dict[str, Any]] = (), *,
@@ -62,6 +76,8 @@ def swarm_view(state_dir: Path | str, events: Iterable[dict[str, Any]] = (), *,
         stepped = None
     agents = [_pick(a, AGENT_FIELDS) for a in (data.get("agents") or []) if isinstance(a, dict)][:100]
     recent = [_pick(r, RECENT_FIELDS) for r in (data.get("recent") or []) if isinstance(r, dict)][:10]
+    saved = _saved_desk(Path(state_dir))
+    follow = _follow(saved)
     return {
         "enabled": True,
         "as_of": data.get("as_of"),
@@ -73,5 +89,7 @@ def swarm_view(state_dir: Path | str, events: Iterable[dict[str, Any]] = (), *,
         "agents": agents,
         "recent": recent,
         "scout": _pick(data.get("scout"), SCOUT_FIELDS),
-        "weight": _current_weight(Path(state_dir), events),
+        "weight": _current_weight(saved, events),
+        "follow_gap_bps": statistics.median(follow) if follow else None,
+        "follow_count": len(follow),
     }

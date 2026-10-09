@@ -27,6 +27,7 @@ from agentic_trading.types import OrderIntent
 COSTS_REFRESH_SECONDS = 60.0
 # How often the desk checks whether a book another process writes has changed.
 BOOK_POLL_SECONDS = 60.0
+FOLLOW_KEEP = 60  # follow gaps kept for the console's median
 # A book another process writes that hasn't been marked for this many days is stale:
 # its weight goes to the benchmark, so a dead job's frozen holdings are never funded.
 STALE_BOOK_DAYS = 6  # the swarm marks 1-2 days behind; leave room for a long market weekend
@@ -99,6 +100,7 @@ class StrategyDesk:
         self._noted: set[tuple[str, str]] = set()  # (member, problem) already journaled
         self._scope: set[str] = set()  # symbols a funded read-only book changed: retarget just these
         self._stale_now: set[str] = set()  # funded read-only members whose weight is lent to the benchmark
+        self.follow: list[float] = []  # bp the live mid sat from a funded book's paper price when it was followed
         self._load()
 
     # -- runtime strategy interface ---------------------------------------
@@ -323,6 +325,12 @@ class StrategyDesk:
                     scoped.pop(symbol, None)
             targets = scoped
             unpriced = [s for s in unpriced if s in only]
+            for member in self._funded_read_only():
+                for symbol in only & set(member.book.positions):
+                    book_price, live = member.book.prices.get(symbol), prices.get(symbol)
+                    if book_price and live:
+                        self.follow.append(round(float((live / book_price - 1) * 10000), 1))
+            self.follow = self.follow[-FOLLOW_KEEP:]
         self._pending = False
         self._scope = set()
         self._awaiting = (self._awaiting - only) | set(unpriced) if only is not None else set(unpriced)
@@ -387,6 +395,7 @@ class StrategyDesk:
             "allocations": self.allocations,
             "allocation_week": self.allocation_week,
             "targets": {s: str(q) for s, q in self.targets.items()},
+            "follow": self.follow,
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         jsonio.write_text(self.state_path, jsonio.dumps(payload, indent=2) + "\n")
@@ -405,6 +414,9 @@ class StrategyDesk:
                 allocations.setdefault(member.name, 0.0)
             self.allocations = allocations
         self.allocation_week = str(raw.get("allocation_week") or "")
+        follow = raw.get("follow")
+        if isinstance(follow, list):
+            self.follow = [float(x) for x in follow if isinstance(x, (int, float))][-FOLLOW_KEEP:]
         targets = raw.get("targets")
         if isinstance(targets, dict):
             self.targets = {str(s): Decimal(str(q)) for s, q in targets.items()}

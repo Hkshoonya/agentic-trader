@@ -98,7 +98,8 @@ const CockpitFmt = (() => {
       + (t.pnl_pct == null ? '' : ' · ' + signedPct(t.pnl_pct));
   };
   const swarmHead = (view) => (view.alive || 0) + ' alive · ' + (view.trials || 0) + ' recipes tried · book '
-    + (view.book && view.book.return_pct != null ? signedPct(view.book.return_pct) : 'not started');
+    + (view.book && view.book.return_pct != null ? signedPct(view.book.return_pct) : 'not started')
+    + (view.follow_gap_bps != null ? ' · follows at ' + signedPct(view.follow_gap_bps / 100) + ' vs paper' : '');
   const swarmBadge = (weight) => 'funded by results · ' + (weight == null
     ? 'its first allocation comes on a Monday' : 'desk weight ' + Math.round(weight * 100) + '%');
   const swarmLine = (a) => a.forward_days + ' days · ' + a.state

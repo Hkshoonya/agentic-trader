@@ -101,3 +101,11 @@ class SwarmWeightTests(unittest.TestCase):
             (Path(name) / "desk" / "desk.json").write_text(json.dumps({"allocations": {"swarm": 0.3}}))
             view = swarm_view(Path(name), events, now=T0)
         self.assertEqual(view["weight"], 0.3)
+
+    def test_the_follow_gap_is_the_median_of_the_desks_record(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            _state(Path(name), T0)
+            (Path(name) / "desk").mkdir()
+            (Path(name) / "desk" / "desk.json").write_text(json.dumps({"allocations": {}, "follow": [10, -30, 50]}))
+            view = swarm_view(Path(name), [], now=T0)
+        self.assertEqual((view["follow_gap_bps"], view["follow_count"]), (10, 3))
