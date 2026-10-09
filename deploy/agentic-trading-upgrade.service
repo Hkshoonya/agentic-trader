@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/home/doczeus/.local/bin/agentic-trading-upgrade
-# a write, the suite twice and a review; the engines each have their own timeouts
-TimeoutStartSec=90min
+# the steps time out on their own (~158 min in all); systemd must never stop a run mid-deploy
+TimeoutStartSec=240min
 Nice=10
 StandardOutput=append:/home/doczeus/Projects/Agnetic TraDING/data/state/upgrade.log
 StandardError=append:/home/doczeus/Projects/Agnetic TraDING/data/state/upgrade.log
