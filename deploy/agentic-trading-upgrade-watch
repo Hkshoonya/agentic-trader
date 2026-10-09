@@ -1,0 +1,9 @@
+#!/bin/sh
+# Launcher for the self-upgrader's watch unit: the project path contains a space,
+# which systemd's ExecStart parser handles poorly, so the cd lives here. Codex is
+# installed under nvm, which the systemd user PATH does not include.
+set -e
+for bin in "$HOME"/.nvm/versions/node/*/bin; do [ -d "$bin" ] && PATH="$bin:$PATH"; done
+export PATH="$HOME/.local/bin:$PATH"
+cd "/home/doczeus/Projects/Agnetic TraDING"
+exec ".venv/bin/agentic-trading" upgrade watch --config config/agentic.toml

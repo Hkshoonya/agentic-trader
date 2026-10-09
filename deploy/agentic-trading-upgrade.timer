@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the agentic-trading self-upgrade daily at 02:00 UTC, and at boot if a run was missed
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
