@@ -29,11 +29,13 @@ from agentic_trading.dashboard_desk import DeskEventCache, build_desk_view
 from agentic_trading.dashboard_html import HTML
 from agentic_trading.dashboard_fast import fast_view
 from agentic_trading.dashboard_swarm import swarm_view
+from agentic_trading.dashboard_upgrade import upgrade_view
 from agentic_trading.dashboard_venues import venues_view
 from agentic_trading.jsonio import dumps as json_dumps
 from agentic_trading.promotion import load_state
 from agentic_trading.runtime import effective_mode
 from agentic_trading.session import next_session_open, session_allows, session_for
+from agentic_trading.upgrade import control as upgrade_control
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -1152,6 +1154,11 @@ class DashboardState:
             self._desk_events = DeskEventCache(self.journal_dir)
         return swarm_view(self.state_dir, self._desk_events.read())
 
+    def upgrade(self) -> dict[str, Any]:
+        """The self-upgrader's switches and latest cycle (``/api/upgrade``)."""
+        self.refresh_config()
+        return upgrade_view(self.state_dir)
+
     def venues(self) -> dict[str, Any]:
         """The Alpaca/Coinbase gateway's health (``/api/venues``)."""
         self.refresh_config()
@@ -1395,23 +1402,25 @@ class _Handler(BaseHTTPRequestHandler):
     # -- the one write path ------------------------------------------------
 
     def do_POST(self) -> None:  # noqa: N802
-        """Arm or disarm order submission. Nothing else is writable.
+        """Arm or disarm order submission, or flip the upgrader's switches.
 
-        The console has been read-only since it existed; this is the single
-        exception, and it is fenced: loopback only, POST only, an explicit
-        confirmation phrase, and arming refused unless the promotion gate and a
-        fresh evidence report both say the system earned it. Disarming is always
-        allowed — lowering risk never needs permission.
+        The console has been read-only since it existed; these are the only
+        exceptions, and they are fenced: loopback only, POST only, JSON only,
+        same origin. Arming also needs an explicit confirmation phrase and is
+        refused unless the promotion gate and a fresh evidence report both say
+        the system earned it. Disarming is always allowed — lowering risk never
+        needs permission. The upgrader buttons only pause, resume or request a
+        rollback; nothing here can start an upgrade.
         """
         parsed = urlparse(self.path)
-        if parsed.path not in ("/api/arm", "/api/disarm"):
+        if parsed.path not in ("/api/arm", "/api/disarm", "/api/upgrade"):
             self._json({"error": "not found"}, status=404)
             return
         if not self._valid_host():
             self._json({"error": "invalid dashboard host"}, status=403)
             return
         if not self._from_loopback():
-            self._json({"error": "arming is local-only"}, status=403)
+            self._json({"error": "console writes are local-only"}, status=403)
             return
         content_type = str(self.headers.get("Content-Type") or "")
         if content_type.split(";", 1)[0].strip().lower() != "application/json":
@@ -1421,6 +1430,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": "cross-origin dashboard write refused"}, status=403)
             return
         payload = self._read_body()
+        if parsed.path == "/api/upgrade":
+            action = str(payload.get("action", "")).strip().lower()
+            moves = {"pause": lambda: upgrade_control.pause(self.state.state_dir, "paused from the console"),
+                     "resume": lambda: upgrade_control.resume(self.state.state_dir),
+                     "rollback": lambda: upgrade_control.request_rollback(self.state.state_dir)}
+            if action not in moves:
+                self._json({"error": 'action must be "pause", "resume" or "rollback"'}, status=400)
+                return
+            moves[action]()
+            self._journal_upgrade(action)
+            self._json(self.state.upgrade())
+            return
         if parsed.path == "/api/arm":
             if str(payload.get("confirm", "")).strip().upper() != "ARM":
                 self._json(
@@ -1506,6 +1527,17 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 — a journal failure must not fake success
             return
 
+    def _journal_upgrade(self, action: str) -> None:
+        """An operator's upgrader switch lands in the same journal as arming."""
+        try:
+            from agentic_trading.journal import DecisionJournal
+
+            DecisionJournal(Path(self.state.config.journal_dir)).append(
+                {"event": "upgrade_control", "action": action, "source": "console"}
+            )
+        except Exception:  # noqa: BLE001 — the switch is already flipped; the journal is a record
+            return
+
     def do_GET(self) -> None:  # noqa: N802
         if not self._valid_host():
             self._json({"error": "invalid dashboard host"}, status=403)
@@ -1531,6 +1563,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/swarm":
             self._json(self.state.swarm())
+            return
+        if parsed.path == "/api/upgrade":
+            self._json(self.state.upgrade())
             return
         if parsed.path == "/api/activity":
             self._json(self.state.activity())
