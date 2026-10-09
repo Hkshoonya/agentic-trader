@@ -45,15 +45,22 @@ class _Runner:
 
 
 class _Yard:
-    def __init__(self, root: Path, change: str = SWARM_FILE) -> None:
-        self.root, self.change, self.calls = root, change, []
+    def __init__(self, root: Path, change: str = SWARM_FILE, settled: bool = True, link: bool = False) -> None:
+        self.root, self.change, self.calls, self.settled, self.link = root, change, [], settled, link
 
     def prepare(self, branch):
         self.calls.append(("prepare", branch))
         wt = self.root / "wt"
         (wt / Path(self.change).parent).mkdir(parents=True, exist_ok=True)
-        (wt / self.change).write_text("X = 2\n")
+        if self.link:
+            (wt / self.change).symlink_to(self.root / "elsewhere.py")
+        else:
+            (wt / self.change).write_text("X = 2\n")
         return wt
+
+    def settle(self, wt):
+        self.calls.append(("settle",))
+        return self.settled
 
     def diff(self, wt):
         return f"M\t{self.change}\n", f"diff --git a/{self.change} b/{self.change}\n-X = 1\n+X = 2\n"
@@ -94,6 +101,17 @@ class CycleTests(unittest.TestCase):
                          review=review or (lambda task, **kw: Verdict(True, "small and tested")),
                          probe_paths=(state / "secrets.toml", state / "home.txt"))
 
+    def test_the_reviewer_sees_only_what_the_walls_checked(self) -> None:
+        for needle, yard_kw in (("changed the worktree", dict(settled=False)), ("symlink", dict(link=True))):
+            with self.subTest(needle=needle), tempfile.TemporaryDirectory() as name:
+                reviewed = []
+                yard = _Yard(Path(name), **yard_kw)
+                outcome = self._run(Path(name), yard=yard,
+                                    review=lambda task, **kw: reviewed.append(1) or Verdict(True, "ok"))
+                self.assertIn(needle, outcome.message)
+                self.assertEqual(reviewed, [])
+                self.assertFalse(any(c[0] in ("commit", "deploy") for c in yard.calls))
+
     def test_each_refusal_changes_nothing(self) -> None:
         cases = {
             "off": dict(settings=UpgradeConfig(enabled=False)),
@@ -127,7 +145,7 @@ class CycleTests(unittest.TestCase):
             control = load_control(state)
             status = json.loads((state / "upgrade.json").read_text())
         self.assertEqual(outcome.code, 0)
-        self.assertEqual([c[0] for c in yard.calls], ["prepare", "commit", "publish", "deploy", "cleanup"])
+        self.assertEqual([c[0] for c in yard.calls], ["prepare", "settle", "commit", "publish", "deploy", "cleanup"])
         self.assertEqual(control.canary["commit"], "abc123")
         self.assertEqual(control.last_shipped["pr"], "https://github.com/x/y/pull/7")
         self.assertEqual(status["last"]["outcome"], "shipped")

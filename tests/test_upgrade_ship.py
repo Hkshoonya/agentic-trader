@@ -66,6 +66,26 @@ class ShipTests(unittest.TestCase):
         self.assertTrue(any("revert --no-edit abc123" in l and "user.name=Hkshoonya" in l for l in lines))
         self.assertFalse(any("reset --hard" in l for l in lines))
 
+    def test_the_walls_and_the_reviewer_see_the_same_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            yard, fake, _ = self._yard(name)
+            yard.diff(Path(name) / "wt")
+            lines = [" ".join(c) for c in fake.calls]
+            stage = next(i for i, l in enumerate(lines) if "add -A" in l)
+            clean = next(i for i, l in enumerate(lines) if "clean -fdxq" in l)
+            show = next(i for i, l in enumerate(lines) if "diff --cached" in l)
+        self.assertLess(stage, clean)  # ignored files the walls never see are deleted, never staged
+        self.assertLess(clean, show)
+
+    def test_settle_refuses_a_worktree_the_tests_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            yard, fake, _ = self._yard(name)
+            self.assertTrue(yard.settle(Path(name) / "wt"))
+        with tempfile.TemporaryDirectory() as name:
+            changed, _, _ = self._yard(name, fail="diff --quiet")
+            self.assertFalse(changed.settle(Path(name) / "wt"))
+        self.assertTrue(any("clean -fdxq" in " ".join(c) for c in fake.calls))
+
     def test_a_failed_revert_is_aborted_and_restarts_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             yard, fake, _ = self._yard(name, fail="revert --no-edit")

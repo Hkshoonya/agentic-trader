@@ -105,6 +105,9 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
                     max_files=settings.max_files, max_lines=settings.max_lines)
     if tests_before is None or tests_after is None:
         reasons.append("the tests could not be counted")
+    odd = [c.path for c in changes if (wt / c.path).is_symlink() or (wt / c.path).is_dir()]
+    if odd:
+        reasons.append(f"a change may not add a symlink or a submodule: {odd[0]}")
     if reasons:
         return fail("refused", f"{task.title}: refused by the walls: " + "; ".join(reasons))
     suite = run_suite(runner, worktree=wt, venv=venv)
@@ -113,6 +116,9 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
     docs = run_doc_counts(runner, worktree=wt, venv=venv)
     if docs.code != 0:
         return fail("failed", f"{task.title}: the doc counts disagree: {docs.out.strip()[-200:]}")
+    if not shipyard.settle(wt):
+        return fail("refused", f"{task.title}: the tests changed the worktree, so the review would not see "
+                               "what the walls checked")
     verdict = review(task, worktree=wt, base="live", runner=runner)
     if not verdict.approved:
         return fail("rejected", f"{task.title}: the reviewer rejected it: {verdict.reason}")

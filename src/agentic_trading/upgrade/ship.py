@@ -35,9 +35,18 @@ class Shipyard:
 
     def diff(self, wt: Path) -> tuple[str, str]:
         self._git("add", "-A", where=wt)
+        # Whatever is still untracked is ignored, so the walls would never see it — yet the suite and the
+        # reviewer would (a planted CLAUDE.md under an ignored path, say). Delete it.
+        self._git("clean", "-fdxq", where=wt)
         names = self._git("diff", "--cached", "--name-status", "-M", self.live, where=wt).out
         unified = self._git("diff", "--cached", "-U0", self.live, where=wt).out
         return names, unified
+
+    def settle(self, wt: Path) -> bool:
+        """Just before review: drop everything the test run created, and say whether the tracked tree
+        still matches what the walls checked (a test that rewrites files fails here)."""
+        self._git("clean", "-fdxq", where=wt)
+        return self._git("diff", "--quiet", where=wt).code == 0
 
     def file_at(self, path: str) -> str:
         shown = self._git("show", f"{self.live}:{path}")
