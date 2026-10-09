@@ -35,8 +35,9 @@ class _Yard:
     def __init__(self, ok: bool = True) -> None:
         self.ok, self.rolled = ok, []
 
-    def rollback(self, commit: str):
+    def rollback(self, commit: str, restore: bool = True):
         self.rolled.append(commit)
+        self.restored = restore
         return self.ok, "reverted and restarted" if self.ok else "git revert failed"
 
 
@@ -111,9 +112,19 @@ class WatchdogTests(unittest.TestCase):
             yard = _Yard()
             result, _, _ = self._watch(state, state, T0 + timedelta(days=3), _Runner(), yard)
             self.assertEqual((result, yard.rolled), ("rolled_back", ["abc"]))
+            self.assertFalse(yard.restored)  # the canary passed: the data since then is kept
             request_rollback(state)
             again, _, _ = self._watch(state, state, T0 + timedelta(days=3), _Runner(), _Yard())
         self.assertEqual(again, "nothing to roll back")  # never reverts something else
+
+    def test_a_rollback_inside_the_canary_restores_the_data(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            _canary(state, T0)
+            request_rollback(state)
+            yard = _Yard()
+            result, _, _ = self._watch(state, state, T0 + timedelta(hours=2), _Runner(), yard)
+        self.assertEqual((result, yard.rolled, yard.restored), ("rolled_back", ["abc"], True))
 
     def test_a_failed_rollback_pauses_loudly(self) -> None:
         with tempfile.TemporaryDirectory() as name:

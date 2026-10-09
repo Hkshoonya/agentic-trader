@@ -89,15 +89,18 @@ class Shipyard:
         self._git("push", "-q", "origin", self.live, timeout=300.0)
         return self.restart()
 
-    def rollback(self, commit: str) -> tuple[bool, str]:
+    def rollback(self, commit: str, restore: bool = True) -> tuple[bool, str]:
+        """Revert ``commit``; restore the swarm's stores only while its canary is open — once it has
+        passed, the days of state written since are healthy and kept."""
         reverted = self.runner(["git", *IDENTITY, "-C", str(self.repo), "revert", "--no-edit", commit], timeout=300.0)
         if reverted.code != 0:
+            self._git("revert", "--abort")  # never leave the live checkout mid-revert, with conflict markers
             return False, f"git revert failed: {reverted.out.strip()[-200:]}"
         self._git("push", "-q", "origin", self.live, timeout=300.0)
-        restored = self.restore(commit)
+        note = ("" if self.restore(commit) else " (no data snapshot to restore)") if restore else " (data kept)"
         if not self.restart():
             return False, "reverted, but the services did not restart"
-        return True, "reverted and restarted" + ("" if restored else " (no data snapshot to restore)")
+        return True, "reverted and restarted" + note
 
     def cleanup(self, wt: Path) -> None:
         self._git("worktree", "remove", "--force", str(wt))

@@ -21,9 +21,6 @@ def dispatch_upgrade(args: Any) -> int:
     from agentic_trading.config import load_config
     from agentic_trading.journal import DecisionJournal
     from agentic_trading.upgrade import control as switches
-    from agentic_trading.upgrade.run import real_runner
-    from agentic_trading.upgrade.settings import load_upgrade_config
-    from agentic_trading.upgrade.ship import Shipyard
 
     config = load_config(args.config)
     state, journal_dir = Path(config.state_dir), Path(config.journal_dir)
@@ -45,6 +42,18 @@ def dispatch_upgrade(args: Any) -> int:
         print(f"canary: {control.canary.get('title', '-')} until {control.canary.get('until', '-')}")
         print(f"last: {last.get('outcome', '-')} — {last.get('message', '-')}")
         return 0
+    with switches.exclusive(state) as mine:
+        if not mine:
+            print(f"upgrade {action}: busy — another upgrade job is working; this one stepped aside")
+            return 0
+        return _work(args, config, state, journal_dir, repo, action)
+
+
+def _work(args: Any, config: Any, state: Path, journal_dir: Path, repo: Path, action: str) -> int:
+    from agentic_trading.upgrade.run import real_runner
+    from agentic_trading.upgrade.settings import load_upgrade_config
+    from agentic_trading.upgrade.ship import Shipyard
+
     now = datetime.now(timezone.utc)
     yard = Shipyard(repo, state, real_runner)
     if action == "watch":

@@ -82,7 +82,7 @@ def watch(*, state_dir: Path, journal_dir: Path, now: datetime, runner: Runner, 
 
 def _rollback(state_dir: Path, control: Any, target: dict, why: str, now: datetime, shipyard: Any,
               journal: Callable[[dict], None], notify: Callable[[dict], Any]) -> str:
-    ok, note = shipyard.rollback(str(target["commit"]))
+    ok, note = shipyard.rollback(str(target["commit"]), restore=bool(control.canary))
     if not ok:
         control.paused, control.reason = True, f"rollback failed: {note}"
         save_control(state_dir, control)

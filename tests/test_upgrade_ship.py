@@ -66,6 +66,26 @@ class ShipTests(unittest.TestCase):
         self.assertTrue(any("revert --no-edit abc123" in l and "user.name=Hkshoonya" in l for l in lines))
         self.assertFalse(any("reset --hard" in l for l in lines))
 
+    def test_a_failed_revert_is_aborted_and_restarts_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            yard, fake, _ = self._yard(name, fail="revert --no-edit")
+            ok, note = yard.rollback("abc123")
+            lines = [" ".join(c) for c in fake.calls]
+        self.assertFalse(ok)
+        self.assertIn("git revert failed", note)
+        self.assertTrue(any("revert --abort" in l for l in lines))  # never leave live mid-revert
+        self.assertFalse(any("restart" in l for l in lines))
+
+    def test_a_rollback_after_the_canary_keeps_the_data(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            yard, fake, state = self._yard(name)
+            yard.snapshot("abc123")
+            (state / "desk" / "swarm.json").write_text('{"cash": "0"}')  # days of healthy life since
+            ok, note = yard.rollback("abc123", restore=False)
+            kept = (state / "desk" / "swarm.json").read_text()
+        self.assertTrue(ok, note)
+        self.assertEqual(kept, '{"cash": "0"}')
+
     def test_commit_uses_the_owners_identity_and_publish_returns_the_pr(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             yard, fake, _ = self._yard(name)

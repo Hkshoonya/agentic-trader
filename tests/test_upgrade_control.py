@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentic_trading.upgrade.control import load_control, pause, request_rollback, resume, save_control
+from agentic_trading.upgrade.control import exclusive, load_control, pause, request_rollback, resume, save_control
 from agentic_trading.upgrade.run import RunResult, real_runner
 from agentic_trading.upgrade.settings import load_upgrade_config
 
@@ -60,6 +60,39 @@ class ControlTests(unittest.TestCase):
             save_control(state, control)
             again = load_control(state)
         self.assertEqual((again.canary["commit"], again.last_shipped["title"]), ("abc", "t"))
+
+
+class LockTests(unittest.TestCase):
+    def test_one_upgrader_job_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            with exclusive(name) as first:
+                with exclusive(name) as second:
+                    self.assertEqual((first, second), (True, False))
+            with exclusive(name) as again:
+                self.assertTrue(again)
+
+    def test_run_and_watch_step_aside_while_the_other_works(self) -> None:
+        import contextlib
+        import io
+        from argparse import Namespace
+        from unittest.mock import patch
+
+        from agentic_trading.config import load_config
+        from agentic_trading.upgrade.cli import dispatch_upgrade
+        from tests.test_runtime_daemon import _write_config
+
+        with tempfile.TemporaryDirectory() as name:
+            path = _write_config(Path(name))
+            state = load_config(path).state_dir
+            for action in ("run", "watch"):
+                with self.subTest(action=action), exclusive(state), \
+                        patch("agentic_trading.upgrade.watchdog.watch", side_effect=AssertionError("ran")), \
+                        patch("agentic_trading.upgrade.cycle.run_cycle", side_effect=AssertionError("ran")):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        code = dispatch_upgrade(Namespace(config=str(path), upgrade_action=action))
+                    self.assertEqual(code, 0)
+                    self.assertIn("busy", out.getvalue())
 
 
 class RunnerTests(unittest.TestCase):
