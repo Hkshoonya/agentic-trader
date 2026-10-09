@@ -115,7 +115,7 @@ class CheckTests(unittest.TestCase):
         after = {path: "def test_a():\n    pass\n"}
         self.assertTrue(any("deletes test" in r for r in _check([FileChange(path, "M", removed=("x",))],
                                                                 before, after)))
-        leak = [FileChange("docs/a.md", "A", added=('api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"',))]
+        leak = [FileChange("docs/a.md", "A", added=('api_key = "' + "sk-" + "a" * 32 + '"',))]  # built, never a literal
         self.assertTrue(any("secret" in r for r in _check(leak)))
 
     def test_readme_may_change_only_its_test_counts(self) -> None:
