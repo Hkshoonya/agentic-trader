@@ -50,6 +50,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(verdict.approved)
         argv = yes.calls[0]
         self.assertEqual(argv[:2], ["claude", "-p"])
+        self.assertIn("untrusted", argv[2])  # the diff is data, never instructions
         self.assertNotIn("--bare", argv)  # --bare refuses OAuth; the job would never be logged in
         self.assertEqual(argv[argv.index("--setting-sources") + 1], "")  # no worktree or user settings, no hooks
         for flag in ("--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"):

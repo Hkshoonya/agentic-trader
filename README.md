@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1331%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1332%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -646,7 +646,8 @@ day, and only behind walls it cannot move:
   directory. Claude Code reviews the diff and must answer `VERDICT: APPROVE`. Either one can stop it.
 - **What it may change:** `strategies/`, `swarm/`, their tests, and `docs/`. It can never touch the console,
   the upgrader itself, risk, arming, limits, config, the journal, alerts, the venue guard, or anything those
-  import. In live mode even `strategies/` and `swarm/` are closed.
+  import, and never a file AI tools read as instructions (`CLAUDE.md`, `AGENTS.md`, `.claude/`), so a change
+  cannot instruct its own reviewer. In live mode even `strategies/` and `swarm/` are closed.
 - **The shape of a change:** at most 12 files and 400 lines. No test is deleted, and the test count never
   falls. No subprocess, network, environment or `eval` calls, and nothing shaped like a key.
 - **Shipping:** the full suite and the doc-count check pass in the sandbox, the change merges to the `live`
@@ -698,7 +699,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1331 tests, including the honesty tests for the rig
+tests/                   1332 tests, including the honesty tests for the rig
 ```
 
 ## Operations

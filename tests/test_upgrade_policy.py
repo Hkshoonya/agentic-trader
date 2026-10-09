@@ -31,6 +31,14 @@ class PathTests(unittest.TestCase):
         self.assertFalse(allowed_path(STRAT, live=True))
         self.assertTrue(allowed_path("docs/notes.md", live=True))
 
+    def test_no_instructions_for_the_reviewer_can_be_planted(self) -> None:
+        # The reviewer discovers CLAUDE.md files (nested ones too) and agents read AGENTS.md: a change
+        # could otherwise tell its own reviewer to approve it.
+        for path in ("docs/CLAUDE.md", "src/agentic_trading/strategies/CLAUDE.md", "docs/sub/claude.local.md",
+                     "src/agentic_trading/swarm/AGENTS.md", "docs/GEMINI.md", "docs/.claude/settings.json",
+                     "src/agentic_trading/strategies/.codex/config.toml", "docs/.agents/x.md"):
+            self.assertFalse(allowed_path(path, live=False), path)
+
     def test_module_names(self) -> None:
         self.assertEqual(module_of("src/agentic_trading/swarm/blend.py"), "agentic_trading.swarm.blend")
         self.assertEqual(module_of("src/agentic_trading/swarm/__init__.py"), "agentic_trading.swarm")

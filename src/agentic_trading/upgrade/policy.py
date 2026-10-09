@@ -67,8 +67,19 @@ def parse_diff(name_status: str, unified: str) -> list[FileChange]:
     return out
 
 
+# Files and folders AI tools read as instructions. The reviewer discovers CLAUDE.md files, nested ones
+# too, so a change that adds one could tell its own reviewer to approve it. None may be added anywhere.
+AGENT_FILES = frozenset({"claude.md", "claude.local.md", "agents.md", "agents.override.md", "gemini.md"})
+AGENT_DIRS = frozenset({".claude", ".codex", ".agents", ".gemini", ".cursor"})
+
+
+def _instructs_agents(path: str) -> bool:
+    parts = [part.lower() for part in path.split("/")]
+    return parts[-1] in AGENT_FILES or any(part in AGENT_DIRS for part in parts[:-1])
+
+
 def allowed_path(path: str, *, live: bool) -> bool:
-    if path in PROTECTED_TESTS:
+    if path in PROTECTED_TESTS or _instructs_agents(path):
         return False
     if path.startswith(ALLOWED_TEST_PREFIXES) and path.endswith(".py"):
         return not live  # live mode removes swarm/ and strategies/, and so their tests
