@@ -40,7 +40,15 @@ class Shipyard:
         return wt
 
     def gitdir(self, wt: Path) -> Path:
-        return self.repo / ".git" / "worktrees" / wt.name
+        """The worktree's git directory, read from its link as ``prepare`` found it (git numbers the name
+        on a collision), and only if it lies under this repo's worktrees."""
+        default = self.repo / ".git" / "worktrees" / wt.name
+        made = self._links.get(wt, "")
+        if made.startswith("gitdir:"):
+            named = Path(made[len("gitdir:"):].strip())
+            if named.parent == default.parent:
+                return named
+        return default
 
     def _wt(self, wt: Path, *args: str, timeout: float = 300.0, identity: bool = False):
         """Git in the worktree with its git directory named outright, so the worktree's own ``.git``

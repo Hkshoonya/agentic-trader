@@ -110,6 +110,25 @@ class ShipTests(unittest.TestCase):
             self.assertIn("core.fsmonitor=false", line)
         self.assertEqual(gh[0][1], Path(name) / "repo")  # gh reads the main checkout, never the worktree
 
+    def test_the_gitdir_is_read_from_the_link_made_at_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            yard, _, _ = self._yard(name)
+            wt = Path(name) / "agentic-trading-auto"
+            wt.mkdir()
+            numbered = Path(name) / "repo" / ".git" / "worktrees" / "agentic-trading-auto1"  # git's collision suffix
+            (wt / ".git").write_text(f"gitdir: {numbered}\n")
+            yard.prepare("auto/x")
+            self.assertEqual(yard.gitdir(wt), numbered)
+            (wt / ".git").write_text("gitdir: /elsewhere/.git\n")  # a later swap never moves it
+            self.assertEqual(yard.gitdir(wt), numbered)
+        with tempfile.TemporaryDirectory() as name:
+            yard, _, _ = self._yard(name)
+            wt = Path(name) / "agentic-trading-auto"
+            wt.mkdir()
+            (wt / ".git").write_text("gitdir: /elsewhere/.git\n")  # not under the repo's worktrees
+            yard.prepare("auto/x")
+            self.assertEqual(yard.gitdir(wt), Path(name) / "repo" / ".git" / "worktrees" / "agentic-trading-auto")
+
     def test_a_swapped_git_link_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             yard, _, _ = self._yard(name)
