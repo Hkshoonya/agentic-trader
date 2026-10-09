@@ -50,7 +50,11 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(verdict.approved)
         argv = yes.calls[0]
         self.assertEqual(argv[:2], ["claude", "-p"])
-        self.assertIn("--bare", argv)
+        self.assertNotIn("--bare", argv)  # --bare refuses OAuth; the job would never be logged in
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "")  # no worktree or user settings, no hooks
+        for flag in ("--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"):
+            self.assertIn(flag, argv)
+        self.assertFalse(review(TASK, worktree=wt, base="live", runner=_Fake(0, "Not logged in · Please run /login")).approved)
         self.assertNotIn("Edit", argv[argv.index("--allowedTools") + 1])
         for out in ("VERDICT: REJECT — weakens a test", "I think it is fine", ""):
             with self.subTest(out=out):

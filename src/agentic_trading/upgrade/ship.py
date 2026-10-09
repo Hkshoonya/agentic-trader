@@ -95,7 +95,8 @@ class Shipyard:
         reverted = self.runner(["git", *IDENTITY, "-C", str(self.repo), "revert", "--no-edit", commit], timeout=300.0)
         if reverted.code != 0:
             self._git("revert", "--abort")  # never leave the live checkout mid-revert, with conflict markers
-            return False, f"git revert failed: {reverted.out.strip()[-200:]}"
+            lines = [l for l in reverted.out.splitlines() if l.startswith(("CONFLICT", "error", "fatal"))]
+            return False, f"git revert failed: {(lines or reverted.out.strip().splitlines() or ['?'])[0][:200]}"
         self._git("push", "-q", "origin", self.live, timeout=300.0)
         note = ("" if self.restore(commit) else " (no data snapshot to restore)") if restore else " (data kept)"
         if not self.restart():

@@ -69,7 +69,10 @@ def write(task: Task, *, worktree: Path, scratch: Path, runner: Runner, timeout:
 def review(task: Task, *, worktree: Path, base: str, runner: Runner, timeout: float = 1200.0) -> Verdict:
     prompt = (f"{REVIEW_RULES}\nTASK: {task.title}\n{task.detail}\n"
               f"See the change with: git diff --cached {base}\n")
-    done = runner(["claude", "-p", prompt, "--bare", "--allowedTools", REVIEW_TOOLS, "--output-format", "text"],
+    # Not --bare: it accepts only an API key, and this job is logged in by OAuth. These flags load no
+    # settings file (so no hooks, nothing the worktree could plant), no MCP servers, no skills.
+    done = runner(["claude", "-p", prompt, "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
+                   "--no-session-persistence", "--allowedTools", REVIEW_TOOLS, "--output-format", "text"],
                   cwd=worktree, timeout=timeout)
     if done.code != 0:
         return Verdict(False, f"the reviewer failed (exit {done.code}): {done.out.strip()[-200:]}")
