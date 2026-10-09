@@ -25,7 +25,12 @@ CONTROL_MODULES = (
     "agentic_trading.jsonio", "agentic_trading.notify", "agentic_trading.venues.guard",
     "agentic_trading.venues.arming", "agentic_trading.venues.secrets",
 )
-FORBIDDEN_MODULES = ("subprocess", "socket", "httpx", "requests", "urllib", "http", "ctypes", "multiprocessing")
+FORBIDDEN_MODULES = ("subprocess", "socket", "httpx", "requests", "urllib", "http", "ctypes", "multiprocessing",
+                     # the ways to reach those indirectly, run hidden code, or touch files and processes
+                     "importlib", "builtins", "pickle", "marshal", "shelve", "pty", "ssl", "asyncio", "signal",
+                     "shutil", "ftplib", "smtplib", "telnetlib", "xmlrpc", "websocket", "websockets", "aiohttp")
+ESCAPES = ("__builtins__", "__subclasses__", "__globals__", "__code__", "__getattribute__")
+SENSITIVE = re.compile(r"secrets|(^|[/\\])\.env\b|tokens\.json|\.ssh\b|id_rsa|agentic\.toml|\.config[/\\]|\.codex|\.claude")
 FORBIDDEN_CALLS = ("eval", "exec", "__import__", "compile")
 FORBIDDEN_OS = ("environ", "getenv", "system", "popen", "putenv", "unsetenv", "execv", "execve", "spawnv", "fork")
 SECRET = re.compile(
@@ -159,6 +164,22 @@ def scan(text: str) -> Counter:
             root = name.split(".")[0]
             if root in FORBIDDEN_MODULES:
                 found[root] += 1
+        if isinstance(node, ast.ImportFrom) and node.module == "os" and not node.level \
+                and any(alias.name == "*" or alias.name in FORBIDDEN_OS for alias in node.names):
+            found["os imports"] += 1
+        if isinstance(node, ast.Import) and any(alias.name == "os" and alias.asname for alias in node.names):
+            found["os under another name"] += 1
+        if (isinstance(node, ast.Name) and node.id in ESCAPES) or (isinstance(node, ast.Attribute)
+                                                                    and node.attr in ESCAPES):
+            found["interpreter internals"] += 1
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in ("getattr", "setattr", "delattr") and len(node.args) >= 2:
+            attr = node.args[1]
+            if not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)) \
+                    or attr.value in FORBIDDEN_OS + FORBIDDEN_CALLS:
+                found["dynamic attribute"] += 1
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and SENSITIVE.search(node.value):
+            found["a secret or config path"] += 1
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
             found[node.func.id] += 1
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os" \

@@ -136,3 +136,18 @@ class CheckTests(unittest.TestCase):
     def test_forbidden_constructs_are_counted(self) -> None:
         self.assertEqual(scan("import subprocess\nimport subprocess as s\n")["subprocess"], 2)
         self.assertEqual(sum(scan("x = 1\n").values()), 0)
+
+    def test_the_ways_around_the_scan_are_counted_too(self) -> None:
+        for snippet in ("from os import system\nsystem('x')\n", "from os import *\n", "import os as o\n",
+                        "import importlib\n", "from importlib import import_module\n", "import builtins\n",
+                        "import pickle\n", "import asyncio\n", "import shutil\n", "import ssl\n",
+                        "x = ().__class__.__subclasses__()\n", "f = __builtins__\n",
+                        "getattr(os, name)\n", "getattr(os, 'system')\n",
+                        "open('config/secrets.toml')\n", "p = Path('data/state') / '.env'\n",
+                        "t = '~/.config/agentic-trading/tokens.json'\n"):
+            with self.subTest(snippet=snippet):
+                self.assertGreater(sum(scan(snippet).values()), 0, snippet)
+        for fine in ("import os\nos.path.join('a', 'b')\n", "from os import path\n",
+                     "getattr(self.config, 'min_order_notional', '1')\n", "x = 'momentum'\n"):
+            with self.subTest(fine=fine):
+                self.assertEqual(sum(scan(fine).values()), 0, fine)
