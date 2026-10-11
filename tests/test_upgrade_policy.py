@@ -174,3 +174,29 @@ class CheckTests(unittest.TestCase):
                      "getattr(self.config, 'min_order_notional', '1')\n", "x = 'momentum'\n"):
             with self.subTest(fine=fine):
                 self.assertEqual(sum(scan(fine).values()), 0, fine)
+
+    def test_shipped_code_reaches_only_pure_internal_modules(self) -> None:
+        # A strategy can't import its way to the controls: arming a venue, the kill switch, the broker, or a
+        # helper that writes or calls out. Pure helpers stay open; old imports stay legal (only new ones count).
+        for snippet in ("from agentic_trading.venues.arming import arm\n", "import agentic_trading.panic\n",
+                        "from agentic_trading import jsonio\n", "from agentic_trading import risk as r\n",
+                        "from agentic_trading.evidence import load_series\n", "from ..venues import arming\n",
+                        "from . import blend\n", "import sys\nsys.modules['x']\n", "import gc\n", "import inspect\n",
+                        "import sqlite3\n", "import zipfile\n", "import tempfile\n", "import logging\n",
+                        "io.open('ledger', 'w')\n", "tarfile.open(p, 'w:gz')\n",
+                        "scout.build.arm('alpaca')\n", "venue.submit(order)\n", "guard['kill_switch'] = False\n",
+                        "x = walkforward.panic\n"):
+            with self.subTest(snippet=snippet):
+                self.assertGreater(sum(scan(snippet).values()), 0, snippet)
+        for fine in ("from agentic_trading.history import Bar\n", "from agentic_trading.swarm.recipe import Recipe\n",
+                     "from agentic_trading.strategies.trend_crypto import TrendCryptoStrategy\n",
+                     "from agentic_trading.types import Side\n", "from agentic_trading.walkforward import simulate\n",
+                     "from agentic_trading.backtest import CostModel\n", "from agentic_trading import types\n",
+                     "from agentic_trading.orders import is_crypto_symbol\n", "armed = False\n",
+                     "io.open('ledger')\n"):
+            with self.subTest(fine=fine):
+                self.assertEqual(sum(scan(fine).values()), 0, fine)
+        # tests run only in the sandbox: they may import what they test, and tempfile/sys for fixtures
+        self.assertEqual(sum(scan("import tempfile, sys\nfrom agentic_trading import jsonio\n", shipped=False).values()), 0)
+        self.assertGreater(sum(scan("from ..venues import arming\n", shipped=False).values()), 0)
+

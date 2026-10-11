@@ -30,6 +30,19 @@ FORBIDDEN_MODULES = ("subprocess", "socket", "httpx", "requests", "urllib", "htt
                      "importlib", "builtins", "pickle", "marshal", "shelve", "pty", "ssl", "asyncio", "signal",
                      "shutil", "ftplib", "smtplib", "telnetlib", "xmlrpc", "websocket", "websockets", "aiohttp")
 ESCAPES = ("__builtins__", "__subclasses__", "__globals__", "__code__", "__getattribute__")
+# Shipped code only (tests run alone in the sandbox and may use these for fixtures): reaching loaded
+# modules or frames, and the stdlib ways to write files without calling ``open``.
+SHIPPED_MODULES = ("sys", "gc", "inspect", "logging", "sqlite3", "zipfile", "tarfile", "tempfile", "dbm", "mmap",
+                   "fileinput")
+# The internal modules new shipped imports may name: pure helpers that neither write, call out nor reach
+# the controls. Everything else (jsonio, config, evidence, the desk, venues, risk...) is grandfathered only
+# where a file already imports it, because only what a change adds is counted.
+INTERNAL_OK = ("agentic_trading.strategies", "agentic_trading.swarm", "agentic_trading.history",
+               "agentic_trading.types", "agentic_trading.walkforward", "agentic_trading.backtest",
+               "agentic_trading.orders")
+# Names of the controls, however they are reached (an allowed module re-exports what it imports).
+CONTROL_NAMES = ("arm", "disarm", "arming", "panic", "submit", "place_order", "kill_switch", "set_mode",
+                 "risk_guard", "venues", "rh_mcp", "secrets")
 SENSITIVE = re.compile(r"secrets|(^|[/\\])\.env\b|tokens\.json|\.ssh\b|id_rsa|agentic\.toml|\.config[/\\]|\.codex|\.claude")
 FORBIDDEN_CALLS = ("eval", "exec", "__import__", "compile")
 FORBIDDEN_OS = ("environ", "getenv", "system", "popen", "putenv", "unsetenv", "execv", "execve", "spawnv", "fork",
@@ -162,6 +175,17 @@ def _writes(call: ast.Call, position: int) -> bool:
     return not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)) or bool(set(mode.value) & set("wax+"))
 
 
+def _internal(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names if alias.name.split(".")[0] == "agentic_trading"]
+    if isinstance(node, ast.ImportFrom) and not node.level and node.module:
+        if node.module == "agentic_trading":
+            return [f"agentic_trading.{alias.name}" for alias in node.names]
+        if node.module.startswith("agentic_trading."):
+            return [node.module]
+    return []
+
+
 def scan(text: str, *, shipped: bool = True) -> Counter:
     """Count the risky constructs in ``text``. File writes count only in ``shipped`` code: tests run in
     the sandbox alone and write their fixtures; strategy and swarm code runs inside the trader."""
@@ -179,8 +203,18 @@ def scan(text: str, *, shipped: bool = True) -> Counter:
             names = [node.module]
         for name in names:
             root = name.split(".")[0]
-            if root in FORBIDDEN_MODULES:
+            if root in FORBIDDEN_MODULES or (shipped and root in SHIPPED_MODULES):
                 found[root] += 1
+        if isinstance(node, ast.ImportFrom) and node.level:
+            found["a relative import"] += 1  # resolved against a path the scan doesn't know, so never allowed
+        if shipped:
+            for module in _internal(node):
+                if not any(module == ok or module.startswith(ok + ".") for ok in INTERNAL_OK):
+                    found[f"an import of {module}"] += 1
+            named = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) \
+                else node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+            if named in CONTROL_NAMES:
+                found["a control name"] += 1
         if isinstance(node, ast.ImportFrom) and node.module == "os" and not node.level \
                 and any(alias.name == "*" or alias.name in FORBIDDEN_OS for alias in node.names):
             found["os imports"] += 1
@@ -199,7 +233,7 @@ def scan(text: str, *, shipped: bool = True) -> Counter:
             attr = node.func.attr
             if attr in WRITE_ATTRS or (attr == "replace" and len(node.args) == 1 and not node.keywords):
                 found["a file write"] += 1  # str.replace takes two arguments, Path.replace one
-            elif attr == "open" and _writes(node, 0):
+            elif attr == "open" and (_writes(node, 0) or _writes(node, 1)):  # Path.open(mode), io.open(file, mode)
                 found["a file write"] += 1
         if shipped and isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open" \
                 and _writes(node, 1):

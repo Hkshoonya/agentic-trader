@@ -20,6 +20,9 @@ Rules you must follow:
 - You may ONLY create or modify files under: {ALLOWED_TEXT}. Never delete or rename files.
 - Never use subprocess, sockets, HTTP, os.environ/os.getenv, eval/exec/__import__, or open files outside the repo.
 - Code under src/ may not write, rename or delete files (tests may write their own temporary fixtures).
+- New imports in src/ may name only agentic_trading.strategies, .swarm, .history, .types, .walkforward, .backtest
+  or .orders; no relative imports; no sys, gc, inspect, logging, sqlite3, zipfile, tarfile, tempfile, dbm, mmap
+  or fileinput; and no names like arm, submit, panic, kill_switch, set_mode, risk_guard, venues or secrets.
 - Never delete or weaken a test. Write a failing test first, then the code. Keep the change under 12 files and
   400 changed lines. Keep on-disk JSON formats readable by the current code.
 - Run: python -m pytest tests -q   (there is no network; the suite must pass). If you add tests, update the test
