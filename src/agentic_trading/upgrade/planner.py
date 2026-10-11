@@ -74,6 +74,7 @@ Hard rules:
 - Shipped code may not add file writes, network calls, subprocesses or environment reads, and must keep on-disk
   JSON readable by the current code.
 - Never propose more risk, larger size or more positions.
+- New imports in shipped code may name only strategies, swarm, history, types, walkforward, backtest or orders.
 - Never repeat a task in the attempt ledger or the open backlog, even reworded.
 - Forward records under 20 days are noise. Do not justify a change by them alone; prefer changes that sharpen
   the evidence or remove a measured failure.
