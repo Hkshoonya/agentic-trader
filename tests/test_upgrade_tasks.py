@@ -8,7 +8,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agentic_trading.upgrade.tasks import SEED_BACKLOG, candidates, note_health, pick, record
+from agentic_trading.upgrade.tasks import (SEED_BACKLOG, candidates, extend_backlog, known_titles, note_health,
+                                           open_count, pick, record)
 
 NOW = datetime(2026, 10, 7, 2, 0, tzinfo=timezone.utc)
 
@@ -74,3 +75,32 @@ class TaskTests(unittest.TestCase):
             self.assertNotEqual(pick(state, NOW + timedelta(days=90)).key, first.key)
             ledger = json.loads((state / "upgrade" / "attempts.json").read_text())
         self.assertEqual(ledger[first.key]["outcome"], "out_of_scope")
+
+    def test_open_count_counts_backlog_and_proposals_by_picks_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            _proposals(state, [{"title": "Swarm blend", "category": "strategy", "status": "proposed",
+                                "change": "swarm/blend.py"}])
+            note_health(state, "a service is down")
+            self.assertEqual(open_count(state, NOW), len(SEED_BACKLOG) + 1)  # health never counts
+            first = pick(state, NOW)
+            record(state, first, "out_of_scope", NOW)
+            self.assertEqual(open_count(state, NOW), len(SEED_BACKLOG))
+            self.assertEqual(open_count(state, NOW, sources=("backlog",)), len(SEED_BACKLOG))
+
+    def test_open_count_without_seed_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            self.assertEqual(open_count(state, NOW, seed=False), 0)
+            self.assertFalse((state / "upgrade" / "backlog.json").exists())
+
+    def test_extend_backlog_appends_and_known_titles_sees_ledger_and_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            first = pick(state, NOW)
+            record(state, first, "failed", NOW)
+            extend_backlog(state, [{"key": "plan-1", "title": "New swarm idea", "detail": "d", "origin": "planner"}])
+            titles = known_titles(state)
+            self.assertIn("New swarm idea", titles)
+            self.assertIn(first.title, titles)
+            self.assertEqual(candidates(state)[-1].title, "New swarm idea")

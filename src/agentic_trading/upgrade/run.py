@@ -17,9 +17,10 @@ class RunResult:
 Runner = Callable[..., RunResult]
 
 
-def real_runner(argv: Sequence[str], cwd: Optional[Path] = None, timeout: float = 600.0) -> RunResult:
+def real_runner(argv: Sequence[str], cwd: Optional[Path] = None, timeout: float = 600.0,
+                input: Optional[str] = None) -> RunResult:
     try:
-        done = subprocess.run(list(argv), cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run(list(argv), cwd=cwd, capture_output=True, text=True, timeout=timeout, input=input)
     except subprocess.TimeoutExpired:
         return RunResult(124, f"timed out after {timeout:.0f}s")
     except OSError as exc:

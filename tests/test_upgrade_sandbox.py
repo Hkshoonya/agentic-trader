@@ -61,3 +61,11 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(count_tests(_Fake(RunResult(0, "...\n1279 tests collected in 2.31s\n")), worktree=WT,
                                      venv=VENV), 1279)
         self.assertIsNone(count_tests(_Fake(RunResult(2, "error")), worktree=WT, venv=VENV))
+
+
+class RunnerTests(unittest.TestCase):
+    def test_input_goes_to_stdin_even_past_the_argument_limit(self) -> None:
+        from agentic_trading.upgrade.run import real_runner
+        done = real_runner(["wc", "-c"], input="x" * 200_000)
+        self.assertEqual(done.code, 0)
+        self.assertEqual(done.out.strip(), "200000")

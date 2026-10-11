@@ -87,7 +87,7 @@ def touches_allow_list(proposal: dict) -> bool:
     return False
 
 
-def candidates(state_dir: Path | str) -> list[Task]:
+def candidates(state_dir: Path | str, *, seed: bool = True) -> list[Task]:
     raw = _read(Path(state_dir) / "proposals.json", {})
     rows = [p for p in (raw.get("proposals") if isinstance(raw, dict) else []) or []
             if isinstance(p, dict) and p.get("status") == "proposed" and p.get("title") and touches_allow_list(p)]
@@ -101,7 +101,7 @@ def candidates(state_dir: Path | str) -> list[Task]:
                 f"{p.get('change') or ''}\nExpected effect: {p.get('expected_effect') or ''}\n"
                 f"Falsified if: {p.get('falsified_if') or ''}", "proposal") for p in sorted(rows, key=rank)]
     backlog_path = _upgrade_dir(state_dir) / "backlog.json"
-    if not backlog_path.is_file():
+    if seed and not backlog_path.is_file():
         _write(backlog_path, SEED_BACKLOG)
     out += [Task(str(b["key"]), str(b["title"]), str(b.get("detail") or ""), "backlog")
             for b in _read(backlog_path, []) if isinstance(b, dict) and b.get("key")]
@@ -110,17 +110,40 @@ def candidates(state_dir: Path | str) -> list[Task]:
     return out
 
 
+def eligible(entry: dict, now: datetime) -> bool:
+    """Not final, and not resting after two recent failures. ``pick`` and ``open_count`` share it."""
+    if entry.get("outcome") in FINAL:
+        return False
+    recent = [f for f in entry.get("failures", []) if now - datetime.fromisoformat(f) < REST]
+    return len(recent) < 2
+
+
 def pick(state_dir: Path | str, now: datetime) -> Optional[Task]:
     ledger = _read(_upgrade_dir(state_dir) / "attempts.json", {})
     for task in candidates(state_dir):
-        entry = ledger.get(task.key) or {}
-        if entry.get("outcome") in FINAL:
-            continue
-        recent = [f for f in entry.get("failures", []) if now - datetime.fromisoformat(f) < REST]
-        if len(recent) >= 2:
-            continue
-        return task
+        if eligible(ledger.get(task.key) or {}, now):
+            return task
     return None
+
+
+def open_count(state_dir: Path | str, now: datetime, *, sources: tuple[str, ...] = ("proposal", "backlog"),
+               seed: bool = True) -> int:
+    """In-scope tasks still to do. Health items are left out: they are almost never inside the allow-list."""
+    ledger = _read(_upgrade_dir(state_dir) / "attempts.json", {})
+    return sum(1 for task in candidates(state_dir, seed=seed)
+               if task.source in sources and eligible(ledger.get(task.key) or {}, now))
+
+
+def known_titles(state_dir: Path | str) -> list[str]:
+    ledger = _read(_upgrade_dir(state_dir) / "attempts.json", {})
+    backlog = _read(_upgrade_dir(state_dir) / "backlog.json", [])
+    return [str(v.get("title")) for v in ledger.values() if isinstance(v, dict) and v.get("title")] + \
+        [str(b.get("title")) for b in backlog if isinstance(b, dict) and b.get("title")]
+
+
+def extend_backlog(state_dir: Path | str, rows: list[dict]) -> None:
+    path = _upgrade_dir(state_dir) / "backlog.json"
+    _write(path, list(_read(path, SEED_BACKLOG)) + list(rows))
 
 
 def record(state_dir: Path | str, task: Task, outcome: str, now: datetime, note: str = "") -> None:
