@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import unittest
 from pathlib import Path
 
@@ -66,6 +67,6 @@ class SandboxTests(unittest.TestCase):
 class RunnerTests(unittest.TestCase):
     def test_input_goes_to_stdin_even_past_the_argument_limit(self) -> None:
         from agentic_trading.upgrade.run import real_runner
-        done = real_runner(["wc", "-c"], input="x" * 200_000)
+        done = real_runner([sys.executable, "-c", "import sys; print(len(sys.stdin.read()))"], input="x" * 200_000)
         self.assertEqual(done.code, 0)
         self.assertEqual(done.out.strip(), "200000")

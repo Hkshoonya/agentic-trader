@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -247,6 +248,7 @@ class _Runner:
 class RunTests(unittest.TestCase):
     def _go(self, result: RunResult, save: bool = True):
         name = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, name, ignore_errors=True)
         root = Path(name)
         repo, state = _repo(root / "repo", size=200_000), root / "state"
         (state / "upgrade").mkdir(parents=True)
