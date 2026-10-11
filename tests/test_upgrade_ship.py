@@ -67,6 +67,19 @@ class ShipTests(unittest.TestCase):
         self.assertTrue(any("revert --no-edit abc123" in l and "user.name=Hkshoonya" in l for l in lines))
         self.assertFalse(any("reset --hard" in l for l in lines))
 
+    def test_restore_removes_files_made_after_the_snapshot_but_keeps_the_lock_and_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            yard, _, state = self._yard(name)
+            yard.snapshot("abc123")
+            (state / "swarm" / "newborn.json").write_text("{}")  # written by the code being rolled back
+            (state / "swarm" / "deep").mkdir()
+            (state / "swarm" / "deep" / "x.json").write_text("{}")
+            (state / "swarm" / "step.lock").write_text("2026-10-12T00:30:00+00:00")  # a step running now
+            (state / "swarm" / "ledger.json.corrupt-20261012T003000Z").write_text("bad")
+            self.assertTrue(yard.restore("abc123"))
+            left = sorted(p.relative_to(state / "swarm").as_posix() for p in (state / "swarm").rglob("*"))
+        self.assertEqual(left, ["ledger.json.corrupt-20261012T003000Z", "population.json", "step.lock"])
+
     def test_the_walls_and_the_reviewer_see_the_same_tree(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             yard, fake, _ = self._yard(name)

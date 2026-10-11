@@ -115,7 +115,19 @@ class Shipyard:
         for store in STORES:
             saved = source / store
             if saved.is_dir():
-                shutil.copytree(saved, self.state_dir / store, dirs_exist_ok=True)
+                live = self.state_dir / store
+                shutil.copytree(saved, live, dirs_exist_ok=True)
+                # What the rolled-back code created is gone too; a running step's lock and set-aside
+                # corrupt files stay (the one guards a step, the others are evidence).
+                for path in sorted(live.rglob("*"), reverse=True):
+                    if (saved / path.relative_to(live)).exists() or path.name == "step.lock" \
+                            or ".corrupt-" in path.name:
+                        continue
+                    if path.is_dir() and not path.is_symlink():
+                        if not any(path.iterdir()):
+                            path.rmdir()
+                    else:
+                        path.unlink()
             elif saved.is_file():
                 shutil.copy2(saved, self.state_dir / store)
         return True
