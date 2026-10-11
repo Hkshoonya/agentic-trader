@@ -106,12 +106,12 @@ const CockpitFmt = (() => {
     + (a.state === 'contributing' ? ' ' + Math.round((a.share || 0) * 100) + '%' : '')
     + ' · ' + signedPct(a.excess_pct || 0) + ' vs 60/40';
   const upgradeLine = (v) => !v || v.enabled === false ? 'off — set [upgrade] enabled = true'
-    : v.paused ? 'paused — ' + (v.reason || 'by the operator')
-    : v.canary && v.canary.title ? 'watching ' + v.canary.title + ' until ' + v.canary.until
-    : v.last && v.last.outcome === 'refused' ? 'blocked — the last run was refused'
-    : v.last && v.last.outcome === 'failed' ? 'running daily · the last attempt failed'
-    : v.last && v.last.outcome === 'unavailable' ? 'waiting — the writer or reviewer is at its usage limit'
-    : 'running daily';
+    : (v.paused ? 'paused — ' + (v.reason || 'by the operator')
+      : v.canary && v.canary.title ? 'watching ' + v.canary.title + ' until ' + v.canary.until
+      : v.last && v.last.outcome === 'refused' ? 'blocked — the last run was refused'
+      : v.last && v.last.outcome === 'failed' ? 'running daily · the last attempt failed'
+      : v.last && v.last.outcome === 'unavailable' ? 'waiting — the writer or reviewer is at its usage limit'
+      : 'running daily') + (typeof v.queued === 'number' ? ' · ' + v.queued + ' queued' : '');
   return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst,
     regimeWord, fastCompare, fundedBadge, tradeLine, swarmHead, swarmLine, swarmBadge, upgradeLine };
 })();

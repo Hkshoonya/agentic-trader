@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1350%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1367%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -659,6 +659,12 @@ day, and only behind walls it cannot move:
   book, pauses the upgrader and sends an alert.
 - **One click:** the Evolution card on the Strategies tab has **Pause**, **Resume** and **Roll back last
   upgrade**. The same switches are `agentic-trading upgrade pause|resume|rollback --config ...`.
+- **Where its work comes from:** the evolution agent's proposals that name the swarm or a strategy, then
+  its own backlog. When fewer than two of those are open, the daily run first asks a planner: Claude with
+  no tools at all, shown the swarm's measured record, what was already tried, and the swarm and strategy
+  source. It may offer three tasks. Trusted code queues only those that stay inside the allow-list, cite
+  evidence and repeat nothing. `agentic-trading upgrade plan --config ...` shows what it would plan
+  (`--save` queues it). The card shows how many tasks are queued.
 
 It starts off. To turn it on:
 1. Add `[upgrade]` with `enabled = true` to `config/agentic.toml`.
@@ -701,7 +707,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1350 tests, including the honesty tests for the rig
+tests/                   1367 tests, including the honesty tests for the rig
 ```
 
 ## Operations

@@ -150,6 +150,13 @@ class CockpitFormatTests(unittest.TestCase):
         self.assertTrue(self.js(
             "CockpitFmt.upgradeLine({enabled: true, canary: {title: 'T', until: '2026-10-08T02:00:00+00:00'}})"
         ).startswith("watching T until"))
+        self.assertEqual(
+            self.js("[CockpitFmt.upgradeLine({enabled: true, queued: 3}),"
+                    " CockpitFmt.upgradeLine({enabled: false, queued: 3}),"
+                    " CockpitFmt.upgradeLine({enabled: true, queued: 2, last: {outcome: 'unavailable'}})]"),
+            ["running daily · 3 queued", "off — set [upgrade] enabled = true",
+             "waiting — the writer or reviewer is at its usage limit · 2 queued"],
+        )
 
     def test_swarm_words(self) -> None:
         self.assertEqual(

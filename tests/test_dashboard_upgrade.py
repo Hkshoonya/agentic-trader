@@ -36,6 +36,21 @@ class UpgradeViewTests(unittest.TestCase):
         self.assertNotIn("LEAK", json.dumps(view))
         self.assertEqual((view["paused"], view["enabled"], view["last"]["outcome"]), (True, True, "shipped"))
 
+    def test_the_view_counts_the_queue_and_never_writes_state(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            view = upgrade_view(state)
+            self.assertEqual((view["queued"], view["planned"]), (0, {}))
+            self.assertFalse((state / "upgrade" / "backlog.json").exists())
+            (state / "upgrade").mkdir(exist_ok=True)
+            (state / "upgrade" / "backlog.json").write_text(json.dumps([
+                {"key": "plan-1", "title": "One"}, {"key": "plan-2", "title": "Two"}]))
+            (state / "upgrade" / "planner.json").write_text(json.dumps(
+                {"at": "2026-10-12T02:00:00+00:00", "added": ["Two"], "skipped": [], "error": ""}))
+            view = upgrade_view(state)
+        self.assertEqual(view["queued"], 2)
+        self.assertEqual(view["planned"], {"at": "2026-10-12T02:00:00+00:00", "added": 1})
+
     def test_the_buttons_flip_switches_behind_the_fences(self) -> None:
         from agentic_trading.config import load_config
         from agentic_trading.dashboard import serve

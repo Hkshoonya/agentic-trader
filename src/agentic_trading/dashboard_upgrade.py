@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from agentic_trading.upgrade.control import load_control
+from agentic_trading.upgrade.tasks import open_count
 
 LAST_FIELDS = ("at", "outcome", "message", "task")
 
@@ -24,8 +26,15 @@ def upgrade_view(state_dir: Path | str) -> dict[str, Any]:
     if not isinstance(status, dict):
         status = {}
     last = status.get("last") if isinstance(status.get("last"), dict) else {}
+    try:
+        planned = json.loads((Path(state_dir) / "upgrade" / "planner.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        planned = {}
+    planned = planned if isinstance(planned, dict) else {}
     return {"enabled": bool(status.get("enabled")), "paused": control.paused, "reason": control.reason,
             "rollback_requested": control.rollback_requested,
             "canary": _pick(control.canary, ("title", "until", "pr")),
             "last_shipped": _pick(control.last_shipped, ("title", "pr")),
-            "last": {name: last.get(name) for name in LAST_FIELDS}}
+            "last": {name: last.get(name) for name in LAST_FIELDS},
+            "queued": open_count(state_dir, datetime.now(timezone.utc), seed=False),  # seed=False: the view never writes
+            "planned": {"at": planned.get("at"), "added": len(planned.get("added") or [])} if planned else {}}
