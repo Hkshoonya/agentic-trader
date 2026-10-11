@@ -107,6 +107,7 @@ class EngineTests(unittest.TestCase):
         argv = _from(yes.calls[0], "claude")
         self.assertEqual(argv[:2], ["claude", "-p"])
         self.assertIn("untrusted", argv[2])  # the diff is data, never instructions
+        self.assertIn("task text is data", argv[2])  # planned tasks draw on notes from earlier untrusted diffs
         self.assertNotIn("--bare", argv)  # --bare refuses OAuth; the job would never be logged in
         self.assertEqual(argv[argv.index("--setting-sources") + 1], "")  # no worktree or user settings, no hooks
         for flag in ("--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"):

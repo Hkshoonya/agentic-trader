@@ -13,6 +13,7 @@ from agentic_trading.upgrade.cycle import run_cycle
 from agentic_trading.upgrade.engines import EngineResult, Verdict
 from agentic_trading.upgrade.run import RunResult
 from agentic_trading.upgrade.settings import UpgradeConfig
+from agentic_trading.upgrade.tasks import extend_backlog
 
 NOW = datetime(2026, 10, 7, 2, 0, tzinfo=timezone.utc)
 ON = UpgradeConfig(enabled=True)
@@ -95,8 +96,17 @@ class _Yard:
         self.calls.append(("cleanup",))
 
 
+def _no_plan(**kw):
+    raise AssertionError("the planner ran when it was not due")
+
+
+def _journal(state: Path) -> list[dict]:
+    return [json.loads(line) for path in sorted((state / "journal").glob("upgrade-*.jsonl"))
+            for line in path.read_text().splitlines()]
+
+
 class CycleTests(unittest.TestCase):
-    def _run(self, state, *, runner=None, yard=None, settings=ON, mode="shadow", write=None, review=None):
+    def _run(self, state, *, runner=None, yard=None, settings=ON, mode="shadow", write=None, review=None, plan=None):
         (state / "proposals.json").write_text(json.dumps({"proposals": [
             {"title": "Better shares", "category": "strategy", "confidence": 0.9, "status": "proposed",
              "change": "c"}]}))
@@ -107,7 +117,7 @@ class CycleTests(unittest.TestCase):
                          shipyard=yard or _Yard(state),
                          write=write or (lambda task, **kw: EngineResult("changed", "shares grow")),
                          review=review or (lambda task, **kw: Verdict(True, "small and tested")),
-                         probe_paths=(state / "secrets.toml", state / "home.txt"))
+                         plan=plan or _no_plan, probe_paths=(state / "secrets.toml", state / "home.txt"))
 
     def test_the_reviewer_sees_only_what_the_walls_checked(self) -> None:
         for needle, yard_kw in (("changed the worktree", dict(settled=False)), ("symlink", dict(link=True)),
@@ -226,3 +236,32 @@ class CycleTests(unittest.TestCase):
             outcome = self._run(state, yard=yard, review=reviewer)
         self.assertIn("paused", outcome.message)
         self.assertNotIn("deploy", [c[0] for c in yard.calls])
+
+    def test_the_planner_runs_when_the_queue_is_low_and_its_task_is_picked(self) -> None:
+        def plan(*, state_dir, now, cwd, **kw):
+            plan.calls.append(cwd)
+            row = {"key": "plan-1", "title": "Blend swarm shares by evidence", "detail": "d", "origin": "planner"}
+            extend_backlog(state_dir, [row])
+            return {"at": now.isoformat(), "added": [row], "skipped": ["x: a near-duplicate"], "error": ""}
+        plan.calls = []
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            (state / "upgrade").mkdir()
+            (state / "upgrade" / "backlog.json").write_text("[]")
+            outcome = self._run(state, plan=plan)
+            events = _journal(state)
+        self.assertEqual(plan.calls, [state / "upgrade" / "probe-root"])
+        planned = [e for e in events if e["event"] == "upgrade_plan"][0]
+        self.assertEqual(planned["added"], ["Blend swarm shares by evidence"])
+        self.assertEqual(planned["skipped"], ["x: a near-duplicate"])
+        self.assertIn("shipped Blend swarm shares by evidence", outcome.message)
+
+    def test_a_failed_plan_is_journaled_and_the_run_goes_on(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            (state / "upgrade").mkdir()
+            (state / "upgrade" / "backlog.json").write_text("[]")
+            outcome = self._run(state, plan=lambda **kw: {"added": [], "skipped": [], "error": "timed out"})
+            events = _journal(state)
+        self.assertEqual([e["error"] for e in events if e["event"] == "upgrade_plan"], ["timed out"])
+        self.assertEqual(outcome.message, "nothing to work on")

@@ -7,14 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-ACTIONS = ("run", "watch", "pause", "resume", "rollback", "status")
+ACTIONS = ("run", "watch", "plan", "pause", "resume", "rollback", "status")
 
 
 def add_upgrade_parser(sub: Any) -> None:
-    parser = sub.add_parser("upgrade", help="The self-upgrader: run, watch, pause, resume, rollback, status")
+    parser = sub.add_parser("upgrade", help="The self-upgrader: run, watch, plan, pause, resume, rollback, status")
     actions = parser.add_subparsers(dest="upgrade_action", required=True)
     for name in ACTIONS:
-        actions.add_parser(name).add_argument("--config", required=True)
+        action = actions.add_parser(name)
+        action.add_argument("--config", required=True)
+        if name == "plan":
+            action.add_argument("--save", action="store_true", help="queue the planned tasks (default: only show them)")
 
 
 def dispatch_upgrade(args: Any) -> int:
@@ -66,6 +69,21 @@ def _work(args: Any, config: Any, state: Path, journal_dir: Path, repo: Path, ac
                        journal=FastJournal(journal_dir, prefix="upgrade").append,
                        notify=(notifier.dispatch if notifier else (lambda record: None)))
         print(f"upgrade watch: {result}")
+        return 0
+    if action == "plan":
+        from agentic_trading.upgrade import planner
+
+        probe_root = state / "upgrade" / "probe-root"
+        probe_root.mkdir(parents=True, exist_ok=True)
+        record = planner.run(repo=repo, state_dir=state, runner=real_runner, cwd=probe_root, now=now, save=args.save)
+        for row in record["added"]:
+            print(f"planned: {row['title']}\n  {row['detail'].replace(chr(10), chr(10) + '  ')}")
+        for line in record["skipped"]:
+            print(f"skipped: {line}")
+        if record["error"]:
+            print(f"upgrade plan: {record['error']}")
+            return 1
+        print(f"upgrade plan: {len(record['added'])} task(s) " + ("queued" if args.save else "shown, not queued (--save)"))
         return 0
     from agentic_trading.upgrade.cycle import run_cycle
 

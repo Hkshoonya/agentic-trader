@@ -12,6 +12,7 @@ from typing import Any, Callable
 from agentic_trading import jsonio
 from agentic_trading.fast.service import FastJournal
 from agentic_trading.upgrade import engines as engine_module
+from agentic_trading.upgrade import planner as planner_module
 from agentic_trading.upgrade.control import load_control, save_control
 from agentic_trading.upgrade.policy import check, control_closure, parse_diff
 from agentic_trading.upgrade.run import Runner
@@ -32,7 +33,8 @@ def _slug(title: str) -> str:
 
 def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, settings: UpgradeConfig, mode: str,
               now: datetime, runner: Runner, shipyard: Any, write: Callable[..., Any] = engine_module.write,
-              review: Callable[..., Any] = engine_module.review, probe_paths: tuple[Path, Path]) -> Outcome:
+              review: Callable[..., Any] = engine_module.review, plan: Callable[..., dict] = planner_module.run,
+              probe_paths: tuple[Path, Path]) -> Outcome:
     journal = FastJournal(journal_dir, prefix="upgrade")
     task_holder: dict[str, Task] = {}
 
@@ -73,6 +75,11 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
     problems = probe(runner, worktree=probe_root, venv=venv, secrets=probe_paths[0], home_file=probe_paths[1])
     if problems:
         return finish(1, "refused", "the sandbox is not safe: " + "; ".join(problems))
+    if planner_module.due(state_dir, mode=mode, now=now):  # the queue is low: plan first (planner spec P1)
+        planned = plan(repo=Path(repo), state_dir=state_dir, runner=runner, cwd=probe_root, now=now)
+        journal.append({"event": "upgrade_plan", "at": now.isoformat(),
+                        "added": [row["title"] for row in planned.get("added", [])],
+                        "skipped": planned.get("skipped", []), "error": planned.get("error", "")})
 
     task = pick(state_dir, now)
     if task is None:
