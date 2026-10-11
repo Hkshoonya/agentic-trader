@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
 from agentic_trading import jsonio
+from agentic_trading.upgrade.policy import allowed_path
 
 CATEGORY_ORDER = ("strategy", "research", "reliability", "data", "execution", "risk")
 REST = timedelta(days=30)
@@ -25,9 +27,11 @@ SEED_BACKLOG: list[dict[str, str]] = [
     {"key": "seed-swarm-rejections", "title": "Let refused recipes be screened again after 90 days",
      "detail": "swarm/step.py remembers refused recipe ids forever. History moves; let a refusal expire after "
                "90 days (store the refusal date in the ledger) so a recipe can be retried on new data."},
-    {"key": "seed-swarm-lock", "title": "Write the swarm step lock atomically",
-     "detail": "swarm/store.py creates the lock file, then writes its time; an empty file reads as stale. "
-               "Write the timestamp so a just-created lock is never taken over. Test the race."},
+    {"key": "seed-swarm-lock", "title": "Never take over a swarm step lock that was just created",
+     "detail": "swarm/store.py creates the lock file, then writes its time, so a step that looks in between "
+               "reads an empty file as stale and takes the lock. Judge an empty or unreadable lock by the "
+               "file's age (its mtime) instead, with the same three-hour limit. Shipped code may not add "
+               "file writes, so don't add any. Test the empty-file case both fresh and old."},
     {"key": "seed-swarm-first-day", "title": "Start a newborn's forward record on its first full day",
      "detail": "swarm/life.py: a newborn's first forward day shows minus that day's benchmark move because it "
                "enters at the close. Exclude the entry day from excess. Test with a known first day."},
@@ -62,10 +66,31 @@ def _key(title: str) -> str:
     return "proposal-" + hashlib.sha1(title.encode("utf-8")).hexdigest()[:10]
 
 
+MEMBERS = frozenset(path.stem for path in (Path(__file__).resolve().parent.parent / "strategies").glob("*.py")
+                    if path.stem not in ("__init__", "fixture"))
+_PATH = re.compile(r"[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+")
+
+
+def touches_allow_list(proposal: dict) -> bool:
+    """Whether a proposal names code the upgrader may change (spec U9): the swarm, a strategy member, or a
+    path inside the allow-list. The category alone doesn't count; "strategy" is a category, not a place."""
+    text = " ".join(str(proposal.get(field) or "") for field in ("title", "change", "evidence")).lower()
+    words = set(re.findall(r"[a-z0-9_]+", text))
+    if "swarm" in words or words & MEMBERS:
+        return True
+    for token in _PATH.findall(text):
+        path = token.strip(".")
+        if not path.startswith(("src/", "tests/")):
+            path = "src/agentic_trading/" + path
+        if allowed_path(path, live=False):
+            return True
+    return False
+
+
 def candidates(state_dir: Path | str) -> list[Task]:
     raw = _read(Path(state_dir) / "proposals.json", {})
     rows = [p for p in (raw.get("proposals") if isinstance(raw, dict) else []) or []
-            if isinstance(p, dict) and p.get("status") == "proposed" and p.get("title")]
+            if isinstance(p, dict) and p.get("status") == "proposed" and p.get("title") and touches_allow_list(p)]
 
     def rank(p: dict) -> tuple:
         category = str(p.get("category") or "")
