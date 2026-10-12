@@ -195,6 +195,25 @@ class CycleTests(unittest.TestCase):
                 self.assertNotIn("deploy", [c[0] for c in yard.calls])
                 self.assertEqual(load_control(state).canary, {})
 
+    def test_an_engine_out_of_quota_charges_the_task_nothing(self) -> None:
+        cases = {
+            "writer": dict(write=lambda task, **kw: EngineResult("unavailable", "try again at Oct 18th")),
+            "reviewer": dict(review=lambda task, **kw: Verdict(False, "usage limit reached", available=False)),
+        }
+        for engine, kw in cases.items():
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as name:
+                state = Path(name)
+                yard = _Yard(state)
+                outcome = self._run(state, yard=yard, **kw)
+                status = json.loads((state / "upgrade.json").read_text())
+                attempts = state / "upgrade" / "attempts.json"
+                self.assertEqual(outcome.code, 0)
+                self.assertIn(f"the {engine} is unavailable", outcome.message)
+                self.assertEqual(status["last"]["outcome"], "unavailable")
+                self.assertFalse(attempts.exists() and json.loads(attempts.read_text()))
+                self.assertNotIn("deploy", [c[0] for c in yard.calls])
+                self.assertEqual(yard.calls[-1][0], "cleanup")
+
     def test_pause_pressed_mid_run_stops_before_deploy(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             state = Path(name)

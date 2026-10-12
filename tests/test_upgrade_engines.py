@@ -65,6 +65,32 @@ class EngineTests(unittest.TestCase):
             bad = write(TASK, worktree=wt, scratch=scratch, runner=_Fake(1, "bwrap: failed"))
             self.assertEqual(bad.status, "failed")
 
+    def test_codex_loads_no_user_config_so_no_mcp_server_or_plugin(self) -> None:
+        # ~/.codex/config.toml may list MCP servers (a broker's among them) that Codex would call with no
+        # approval in exec mode; the writer gets none of them.
+        with tempfile.TemporaryDirectory() as name:
+            fake = _Fake(0, "", "DONE: x")
+            write(TASK, worktree=Path(name), scratch=Path(name), runner=fake)
+        self.assertIn("--ignore-user-config", _from(fake.calls[0], "codex"))
+
+    def test_a_spent_quota_is_unavailable_not_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            spent = _Fake(1, "ERROR: You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to "
+                             "purchase more credits or try again at Oct 18th, 2026 1:41 PM.\n"
+                             "ERROR rmcp::transport: fail to delete session")
+            result = write(TASK, worktree=Path(name), scratch=Path(name), runner=spent)
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("Oct 18th", result.summary)
+        wt = Path("/tmp")
+        for out in ("Claude AI usage limit reached|1760300000", "You've hit your limit · resets 3pm"):
+            with self.subTest(out=out):
+                verdict = review(TASK, worktree=wt, base="live", runner=_Fake(1, out))
+                self.assertFalse(verdict.approved)
+                self.assertFalse(verdict.available)
+        self.assertTrue(review(TASK, worktree=wt, base="live", runner=_Fake(1, "auth error")).available)
+        self.assertTrue(review(TASK, worktree=wt, base="live",
+                               runner=_Fake(0, "the usage limit is fine\nVERDICT: REJECT — no")).available)
+
     def test_claude_must_approve(self) -> None:
         wt = Path("/tmp")
         yes = _Fake(0, "looks right\nVERDICT: APPROVE — small and tested")

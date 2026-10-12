@@ -142,8 +142,10 @@ class CockpitFormatTests(unittest.TestCase):
         self.assertEqual(
             self.js("[CockpitFmt.upgradeLine({enabled: true, last: {outcome: 'refused'}}),"
                     " CockpitFmt.upgradeLine({enabled: true, last: {outcome: 'failed'}}),"
-                    " CockpitFmt.upgradeLine({enabled: true, last: {outcome: 'shipped'}})]"),
-            ["blocked — the last run was refused", "running daily · the last attempt failed", "running daily"],
+                    " CockpitFmt.upgradeLine({enabled: true, last: {outcome: 'shipped'}}),"
+                    " CockpitFmt.upgradeLine({enabled: true, last: {outcome: 'unavailable'}})]"),
+            ["blocked — the last run was refused", "running daily · the last attempt failed", "running daily",
+             "waiting — the writer or reviewer is at its usage limit"],
         )
         self.assertTrue(self.js(
             "CockpitFmt.upgradeLine({enabled: true, canary: {title: 'T', until: '2026-10-08T02:00:00+00:00'}})"

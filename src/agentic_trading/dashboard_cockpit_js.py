@@ -110,6 +110,7 @@ const CockpitFmt = (() => {
     : v.canary && v.canary.title ? 'watching ' + v.canary.title + ' until ' + v.canary.until
     : v.last && v.last.outcome === 'refused' ? 'blocked — the last run was refused'
     : v.last && v.last.outcome === 'failed' ? 'running daily · the last attempt failed'
+    : v.last && v.last.outcome === 'unavailable' ? 'waiting — the writer or reviewer is at its usage limit'
     : 'running daily';
   return { pct, money, countdown, spread, moneyParts, tickerKey, accept, healthLevel, sampleTime, venueLevel, worst,
     regimeWord, fastCompare, fundedBadge, tradeLine, swarmHead, swarmLine, swarmBadge, upgradeLine };

@@ -86,6 +86,11 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
         shipyard.cleanup(wt)
         return finish(0, outcome, message)
 
+    def unavailable(engine: str, why: str) -> Outcome:
+        # A spent quota says nothing about the task: no failure is charged, so it keeps its place.
+        shipyard.cleanup(wt)
+        return finish(0, "unavailable", f"{task.title}: the {engine} is unavailable ({why}); the task keeps its place")
+
     tests_before = count_tests(runner, worktree=wt, venv=venv)
     scratch = Path(state_dir) / "upgrade"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -94,6 +99,8 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
         record(state_dir, task, "out_of_scope", now, written.summary)
         shipyard.cleanup(wt)
         return finish(0, "out_of_scope", f"{task.title}: out of scope ({written.summary})")
+    if written.status == "unavailable":
+        return unavailable("writer", written.summary)
     if written.status != "changed":
         return fail("failed", f"{task.title}: the writer failed ({written.summary})")
     if not shipyard.intact(wt):
@@ -126,6 +133,8 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
         return fail("refused", f"{task.title}: the tests changed the worktree, so the review would not see "
                                "what the walls checked")
     verdict = review(task, worktree=wt, base="live", runner=runner, gitdir=shipyard.gitdir(wt))
+    if not verdict.available:
+        return unavailable("reviewer", verdict.reason)
     if not verdict.approved:
         return fail("rejected", f"{task.title}: the reviewer rejected it: {verdict.reason}")
     if load_control(state_dir).paused:
