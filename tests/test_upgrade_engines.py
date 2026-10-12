@@ -61,6 +61,7 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("-s") + 1], "workspace-write")
             self.assertEqual(argv[argv.index("-C") + 1], str(wt))
             self.assertIn("src/agentic_trading/swarm/", argv[-1])  # the allow-list rides in the prompt
+            self.assertIn("--ignore=tests/test_network_tripwire.py", argv[-1])  # the socket tests can't pass inside
             self.assertEqual((result.status, result.summary), ("changed", "shares now grow with evidence"))
             na = write(TASK, worktree=wt, scratch=scratch, runner=_Fake(0, "", "NOT_APPLICABLE: lives in runtime.py"))
             self.assertEqual((na.status, na.summary), ("not_applicable", "lives in runtime.py"))
@@ -134,6 +135,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(sandbox["filesystem"]["denyRead"], ["~/"])  # the live checkout's secrets are unseen
         self.assertEqual(sandbox["filesystem"]["allowRead"], [str(wt), "/v"])
         self.assertTrue(any(a.startswith("TMPDIR=") for a in fake.calls[0][:fake.calls[0].index("claude")]))
+        self.assertIn("BASH_DEFAULT_TIMEOUT_MS=1200000", fake.calls[0])  # the suite outlasts the 2-minute default
         self.assertIn("/v/bin/python", argv[2])  # the project's Python rides in the prompt
         self.assertIn("src/agentic_trading/swarm/", argv[2])
         env = fake.calls[0][:fake.calls[0].index("claude")]

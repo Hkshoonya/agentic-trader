@@ -19,6 +19,10 @@ ALLOWED_TEXT = (
     "tests/test_swarm_funding.py and tests/test_swarm_desk.py), tests/test_strategies_*.py, docs/, and only the "
     "test-count numbers in README.md and CONTRIBUTING.md"
 )
+# The suite a writer runs in its own sandbox: everything but the tests that need sockets (checked on Codex's and
+# Claude's sandboxes, 2026-10-12). Trusted code runs the whole suite afterwards in bwrap.
+SUITE = ("python -m pytest tests -q '--ignore-glob=tests/test_dashboard*' --ignore=tests/test_history_dashboard.py "
+         "--ignore=tests/test_network_tripwire.py")
 WRITE_RULES = f"""You are improving one part of an automated trading system that must earn more over time.
 Make ONE small, well-tested improvement for the task below.
 Rules you must follow:
@@ -30,8 +34,11 @@ Rules you must follow:
   or fileinput; and no names like arm, submit, panic, kill_switch, set_mode, risk_guard, venues or secrets.
 - Never delete or weaken a test. Write a failing test first, then the code. Keep the change under 12 files and
   400 changed lines. Keep on-disk JSON formats readable by the current code.
-- Run: python -m pytest tests -q   (there is no network; the suite must pass). If you add tests, update the test
-  count in README.md (3 places) and CONTRIBUTING.md, then run: python tools/check_doc_counts.py
+- Run: {SUITE}
+  Your sandbox forbids sockets, so the files left out there cannot pass inside it. If another test fails only
+  because a socket or the network is refused, leave it alone: the full suite runs again outside your sandbox
+  and must pass there. Every other test must pass. If you add tests, update the test count in README.md
+  (3 places) and CONTRIBUTING.md, then run: python tools/check_doc_counts.py
 - Do not commit. Do not touch git.
 - If the task cannot be done inside the allowed files, change nothing and end with one line:
   NOT_APPLICABLE: <reason>
@@ -96,19 +103,18 @@ class Verdict:
 
 
 def _pinned(argv: list[str], worktree: Path, gitdir: Optional[Path], keep_key: bool = False,
-            tmp: Optional[Path] = None) -> list[str]:
+            env: tuple[str, ...] = ()) -> list[str]:
     """Any git an engine runs is pinned to the real git directory (never the worktree's own ``.git``
     link, which the writer could repoint) and runs no hook or fsmonitor: env config outranks repo config."""
     pins = ["GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null",
             "GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false"]
     if gitdir is not None:
         pins += [f"GIT_DIR={gitdir}", f"GIT_WORK_TREE={worktree}"]
-    if tmp is not None:  # the writer's own temp dir: /tmp itself (other sessions' files) stays read-only
-        pins.append(f"TMPDIR={tmp}")
-    return ["env", *([] if keep_key else ["-u", DEEPSEEK_KEY]), *pins, *argv]
+    return ["env", *([] if keep_key else ["-u", DEEPSEEK_KEY]), *pins, *env, *argv]
 
 
 def _private_tmp() -> Path:
+    """The writer's own temp dir: /tmp itself, with other sessions' files, stays read-only to it."""
     return Path(tempfile.mkdtemp(prefix="agentic-writer-"))
 
 
@@ -149,7 +155,8 @@ def _codex(task: Task, *, worktree: Path, scratch: Path, runner: Runner, timeout
             "-c", f"model_reasoning_effort={WRITER_EFFORT}", *extra, "-o", str(last), _prompt(task, venv)]
     tmp = _private_tmp()
     try:
-        done = runner(_pinned(argv, worktree, gitdir, keep_key, tmp=tmp), cwd=worktree, timeout=timeout)
+        done = runner(_pinned(argv, worktree, gitdir, keep_key, env=(f"TMPDIR={tmp}",)), cwd=worktree,
+                      timeout=timeout)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     text = last.read_text(encoding="utf-8") if last.is_file() else done.out
@@ -177,6 +184,8 @@ def write_claude(task: Task, *, worktree: Path, scratch: Path, runner: Runner, t
     """Claude, connected as Codex is: no user settings, MCP, CLAUDE.md or hooks; file tools held to the
     worktree; shell commands only inside the OS sandbox, with no network and no view of the home directory
     beyond the worktree and the venv."""
+    # Its Bash tool stops a command at 2 minutes unless told otherwise; the suite can take longer.
+    timeouts = ("BASH_DEFAULT_TIMEOUT_MS=1200000", "BASH_MAX_TIMEOUT_MS=1800000")
     argv = ["claude", "-p", _prompt(task, venv), "--restricted", "--safe-mode", "--setting-sources", "",
             "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence",
             "--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_ALLOWED, "--permission-mode", "acceptEdits",
@@ -184,7 +193,8 @@ def write_claude(task: Task, *, worktree: Path, scratch: Path, runner: Runner, t
             "--effort", CLAUDE_EFFORT, "--output-format", "text"]
     tmp = _private_tmp()
     try:
-        done = runner(_pinned(argv, worktree, gitdir, tmp=tmp), cwd=worktree, timeout=timeout)
+        done = runner(_pinned(argv, worktree, gitdir, env=(f"TMPDIR={tmp}", *timeouts)), cwd=worktree,
+                      timeout=timeout)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for folder in (worktree / ".claude" / ".cc-writes", worktree / ".claude"):  # the sandbox's own empty marker
