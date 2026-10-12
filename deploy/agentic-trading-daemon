@@ -1,0 +1,7 @@
+#!/bin/sh
+# Launcher for the systemd unit: the project path contains a space, which
+# systemd's ExecStart parser handles poorly. Keeping the cd here means the
+# unit file needs no quoting at all.
+set -e
+cd "/home/doczeus/Projects/Agnetic TraDING"
+exec ".venv/bin/agentic-trading" run --config config/agentic.toml --daemon

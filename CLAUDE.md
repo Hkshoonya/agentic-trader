@@ -10,6 +10,8 @@ Live trading system (real money via Robinhood MCP), shadow-first. CONTRIBUTING.m
 .venv/bin/agentic-trading selfcheck --offline --config config/agentic.example.toml
 .venv/bin/agentic-trading fast replay --config config/agentic.toml --source bars --from YYYY-MM-DD --to YYYY-MM-DD
 systemctl --user restart agentic-trading-venues   # after changing venues/ or fast/ code
+deploy/install.sh [--enable]                      # install every launcher + unit for this checkout (any path/user)
+deploy/migrate.sh export|import FILE              # move hosts: stops the old one, leaves arm latches behind
 ```
 systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboard` (loopback console), `agentic-trading-venues` (Alpaca/Coinbase streams, recorder, paper switchboard), `agentic-trading-alert`, `agentic-trading-swarm.timer` (daily 00:30 UTC swarm step), `agentic-trading-upgrade.timer` (daily 02:00 UTC self-upgrade) and `agentic-trading-upgrade-watch.timer` (canary check every 5 min).
 

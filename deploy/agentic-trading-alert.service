@@ -1,0 +1,9 @@
+[Unit]
+Description=Alert the operator that the trading agent stopped
+
+[Service]
+Type=oneshot
+# The desktop first: if the network is what broke, Telegram is unreachable but
+# the operator's own screen is not. A marker file makes the outage visible to
+# anything that reads the workspace afterwards.
+ExecStart=/usr/bin/env bash -c 'notify-send -u critical "Agentic Trader STOPPED" "The daemon failed repeatedly and is not running. journalctl --user -u agentic-trading -n 50" || true; date -Is > "/home/doczeus/Projects/Agnetic TraDING/data/state/STOPPED_AT.txt"'

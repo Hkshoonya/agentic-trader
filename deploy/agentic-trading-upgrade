@@ -5,5 +5,8 @@
 set -e
 for bin in "$HOME"/.nvm/versions/node/*/bin; do [ -d "$bin" ] && PATH="$bin:$PATH"; done
 export PATH="$HOME/.local/bin:$PATH"
+# DEEPSEEK_API_KEY for the second writer, if the operator has given one (mode 600, never in the repo).
+env_file="$HOME/.config/agentic-trading/upgrade.env"
+if [ -r "$env_file" ]; then set -a; . "$env_file"; set +a; fi
 cd "/home/doczeus/Projects/Agnetic TraDING"
 exec ".venv/bin/agentic-trading" upgrade run --config config/agentic.toml

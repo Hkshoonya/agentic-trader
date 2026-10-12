@@ -1,0 +1,6 @@
+#!/bin/sh
+# Launcher for the dashboard systemd unit: the project path contains a space,
+# which systemd's ExecStart parser handles poorly, so the cd lives here.
+set -e
+cd "/home/doczeus/Projects/Agnetic TraDING"
+exec ".venv/bin/agentic-trading" dashboard --config config/agentic.toml --port 8787

@@ -1,0 +1,17 @@
+[Unit]
+Description=Agentic Trading operator console (loopback, guarded arm/disarm, 24/7)
+Documentation=file:///home/doczeus/Projects/Agnetic TraDING/README.md
+After=network-online.target agentic-trading.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/doczeus/.local/bin/agentic-trading-dashboard
+# The console must outlive a crashed browser tab, a reboot, or a terminal close.
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/doczeus/Projects/Agnetic TraDING/data/state/dashboard.log
+StandardError=append:/home/doczeus/Projects/Agnetic TraDING/data/state/dashboard.log
+
+[Install]
+WantedBy=default.target

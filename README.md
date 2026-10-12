@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1378%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1382%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -86,6 +86,11 @@ Download `AgenticTrader-windows-x64.zip` from the latest
 unzip anywhere writable, and run `AgenticTrader.exe`. It seeds its own workspace
 at `%LOCALAPPDATA%\AgenticTrader` and starts in shadow mode. Build it yourself
 with `windows\build.ps1` — see [windows/README.md](windows/README.md).
+
+The one-click app runs the daemon and the console only. To run everything 24/7 on a Windows laptop
+(desk, venues, swarm, self-upgrader), use WSL2 and follow [deploy/LAPTOP.md](deploy/LAPTOP.md).
+`deploy/install.sh` installs every launcher and `systemd --user` unit for a checkout. `deploy/migrate.sh`
+moves the state from one host to another, leaving the arm latches behind.
 
 ### Try it without any credentials
 
@@ -710,9 +715,10 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   confidence.py          per-order confidence, reporting only
   llm/                   advisor + regime gate (both may only reduce risk)
   rh_mcp/                Robinhood MCP client and OAuth
+deploy/                  systemd units, launchers, install.sh, migrate.sh, LAPTOP.md (WSL2 host)
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1378 tests, including the honesty tests for the rig
+tests/                   1382 tests, including the honesty tests for the rig
 ```
 
 ## Operations

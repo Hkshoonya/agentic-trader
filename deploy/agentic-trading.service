@@ -1,0 +1,29 @@
+[Unit]
+Description=Agentic Trading daemon (shadow-first, 24/7)
+Documentation=file:///home/doczeus/Projects/Agnetic TraDING/README.md
+After=network-online.target
+Wants=network-online.target
+# Tell the operator when this enters the failed state. On 2026-09-18 the daemon
+# crash-looped for six and a half hours and nobody was told.
+OnFailure=agentic-trading-alert.service
+# Restart always, but not silently forever: after 15 failures in 15 minutes the
+# unit stops trying and goes failed, which fires OnFailure above.
+StartLimitIntervalSec=900
+StartLimitBurst=15
+
+[Service]
+Type=simple
+ExecStart=/home/doczeus/.local/bin/agentic-trading-daemon
+# Lets the agent promote/demote its stage and, when config auto_arm is enabled,
+# maintain the workspace arm latch after every pre-flight gate passes.
+# AGENTIC_ALLOW_LIVE remains deliberately unset; it is a separate manual
+# override, not the only possible arming mechanism.
+Environment=AGENTIC_ALLOW_AUTONOMY=1
+# Survive crashes, reboots, and transient broker outages without a human.
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/doczeus/Projects/Agnetic TraDING/data/state/daemon.log
+StandardError=append:/home/doczeus/Projects/Agnetic TraDING/data/state/daemon.log
+
+[Install]
+WantedBy=default.target
