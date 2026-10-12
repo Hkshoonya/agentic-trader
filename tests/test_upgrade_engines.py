@@ -79,6 +79,10 @@ class EngineTests(unittest.TestCase):
         self.assertFalse([c for c in settings if c.startswith("model=")])  # a pinned model can be refused
         self.assertIn("model_reasoning_effort=max", settings)
         self.assertIn("web_search=disabled", settings)
+        self.assertIn("sandbox_workspace_write.exclude_slash_tmp=true", settings)  # other sessions' files stay
+        tmp = [a for a in fake.calls[0][:fake.calls[0].index("codex")] if a.startswith("TMPDIR=")]
+        self.assertEqual(len(tmp), 1)
+        self.assertFalse(Path(tmp[0][len("TMPDIR="):]).exists())  # the private temp dir is gone afterwards
         disabled = {argv[i + 1] for i, a in enumerate(argv) if a == "--disable"}
         self.assertTrue({"apps", "plugins", "remote_plugin", "browser_use", "computer_use", "hooks"} <= disabled)
         self.assertEqual(disabled, set(CODEX_OFF))
@@ -127,6 +131,9 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(sandbox["enabled"] and sandbox["failIfUnavailable"])
         self.assertFalse(sandbox["allowUnsandboxedCommands"])
         self.assertTrue(sandbox["network"]["strictAllowlist"])
+        self.assertEqual(sandbox["filesystem"]["denyRead"], ["~/"])  # the live checkout's secrets are unseen
+        self.assertEqual(sandbox["filesystem"]["allowRead"], [str(wt), "/v"])
+        self.assertTrue(any(a.startswith("TMPDIR=") for a in fake.calls[0][:fake.calls[0].index("claude")]))
         self.assertIn("/v/bin/python", argv[2])  # the project's Python rides in the prompt
         self.assertIn("src/agentic_trading/swarm/", argv[2])
         env = fake.calls[0][:fake.calls[0].index("claude")]

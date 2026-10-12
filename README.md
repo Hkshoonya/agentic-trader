@@ -644,7 +644,8 @@ The evolution agent above writes proposals and cannot apply them. The self-upgra
 day, and only behind walls it cannot move:
 - **Who writes, who agrees:** Codex writes the change. If Codex can't run (out of quota, not installed, or
   failing fast), Codex on DeepSeek's API tries next, and Claude Code after that. Each writer starts on a fresh
-  worktree in its own OS sandbox, with no network and writes only inside the worktree. None loads your user
+  worktree in its own OS sandbox, with no network, writes only inside the worktree and its own temp dir (never
+  `/tmp` at large), and for Claude no view of the home directory beyond the worktree and the venv. None loads your user
   config, MCP servers, plugins or hooks. Only DeepSeek's run sees `DEEPSEEK_API_KEY`. Claude Code reviews
   the diff and must answer `VERDICT: APPROVE`. Either the writer or the reviewer can stop it. An engine out of
   quota charges the task nothing.

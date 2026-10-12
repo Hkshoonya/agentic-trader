@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional
@@ -65,10 +67,15 @@ CLAUDE_MODEL, CLAUDE_EFFORT = "opus", "high"
 CLAUDE_TOOLS = "Read,Edit,Write,Glob,Grep,Bash"
 # Bash is never pre-approved: only the sandbox approves it, and if the sandbox can't start Claude exits.
 CLAUDE_ALLOWED = "Read,Edit,Write,Glob,Grep"
-CLAUDE_SANDBOX = {"sandbox": {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
-                              "autoAllowBashIfSandboxed": True, "network": {"strictAllowlist": True},
-                              "filesystem": {"denyRead": ["~/.codex", "~/.claude", "~/.ssh", "~/.config",
-                                                          "~/.aws", "~/.gnupg"]}}}
+
+
+def _claude_sandbox(worktree: Path, venv: Optional[Path]) -> dict:
+    """No network; writes in the worktree and the run's own TMPDIR; of the home directory, only the worktree
+    and the venv can be read, so the live checkout's config/secrets.toml is invisible to its commands."""
+    return {"sandbox": {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
+                        "autoAllowBashIfSandboxed": True, "network": {"strictAllowlist": True},
+                        "filesystem": {"denyRead": ["~/"],
+                                       "allowRead": [str(worktree), *([str(venv)] if venv is not None else [])]}}}
 
 
 def _spent(out: str) -> Optional[str]:
@@ -88,14 +95,21 @@ class Verdict:
     available: bool = True
 
 
-def _pinned(argv: list[str], worktree: Path, gitdir: Optional[Path], keep_key: bool = False) -> list[str]:
+def _pinned(argv: list[str], worktree: Path, gitdir: Optional[Path], keep_key: bool = False,
+            tmp: Optional[Path] = None) -> list[str]:
     """Any git an engine runs is pinned to the real git directory (never the worktree's own ``.git``
     link, which the writer could repoint) and runs no hook or fsmonitor: env config outranks repo config."""
     pins = ["GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null",
             "GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false"]
     if gitdir is not None:
         pins += [f"GIT_DIR={gitdir}", f"GIT_WORK_TREE={worktree}"]
+    if tmp is not None:  # the writer's own temp dir: /tmp itself (other sessions' files) stays read-only
+        pins.append(f"TMPDIR={tmp}")
     return ["env", *([] if keep_key else ["-u", DEEPSEEK_KEY]), *pins, *argv]
+
+
+def _private_tmp() -> Path:
+    return Path(tempfile.mkdtemp(prefix="agentic-writer-"))
 
 
 def _prompt(task: Task, venv: Optional[Path]) -> str:
@@ -131,8 +145,13 @@ def _codex(task: Task, *, worktree: Path, scratch: Path, runner: Runner, timeout
     # calls with no approval, and gives the sandbox network. Login still comes from CODEX_HOME.
     argv = ["codex", "exec", "-C", str(worktree), "-s", "workspace-write", "--skip-git-repo-check", "--ephemeral",
             "--ignore-user-config", *(a for f in CODEX_OFF for a in ("--disable", f)), "-c", "web_search=disabled",
+            "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
             "-c", f"model_reasoning_effort={WRITER_EFFORT}", *extra, "-o", str(last), _prompt(task, venv)]
-    done = runner(_pinned(argv, worktree, gitdir, keep_key), cwd=worktree, timeout=timeout)
+    tmp = _private_tmp()
+    try:
+        done = runner(_pinned(argv, worktree, gitdir, keep_key, tmp=tmp), cwd=worktree, timeout=timeout)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     text = last.read_text(encoding="utf-8") if last.is_file() else done.out
     return _outcome(engine, done.code, done.out, text)
 
@@ -156,13 +175,18 @@ def write_deepseek(task: Task, *, worktree: Path, scratch: Path, runner: Runner,
 def write_claude(task: Task, *, worktree: Path, scratch: Path, runner: Runner, timeout: float = 2700.0,
                  gitdir: Optional[Path] = None, venv: Optional[Path] = None) -> EngineResult:
     """Claude, connected as Codex is: no user settings, MCP, CLAUDE.md or hooks; file tools held to the
-    worktree; shell commands only inside the OS sandbox with no network."""
+    worktree; shell commands only inside the OS sandbox, with no network and no view of the home directory
+    beyond the worktree and the venv."""
     argv = ["claude", "-p", _prompt(task, venv), "--restricted", "--safe-mode", "--setting-sources", "",
             "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence",
             "--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_ALLOWED, "--permission-mode", "acceptEdits",
-            "--settings", json.dumps(CLAUDE_SANDBOX), "--model", CLAUDE_MODEL, "--effort", CLAUDE_EFFORT,
-            "--output-format", "text"]
-    done = runner(_pinned(argv, worktree, gitdir), cwd=worktree, timeout=timeout)
+            "--settings", json.dumps(_claude_sandbox(worktree, venv)), "--model", CLAUDE_MODEL,
+            "--effort", CLAUDE_EFFORT, "--output-format", "text"]
+    tmp = _private_tmp()
+    try:
+        done = runner(_pinned(argv, worktree, gitdir, tmp=tmp), cwd=worktree, timeout=timeout)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     for folder in (worktree / ".claude" / ".cc-writes", worktree / ".claude"):  # the sandbox's own empty marker
         try:
             folder.rmdir()  # only when empty: anything planted there stays for the walls to refuse
