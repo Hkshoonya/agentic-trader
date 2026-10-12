@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1372%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1378%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -642,8 +642,12 @@ rule on daily bars, with its own parameters. A daily job does the work.
 
 The evolution agent above writes proposals and cannot apply them. The self-upgrader can, one change a
 day, and only behind walls it cannot move:
-- **Who writes, who agrees:** Codex writes the change in a sandbox with no network, no secrets and no home
-  directory. Claude Code reviews the diff and must answer `VERDICT: APPROVE`. Either one can stop it.
+- **Who writes, who agrees:** Codex writes the change. If Codex can't run (out of quota, not installed, or
+  failing fast), Codex on DeepSeek's API tries next, and Claude Code after that. Each writer starts on a fresh
+  worktree in its own OS sandbox, with no network and writes only inside the worktree. None loads your user
+  config, MCP servers, plugins or hooks. Only DeepSeek's run sees `DEEPSEEK_API_KEY`. Claude Code reviews
+  the diff and must answer `VERDICT: APPROVE`. Either the writer or the reviewer can stop it. An engine out of
+  quota charges the task nothing.
 - **What it may change:** `strategies/`, `swarm/`, their tests, and `docs/`. It can never touch the console,
   the upgrader itself, risk, arming, limits, config, the journal, alerts, the venue guard, or anything those
   import, and never a file AI tools read as instructions (`CLAUDE.md`, `AGENTS.md`, `.claude/`), so a change
@@ -707,7 +711,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
   rh_mcp/                Robinhood MCP client and OAuth
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1372 tests, including the honesty tests for the rig
+tests/                   1378 tests, including the honesty tests for the rig
 ```
 
 ## Operations

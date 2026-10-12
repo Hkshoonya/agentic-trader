@@ -50,7 +50,7 @@ Everything that guards money, guards the upgrader, or carries its evidence stays
 | `policy.py` | The walls: the allow-list and control-module import closure (U1, U2), the change shape and the `ast` and secret scans (U3). `check(...) -> list[str]` gives the reasons for refusal. Pure and well tested. |
 | `sandbox.py` | The `bwrap` command for candidate tests, and the self-test probe (U12). |
 | `tasks.py` | Picks the next task from proposals, the backlog and health (U9). Keeps the attempt ledger (`state/upgrade/attempts.json`). |
-| `engines.py` | `write(task, worktree) -> EngineResult` (Codex) and `review(task, diff, worktree) -> Verdict` (Claude). Subprocess calls with timeouts (45 and 20 minutes), injectable for tests. Parses `VERDICT: APPROVE\|REJECT`. |
+| `engines.py` | `WRITERS`: Codex, then Codex on DeepSeek, then Claude (amended 2026-10-12 at the user's request; the next is tried when one is unavailable or fails fast, each on a fresh worktree and sandboxed like Codex), each `-> EngineResult` and `review(task, diff, worktree) -> Verdict` (Claude). Subprocess calls with timeouts (45 and 20 minutes), injectable for tests. Parses `VERDICT: APPROVE\|REJECT`. |
 | `ship.py` | Builds the worktree from `live`, snapshots the data stores, then commits, pushes, opens the PR, fast-forwards `live` and restarts the services. Rollback is a revert, a restore of the stores, a push and a restart. All git and systemd calls go through one injectable runner. |
 | `watchdog.py` | The canary checks (U6) and carrying out a requested rollback. Writes `state/upgrade.json` for the dashboard. |
 | `control.py` | `control.json`: paused, rollback requested, and the canary window. Read and written atomically. |

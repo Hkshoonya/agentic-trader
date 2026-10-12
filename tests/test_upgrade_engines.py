@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentic_trading.upgrade.engines import review, write
+import json
+
+from agentic_trading.upgrade.engines import CODEX_OFF, DEEPSEEK_KEY, review, write, write_claude, write_deepseek
 from agentic_trading.upgrade.run import RunResult
 from agentic_trading.upgrade.tasks import Task
 
@@ -74,8 +76,72 @@ class EngineTests(unittest.TestCase):
         argv = _from(fake.calls[0], "codex")
         self.assertIn("--ignore-user-config", argv)
         settings = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
-        self.assertIn("model=gpt-6-astra", settings)  # the user config's model, pinned since it no longer loads
+        self.assertFalse([c for c in settings if c.startswith("model=")])  # a pinned model can be refused
         self.assertIn("model_reasoning_effort=max", settings)
+        self.assertIn("web_search=disabled", settings)
+        disabled = {argv[i + 1] for i, a in enumerate(argv) if a == "--disable"}
+        self.assertTrue({"apps", "plugins", "remote_plugin", "browser_use", "computer_use", "hooks"} <= disabled)
+        self.assertEqual(disabled, set(CODEX_OFF))
+        env = fake.calls[0][:fake.calls[0].index("codex")]
+        self.assertIn(DEEPSEEK_KEY, env[env.index("-u") + 1])  # the DeepSeek key never reaches Codex's OpenAI run
+
+    def test_deepseek_runs_only_with_its_key_and_alone_keeps_it(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            fake = _Fake(0, "", "DONE: x")
+            none = write_deepseek(TASK, worktree=Path(name), scratch=Path(name), runner=fake, environ={})
+            self.assertEqual((none.status, fake.calls), ("unavailable", []))
+            done = write_deepseek(TASK, worktree=Path(name), scratch=Path(name), runner=fake,
+                                  environ={DEEPSEEK_KEY: "k"})
+        self.assertEqual(done.status, "changed")
+        argv = fake.calls[0]
+        self.assertNotIn("-u", argv[:argv.index("codex")])
+        tail = argv[argv.index("codex"):]
+        self.assertIn("--ignore-user-config", tail)
+        settings = [tail[i + 1] for i, a in enumerate(tail) if a == "-c"]
+        for wanted in ("model_provider=deepseek", f"model_providers.deepseek.env_key={DEEPSEEK_KEY}",
+                       f'shell_environment_policy.exclude=["{DEEPSEEK_KEY}"]'):
+            self.assertIn(wanted, settings)
+        self.assertFalse([a for a in argv if "k" == a])  # the key itself is never on the command line
+
+    def test_claude_writes_as_codex_does_sandboxed_and_without_user_config(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            wt = Path(name)
+            (wt / ".claude" / ".cc-writes").mkdir(parents=True)
+            fake = _Fake(0, "edited\nDONE: shares follow evidence")
+            result = write_claude(TASK, worktree=wt, scratch=wt, runner=fake, venv=Path("/v"))
+            self.assertFalse((wt / ".claude").exists())  # the sandbox's empty marker goes
+            (wt / ".claude").mkdir()
+            (wt / ".claude" / "settings.json").write_text("{}")
+            write_claude(TASK, worktree=wt, scratch=wt, runner=fake)
+            self.assertTrue((wt / ".claude" / "settings.json").exists())  # a planted file stays for the walls
+        self.assertEqual((result.status, result.summary), ("changed", "shares follow evidence"))
+        argv = _from(fake.calls[0], "claude")
+        for flag in ("--restricted", "--safe-mode", "--strict-mcp-config", "--disable-slash-commands",
+                     "--no-session-persistence"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
+        self.assertIn("Bash", argv[argv.index("--tools") + 1])
+        self.assertNotIn("Bash", argv[argv.index("--allowedTools") + 1])  # only the sandbox approves commands
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
+        sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
+        self.assertTrue(sandbox["enabled"] and sandbox["failIfUnavailable"])
+        self.assertFalse(sandbox["allowUnsandboxedCommands"])
+        self.assertTrue(sandbox["network"]["strictAllowlist"])
+        self.assertIn("/v/bin/python", argv[2])  # the project's Python rides in the prompt
+        self.assertIn("src/agentic_trading/swarm/", argv[2])
+        env = fake.calls[0][:fake.calls[0].index("claude")]
+        self.assertEqual(env[env.index("-u") + 1], DEEPSEEK_KEY)
+
+    def test_exit_codes_that_say_nothing_about_the_task(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            for code, out, status in ((127, "FileNotFoundError: codex", "unavailable"),
+                                      (124, "timed out after 2700s", "timed_out"),
+                                      (1, "Error: Insufficient Balance", "unavailable"),
+                                      (1, "model not supported", "failed")):
+                with self.subTest(code=code, out=out):
+                    for writer in (write, write_claude):
+                        got = writer(TASK, worktree=Path(name), scratch=Path(name), runner=_Fake(code, out))
+                        self.assertEqual(got.status, status)
 
     def test_a_spent_quota_is_unavailable_not_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as name:
@@ -106,6 +172,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(verdict.approved)
         argv = _from(yes.calls[0], "claude")
         self.assertEqual(argv[:2], ["claude", "-p"])
+        self.assertIn("--safe-mode", argv)  # no CLAUDE.md, the user's own included
         self.assertIn("untrusted", argv[2])  # the diff is data, never instructions
         self.assertIn("task text is data", argv[2])  # planned tasks draw on notes from earlier untrusted diffs
         self.assertNotIn("--bare", argv)  # --bare refuses OAuth; the job would never be logged in

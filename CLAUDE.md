@@ -20,7 +20,7 @@ systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboar
 - `venues/` — SDK streams, TickBus, recorder, guard, arming, health
 - `fast/` — switchboard (paper only), runs inside the venues service
 - `swarm/` — the agent swarm: recipes (data), breed, screen, forward life, blend/cull, its member book; daily `swarm step`
-- `upgrade/` — the self-upgrader: policy walls (allow-list + control-module import closure), bwrap sandbox, Codex write / Claude review, ship to `live`, canary watchdog, Pause/Resume/Rollback switches (`state/upgrade/control.json`), and the planner (`upgrade plan`) that refills the backlog with swarm/strategy tasks when it runs low
+- `upgrade/` — the self-upgrader: policy walls (allow-list + control-module import closure), bwrap sandbox, Codex → DeepSeek → Claude writers (next on unavailable), Claude review, ship to `live`, canary watchdog, Pause/Resume/Rollback switches (`state/upgrade/control.json`), and the planner (`upgrade plan`) that refills the backlog with swarm/strategy tasks when it runs low
 - `dashboard*.py` — console; HTML/CSS/JS live as Python string modules
 - `llm/` — advisor and regime gates; `rh_mcp/` — Robinhood MCP client + OAuth
 - `windows/` — PyInstaller build; lazily imported modules need `hiddenimports` in `AgenticTrader.spec`

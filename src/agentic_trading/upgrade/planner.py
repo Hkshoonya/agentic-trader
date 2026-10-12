@@ -48,6 +48,7 @@ AGENT_FIELDS = (
 COMMAND = [
     "claude",
     "-p",
+    "--safe-mode",
     "--tools",
     "",
     "--setting-sources",

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from agentic_trading import jsonio
 from agentic_trading.fast.service import FastJournal
@@ -32,7 +32,8 @@ def _slug(title: str) -> str:
 
 
 def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, settings: UpgradeConfig, mode: str,
-              now: datetime, runner: Runner, shipyard: Any, write: Callable[..., Any] = engine_module.write,
+              now: datetime, runner: Runner, shipyard: Any,
+              writers: Sequence[tuple[str, Callable[..., Any]]] = engine_module.WRITERS,
               review: Callable[..., Any] = engine_module.review, plan: Callable[..., dict] = planner_module.run,
               probe_paths: tuple[Path, Path]) -> Outcome:
     journal = FastJournal(journal_dir, prefix="upgrade")
@@ -101,15 +102,28 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
     tests_before = count_tests(runner, worktree=wt, venv=venv)
     scratch = Path(state_dir) / "upgrade"
     scratch.mkdir(parents=True, exist_ok=True)
-    written = write(task, worktree=wt, scratch=scratch, runner=runner, gitdir=shipyard.gitdir(wt))
+    written, tried, engine = None, [], ""
+    for index, (engine, writer) in enumerate(writers):
+        if written is not None:  # the one before may have left edits: the next starts on a fresh worktree
+            shipyard.cleanup(wt)
+            wt = shipyard.prepare(branch)
+        written = writer(task, worktree=wt, scratch=scratch, runner=runner, gitdir=shipyard.gitdir(wt), venv=venv)
+        tried.append(f"{engine}: {written.status}")
+        journal.append({"event": "upgrade_writer", "at": now.isoformat(), "engine": engine,
+                        "status": written.status, "text": written.summary, "task": task.title})
+        # The next engine gets the task when this one could not run, or failed in a way that says nothing
+        # about the task. A timeout ends the chain, so a run stays inside the unit's time limit.
+        if written.status not in ("unavailable", "failed") or index == len(writers) - 1:
+            break
+    tried_text = "; ".join(tried)
     if written.status == "not_applicable":
         record(state_dir, task, "out_of_scope", now, written.summary)
         shipyard.cleanup(wt)
         return finish(0, "out_of_scope", f"{task.title}: out of scope ({written.summary})")
     if written.status == "unavailable":
-        return unavailable("writer", written.summary)
+        return unavailable("writer", f"{written.summary}; tried {tried_text}")
     if written.status != "changed":
-        return fail("failed", f"{task.title}: the writer failed ({written.summary})")
+        return fail("failed", f"{task.title}: the writer failed ({written.summary}); tried {tried_text}")
     if not shipyard.intact(wt):
         return fail("refused", f"{task.title}: the writer replaced the worktree's git link")
     names, unified = shipyard.diff(wt)
@@ -149,7 +163,7 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
         return finish(0, "paused", f"paused before deploying {task.title}")
     if not shipyard.commit(wt, task.title):
         return fail("failed", f"{task.title}: the commit failed")
-    body = (f"Automatic upgrade.\n\nTask: {task.title}\n\n{task.detail}\n\nWriter: {written.summary}\n"
+    body = (f"Automatic upgrade.\n\nTask: {task.title}\n\n{task.detail}\n\nWriter ({engine}): {written.summary}\n"
             f"Reviewer: {verdict.reason}\nTests: {tests_before} → {tests_after}, all passing in the sandbox.")
     pr = shipyard.publish(wt, branch, task.title, body)
     commit = shipyard.head(wt)

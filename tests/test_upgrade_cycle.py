@@ -85,7 +85,7 @@ class _Yard:
         return True
 
     def publish(self, wt, branch, title, body):
-        self.calls.append(("publish", branch))
+        self.calls.append(("publish", branch, body))
         return "https://github.com/x/y/pull/7"
 
     def deploy(self, branch, tag):
@@ -115,7 +115,7 @@ class CycleTests(unittest.TestCase):
         return run_cycle(state_dir=state, journal_dir=state / "journal", repo=repo, venv=state / "venv",
                          settings=settings, mode=mode, now=NOW, runner=runner or _Runner(),
                          shipyard=yard or _Yard(state),
-                         write=write or (lambda task, **kw: EngineResult("changed", "shares grow")),
+                         writers=(("codex", write or (lambda task, **kw: EngineResult("changed", "shares grow"))),),
                          review=review or (lambda task, **kw: Verdict(True, "small and tested")),
                          plan=plan or _no_plan, probe_paths=(state / "secrets.toml", state / "home.txt"))
 
@@ -141,7 +141,7 @@ class CycleTests(unittest.TestCase):
             (repo / "src" / "agentic_trading").mkdir(parents=True)
             run_cycle(state_dir=state, journal_dir=state / "journal", repo=repo, venv=repo / ".venv",
                       settings=ON, mode="shadow", now=NOW, runner=runner, shipyard=_Yard(state),
-                      write=lambda task, **kw: EngineResult("changed", "x"),
+                      writers=(("codex", lambda task, **kw: EngineResult("changed", "x")),),
                       review=lambda task, **kw: Verdict(True, "ok"),
                       probe_paths=(repo / "config" / "secrets.toml", state / "home.txt"))
             secrets = repo / "config" / "secrets.toml"
@@ -223,6 +223,66 @@ class CycleTests(unittest.TestCase):
                 self.assertFalse(attempts.exists() and json.loads(attempts.read_text()))
                 self.assertNotIn("deploy", [c[0] for c in yard.calls])
                 self.assertEqual(yard.calls[-1][0], "cleanup")
+
+    def _chain(self, state: Path, *results: str, yard=None):
+        """Writers that answer in turn with the given statuses; returns who was asked."""
+        asked = []
+
+        def writer(name, status):
+            return lambda task, **kw: asked.append(name) or EngineResult(status, f"{name} said {status}")
+
+        names = ("codex", "deepseek", "claude")
+        writers = tuple((names[i], writer(names[i], status)) for i, status in enumerate(results))
+        (state / "proposals.json").write_text(json.dumps({"proposals": [
+            {"title": "Better swarm shares", "category": "strategy", "confidence": 0.9, "status": "proposed",
+             "change": "c"}]}))
+        repo = state / "repo"
+        (repo / "src" / "agentic_trading").mkdir(parents=True, exist_ok=True)
+        outcome = run_cycle(state_dir=state, journal_dir=state / "journal", repo=repo, venv=state / "venv",
+                            settings=ON, mode="shadow", now=NOW, runner=_Runner(), shipyard=yard or _Yard(state),
+                            writers=writers, review=lambda task, **kw: Verdict(True, "ok"),
+                            probe_paths=(state / "secrets.toml", state / "home.txt"))
+        return outcome, asked
+
+    def _charged(self, state: Path) -> bool:
+        path = state / "upgrade" / "attempts.json"
+        return path.exists() and any(e.get("failures") for e in json.loads(path.read_text()).values())
+
+    def test_the_next_writer_takes_over_on_a_fresh_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            yard = _Yard(state)
+            outcome, asked = self._chain(state, "unavailable", "failed", "changed", yard=yard)
+            body = next(c for c in yard.calls if c[0] == "publish")
+            events = [json.loads(line) for f in (state / "journal").glob("*.jsonl") for line in f.read_text().splitlines()]
+        self.assertEqual(asked, ["codex", "deepseek", "claude"])
+        self.assertIn("shipped", outcome.message)
+        self.assertEqual([c[0] for c in yard.calls].count("prepare"), 3)
+        self.assertIn("Writer (claude): claude said changed", body[-1])
+        self.assertEqual([e["engine"] for e in events if e["event"] == "upgrade_writer"],
+                         ["codex", "deepseek", "claude"])
+
+    def test_a_timeout_or_a_real_answer_ends_the_chain(self) -> None:
+        for first, stops_as in (("timed_out", "failed"), ("not_applicable", "out_of_scope")):
+            with self.subTest(first=first), tempfile.TemporaryDirectory() as name:
+                state = Path(name)
+                outcome, asked = self._chain(state, first, "changed")
+                status = json.loads((state / "upgrade.json").read_text())
+            self.assertEqual(asked, ["codex"])
+            self.assertEqual(status["last"]["outcome"], stops_as)
+
+    def test_only_the_last_writer_tried_decides_the_charge(self) -> None:
+        for results, outcome_word, charged in ((("unavailable", "unavailable", "unavailable"), "unavailable", False),
+                                               (("failed", "unavailable", "unavailable"), "unavailable", False),
+                                               (("unavailable", "unavailable", "failed"), "failed", True)):
+            with self.subTest(results=results), tempfile.TemporaryDirectory() as name:
+                state = Path(name)
+                outcome, asked = self._chain(state, *results)
+                status = json.loads((state / "upgrade.json").read_text())
+                self.assertEqual(len(asked), 3)
+                self.assertEqual(status["last"]["outcome"], outcome_word)
+                self.assertEqual(self._charged(state), charged)
+                self.assertIn("tried codex", outcome.message)
 
     def test_pause_pressed_mid_run_stops_before_deploy(self) -> None:
         with tempfile.TemporaryDirectory() as name:
