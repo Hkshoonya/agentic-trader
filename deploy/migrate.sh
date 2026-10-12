@@ -27,6 +27,8 @@ running() {
 
 case "$1" in
 export)
+    # a new file only: an existing one would keep its own (possibly wider) mode through tar's rewrite
+    [ ! -e "$file" ] || { echo "refusing: $file exists; pick a new name" >&2; exit 2; }
     busy=$(running)
     [ -z "$busy" ] || { echo "refusing: $busy is mid-run; try again when it finishes" >&2; exit 1; }
     # shellcheck disable=SC2086
@@ -39,6 +41,7 @@ export)
     [ -d "$HOME/.config/agentic-trading" ] && set -- "$@" -C "$HOME" .config/agentic-trading
     tar -czf "$file" --exclude=data/state/arm.json --exclude=data/state/venues_arm.json \
         --exclude='data/state/*.pid' --transform 's|^\.config/agentic-trading|_home/.config/agentic-trading|' "$@"
+    chmod 600 "$file"
     echo "wrote $file: $(tar -tzf "$file" | wc -l) entries, $(du -h "$file" | cut -f1) (mode 600)"
     ;;
 import)
@@ -52,10 +55,10 @@ import)
         cp -p "$repo/config/agentic.toml" "$repo/config/agentic.toml.bak-migrate"
         echo "kept the existing config as config/agentic.toml.bak-migrate"
     fi
-    umask 077
-    tar -xzf "$file" -C "$repo" --exclude='_home/*'
+    umask 077  # as a non-root user tar applies it: what lands here is readable by you alone
+    tar -xzf "$file" -C "$repo" --no-same-permissions --exclude='_home/*'
     if tar -tzf "$file" | grep -q '^_home/'; then
-        tar -xzf "$file" -C "$HOME" --strip-components=1 --wildcards '_home/*'
+        tar -xzf "$file" -C "$HOME" --no-same-permissions --strip-components=1 --wildcards '_home/*'
     fi
     echo "imported $(tar -tzf "$file" | wc -l) entries into $repo and ~/.config/agentic-trading"
     echo "next: deploy/install.sh --enable, then delete $file"

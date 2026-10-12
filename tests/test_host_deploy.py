@@ -108,9 +108,15 @@ class HostDeployTests(unittest.TestCase):
             }.isdisjoint(names)
         )
 
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self._sh(old_home, str(old / "deploy" / "migrate.sh"), "export", str(bundle))
+        self.assertIn("exists", caught.exception.stderr)
+
         new, new_home = self._host("new")
         self._sh(new_home, str(new / "deploy" / "migrate.sh"), "import", str(bundle))
         self.assertTrue((new / "data" / "state" / "trial.json").exists())
+        self.assertEqual((new / "config" / "agentic.toml").stat().st_mode & 0o077, 0)
+        self.assertEqual((new_home / ".config" / "agentic-trading" / "tokens.json").stat().st_mode & 0o077, 0)
         self.assertFalse((new / "data" / "state" / "arm.json").exists())
         self.assertTrue(
             (new_home / ".config" / "agentic-trading" / "tokens.json").exists()
