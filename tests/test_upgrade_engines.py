@@ -71,7 +71,11 @@ class EngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             fake = _Fake(0, "", "DONE: x")
             write(TASK, worktree=Path(name), scratch=Path(name), runner=fake)
-        self.assertIn("--ignore-user-config", _from(fake.calls[0], "codex"))
+        argv = _from(fake.calls[0], "codex")
+        self.assertIn("--ignore-user-config", argv)
+        settings = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
+        self.assertIn("model=gpt-6-astra", settings)  # the user config's model, pinned since it no longer loads
+        self.assertIn("model_reasoning_effort=max", settings)
 
     def test_a_spent_quota_is_unavailable_not_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as name:
@@ -88,6 +92,10 @@ class EngineTests(unittest.TestCase):
                 self.assertFalse(verdict.approved)
                 self.assertFalse(verdict.available)
         self.assertTrue(review(TASK, worktree=wt, base="live", runner=_Fake(1, "auth error")).available)
+        with tempfile.TemporaryDirectory() as name:  # limit words deep in a transcript are not a spent quota
+            crash = _Fake(1, "venues: rate limit 200/min, usage limit reached in fixture\n" + "pytest\n" * 10
+                             + "Traceback: boom")
+            self.assertEqual(write(TASK, worktree=Path(name), scratch=Path(name), runner=crash).status, "failed")
         self.assertTrue(review(TASK, worktree=wt, base="live",
                                runner=_Fake(0, "the usage limit is fine\nVERDICT: REJECT — no")).available)
 
