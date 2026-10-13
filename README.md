@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1382%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1385%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -662,6 +662,9 @@ day, and only behind walls it cannot move:
   falls. No subprocess, network, environment or `eval` calls, and nothing shaped like a key. Code under
   `src/` may not write, rename or delete files, so a change can never flip the trader's mode, arm it, or
   clear its kill switch.
+- **The docs stay the system's own:** any edit the writer makes to `README.md` or `CONTRIBUTING.md` is
+  dropped, and trusted code writes their test counts itself. Before this, one stray README sentence cost
+  Codex's first working change.
 - **Shipping:** the full suite and the doc-count check pass in the sandbox, the change merges to the `live`
   branch by fast-forward with a PR as its record, and the services restart.
 - **The canary:** a watchdog checks every 5 minutes for 24 hours: services up, no tracebacks, the trader
@@ -718,7 +721,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
 deploy/                  systemd units, launchers, install.sh, migrate.sh, LAPTOP.md (WSL2 host)
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1382 tests, including the honesty tests for the rig
+tests/                   1385 tests, including the honesty tests for the rig
 ```
 
 ## Operations

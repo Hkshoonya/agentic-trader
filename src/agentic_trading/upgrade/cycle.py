@@ -14,7 +14,7 @@ from agentic_trading.fast.service import FastJournal
 from agentic_trading.upgrade import engines as engine_module
 from agentic_trading.upgrade import planner as planner_module
 from agentic_trading.upgrade.control import load_control, save_control
-from agentic_trading.upgrade.policy import check, control_closure, parse_diff
+from agentic_trading.upgrade.policy import COUNT_FILES, check, control_closure, parse_diff, with_test_counts
 from agentic_trading.upgrade.run import Runner
 from agentic_trading.upgrade.sandbox import count_tests, probe, run_doc_counts, run_suite
 from agentic_trading.upgrade.settings import UpgradeConfig
@@ -126,6 +126,15 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
         return fail("failed", f"{task.title}: the writer failed ({written.summary}); tried {tried_text}")
     if not shipyard.intact(wt):
         return fail("refused", f"{task.title}: the writer replaced the worktree's git link")
+    tests_after = count_tests(runner, worktree=wt, venv=venv)
+    # README and CONTRIBUTING are the system's account of itself, not the writer's: whatever it wrote there
+    # is dropped, and trusted code writes the count the suite now has. A file swapped for a symlink or a
+    # directory is left for the walls to refuse, never written through.
+    for name in COUNT_FILES:
+        doc = wt / name
+        if not doc.is_symlink() and (doc.is_file() or not doc.exists()):
+            text = shipyard.file_at(name)
+            doc.write_text(with_test_counts(text, tests_after) if tests_after else text, encoding="utf-8")
     names, unified = shipyard.diff(wt)
     changes = parse_diff(names, unified)
     if not changes:
@@ -133,7 +142,6 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
     before = {c.path: shipyard.file_at(c.old_path or c.path) for c in changes if c.path.endswith(".py")}
     after = {c.path: (wt / c.path).read_text(encoding="utf-8") if (wt / c.path).is_file() else ""
              for c in changes if c.path.endswith(".py")}
-    tests_after = count_tests(runner, worktree=wt, venv=venv)
     reasons = check(changes, live=(mode == "live"), closure=control_closure(Path(repo) / "src"), before=before,
                     after=after, tests_before=tests_before or 0, tests_after=tests_after or 0,
                     max_files=settings.max_files, max_lines=settings.max_lines)

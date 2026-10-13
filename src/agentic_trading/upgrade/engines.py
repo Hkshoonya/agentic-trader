@@ -37,8 +37,8 @@ Rules you must follow:
 - Run: {SUITE}
   Your sandbox forbids sockets, so the files left out there cannot pass inside it. If another test fails only
   because a socket or the network is refused, leave it alone: the full suite runs again outside your sandbox
-  and must pass there. Every other test must pass. If you add tests, update the test count in README.md
-  (3 places) and CONTRIBUTING.md, then run: python tools/check_doc_counts.py
+  and must pass there. Every other test must pass. Leave README.md and CONTRIBUTING.md alone: the system
+  writes their test counts itself and discards any other edit there.
 - Do not commit. Do not touch git.
 - If the task cannot be done inside the allowed files, change nothing and end with one line:
   NOT_APPLICABLE: <reason>

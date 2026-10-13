@@ -19,6 +19,9 @@ ALLOWED_TEST_PREFIXES = ("tests/test_swarm_", "tests/test_strategies_")
 PROTECTED_TESTS = ("tests/test_swarm_funding.py", "tests/test_swarm_desk.py")
 COUNT_FILES = ("README.md", "CONTRIBUTING.md")
 COUNT_LINE = re.compile(r"tests-\d+%20passing|#\s*\d+ tests|tests/\s+\d+ tests")
+# The same three claims, split around the number, so trusted code can write the count itself.
+COUNT_CLAIMS = (re.compile(r"(tests-)\d+(%20passing)"), re.compile(r"(#\s*)\d+( tests)"),
+                re.compile(r"(tests/\s+)\d+( tests)"))
 CONTROL_MODULES = (
     "agentic_trading.upgrade", "agentic_trading.dashboard", "agentic_trading.risk", "agentic_trading.arming",
     "agentic_trading.panic", "agentic_trading.limits", "agentic_trading.config", "agentic_trading.journal",
@@ -305,3 +308,10 @@ def check(changes: Iterable[FileChange], *, live: bool, closure: set[str], befor
     if tests_after < tests_before:
         reasons.append(f"the test count fell from {tests_before} to {tests_after}")
     return reasons
+
+
+def with_test_counts(text: str, count: int) -> str:
+    """``text`` with every test-count claim (the ones ``COUNT_LINE`` allows) set to ``count``."""
+    for claim in COUNT_CLAIMS:
+        text = claim.sub(lambda m: f"{m.group(1)}{count}{m.group(2)}", text)
+    return text

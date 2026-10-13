@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from agentic_trading.upgrade.policy import (
-    FileChange, allowed_path, check, control_closure, module_of, parse_diff, scan,
+    COUNT_LINE, FileChange, allowed_path, check, control_closure, module_of, parse_diff, scan, with_test_counts,
 )
 
 OK = dict(live=False, closure=set(), tests_before=10, tests_after=11, max_files=12, max_lines=400)
@@ -58,6 +58,20 @@ class PathTests(unittest.TestCase):
         self.assertIn("agentic_trading.helper", closure)
         self.assertIn("agentic_trading.swarm.deep", closure)
         self.assertNotIn("agentic_trading.swarm.free", closure)
+
+
+class CountTests(unittest.TestCase):
+    def test_trusted_code_writes_every_count_claim_and_nothing_else(self) -> None:
+        readme = ("[![tests](https://img.shields.io/badge/tests-1382%20passing-green)]\n"
+                  ".venv/bin/python -m pytest tests -q            # 1382 tests\n"
+                  "tests/                   1382 tests, including the honesty tests\n"
+                  "The swarm keeps 24 agents and 1382 is just a number here.\n")
+        out = with_test_counts(readme, 1390)
+        self.assertEqual(out.count("1390"), 3)
+        self.assertIn("1382 is just a number here", out)
+        self.assertEqual(out.replace("1390", "1382"), readme)
+        changed = [line for line in out.splitlines() if line not in readme.splitlines()]
+        self.assertTrue(all(COUNT_LINE.search(line) for line in changed))
 
 
 class DiffTests(unittest.TestCase):

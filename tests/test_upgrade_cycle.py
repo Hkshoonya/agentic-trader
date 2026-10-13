@@ -325,3 +325,35 @@ class CycleTests(unittest.TestCase):
             events = _journal(state)
         self.assertEqual([e["error"] for e in events if e["event"] == "upgrade_plan"], ["timed out"])
         self.assertEqual(outcome.message, "nothing to work on")
+
+
+class DocCountTests(unittest.TestCase):
+    README = "tests-10%20passing\n.venv/bin/python -m pytest tests -q   # 10 tests\nThe swarm breeds agents.\n"
+
+    def _run(self, state: Path, write) -> tuple:
+        yard = _Yard(state)
+        yard.file_at = lambda path: self.README if path == "README.md" else "X = 1\n"
+        outcome = CycleTests._run(CycleTests(), state, yard=yard, write=write)
+        return outcome, state / "wt"
+
+    def test_the_writers_doc_edits_are_dropped_and_the_new_count_written(self) -> None:
+        def write(task, *, worktree, **kw):
+            (worktree / "README.md").write_text(self.README.replace("breeds agents", "breeds BETTER agents"))
+            return EngineResult("changed", "shares grow")
+
+        with tempfile.TemporaryDirectory() as name:
+            outcome, wt = self._run(Path(name), write)
+            self.assertEqual((wt / "README.md").read_text(), self.README.replace("10", "11"))
+            self.assertEqual((wt / "CONTRIBUTING.md").read_text(), "X = 1\n")
+            self.assertTrue(outcome.message.startswith("shipped"), outcome.message)
+
+    def test_a_doc_file_swapped_for_a_symlink_is_never_written_through(self) -> None:
+        def write(task, *, worktree, **kw):
+            (worktree / "README.md").symlink_to(worktree.parent / "outside.md")
+            return EngineResult("changed", "shares grow")
+
+        with tempfile.TemporaryDirectory() as name:
+            outside = Path(name) / "outside.md"
+            outside.write_text("untouched\n")
+            self._run(Path(name), write)
+            self.assertEqual(outside.read_text(), "untouched\n")

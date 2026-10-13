@@ -54,7 +54,7 @@ Everything that guards money, guards the upgrader, or carries its evidence stays
 | `ship.py` | Builds the worktree from `live`, snapshots the data stores, then commits, pushes, opens the PR, fast-forwards `live` and restarts the services. Rollback is a revert, a restore of the stores, a push and a restart. All git and systemd calls go through one injectable runner. |
 | `watchdog.py` | The canary checks (U6) and carrying out a requested rollback. Writes `state/upgrade.json` for the dashboard. |
 | `control.py` | `control.json`: paused, rollback requested, and the canary window. Read and written atomically. |
-| `cycle.py` | One daily run: check the guards (U11), pick a task, write, check the policy, test, review, ship, start the canary. Every outcome is journaled to `upgrade-<day>.jsonl`. |
+| `cycle.py` | One daily run: check the guards (U11), pick a task, write, check the policy, test, review, ship, start the canary. After the writer, it puts `README.md` and `CONTRIBUTING.md` back as they are on `live` and writes their test counts itself (amended 2026-10-13, after the first working change was refused for a README sentence). Every outcome is journaled to `upgrade-<day>.jsonl`. |
 | `cli.py` | `agentic-trading upgrade run\|watch\|pause\|resume\|rollback\|status`. |
 
 ### The follow gap (paper vs account)
