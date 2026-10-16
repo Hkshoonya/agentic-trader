@@ -38,6 +38,8 @@ class HostDeployTests(unittest.TestCase):
         self.env = dict(
             os.environ, PATH=f"{stubs}:{os.environ['PATH']}", STUBLOG=str(self.log)
         )
+        # The upgrader's sandbox clears the environment: the scripts must not need $USER.
+        self.env.pop("USER", None)
 
     def _host(self, name: str) -> tuple[Path, Path]:
         repo, home = self.tmp / name / "my repo & co", self.tmp / name / "home"
@@ -129,7 +131,13 @@ class HostDeployTests(unittest.TestCase):
         self.assertIn(
             'if [ -r "$env_file" ]; then set -a; . "$env_file"; set +a; fi', launcher
         )
-        self.assertLess(launcher.index("env_file="), launcher.index("exec "))
+        self.assertLess(launcher.index("env_file="), launcher.index("upgrade run"))
+
+    def test_the_upgrade_launcher_shows_the_outcome_and_keeps_the_runs_exit_code(self) -> None:
+        launcher = (DEPLOY / "agentic-trading-upgrade").read_text()
+        self.assertIn("|| status=$?", launcher)
+        self.assertIn('notify-send -u "$urgency"', launcher)
+        self.assertTrue(launcher.rstrip().endswith('exit "$status"'))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ bin="$HOME/.local/bin"
 units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 origin_repo="/home/doczeus/Projects/Agnetic TraDING"
 origin_home="/home/doczeus"
+user=${USER:-$(id -un)}  # a cleared environment (cron, a sandbox) has no $USER
 services="agentic-trading agentic-trading-dashboard agentic-trading-venues"
 timers="agentic-trading-swarm.timer agentic-trading-upgrade.timer agentic-trading-upgrade-watch.timer"
 
@@ -41,8 +42,8 @@ echo "installed launchers in $bin and units in $units for $repo"
 branch=$(git -C "$repo" symbolic-ref --short -q HEAD || echo detached)
 [ "$branch" = live ] || echo "warning: checkout is on '$branch'; the self-upgrader ships to 'live'" >&2
 command -v bwrap >/dev/null || echo "warning: bwrap missing; the self-upgrader refuses to run without its sandbox" >&2
-[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = yes ] \
-    || echo "warning: linger is off; services stop when you log out (sudo loginctl enable-linger $USER)" >&2
+[ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" = yes ] \
+    || echo "warning: linger is off; services stop when you log out (sudo loginctl enable-linger $user)" >&2
 
 if [ "${1:-}" = --enable ]; then
     # shellcheck disable=SC2086

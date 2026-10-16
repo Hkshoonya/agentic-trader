@@ -42,6 +42,12 @@ class NetworkTripwireTests(unittest.TestCase):
             server.close()
 
     def test_the_secrets_file_is_ignored_by_git(self) -> None:
+        seen = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=ROOT, capture_output=True)
+        if seen.returncode != 0:
+            # The upgrader's sandbox hides the repository's git directory: read the rule itself.
+            rules = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+            self.assertIn("config/secrets.toml", [line.strip() for line in rules])
+            return
         done = subprocess.run(
             ["git", "check-ignore", "-q", "config/secrets.toml"], cwd=ROOT
         )

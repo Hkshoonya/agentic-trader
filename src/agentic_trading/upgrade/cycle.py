@@ -100,6 +100,13 @@ def run_cycle(*, state_dir: Path, journal_dir: Path, repo: Path, venv: Path, set
         return finish(0, "unavailable", f"{task.title}: the {engine} is unavailable ({why}); the task keeps its place")
 
     tests_before = count_tests(runner, worktree=wt, venv=venv)
+    # Live's own suite first: a test that already fails on live is not the task's doing, so it charges the
+    # task nothing, spends no writer, and fails the run loudly until live is fixed.
+    base = run_suite(runner, worktree=wt, venv=venv)
+    if base.code != 0:
+        shipyard.cleanup(wt)
+        return finish(1, "broken", f"live's own tests fail in the sandbox, so no task was tried "
+                                   f"({task.title} keeps its place): {base.out.strip()[-300:]}")
     scratch = Path(state_dir) / "upgrade"
     scratch.mkdir(parents=True, exist_ok=True)
     written, tried, engine = None, [], ""

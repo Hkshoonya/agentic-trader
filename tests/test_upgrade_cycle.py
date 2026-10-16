@@ -23,9 +23,9 @@ SWARM_FILE = "src/agentic_trading/swarm/blend.py"
 class _Runner:
     """git/bwrap stand-in: a clean live checkout, a sandbox that holds, a suite that passes."""
 
-    def __init__(self, branch="live", dirty="", probe_leaks=False, suite_code=0) -> None:
+    def __init__(self, branch="live", dirty="", probe_leaks=False, suite_code=0, base_code=0) -> None:
         self.branch, self.dirty, self.leaks, self.suite_code, self.calls = branch, dirty, probe_leaks, suite_code, []
-        self.counted = 0
+        self.counted, self.base_code, self.suites = 0, base_code, 0
 
     def __call__(self, argv, cwd=None, timeout=600.0) -> RunResult:
         self.calls.append(list(argv))
@@ -40,8 +40,10 @@ class _Runner:
         if "--collect-only" in line:
             self.counted += 1
             return RunResult(0, "10 tests collected\n" if self.counted == 1 else "11 tests collected\n")
-        if "pytest" in line:
-            return RunResult(self.suite_code, "passed" if self.suite_code == 0 else "1 failed")
+        if "pytest" in line:  # the first run is live's own suite, before any writer
+            self.suites += 1
+            code = self.base_code if self.suites == 1 else self.suite_code
+            return RunResult(code, "passed" if code == 0 else "1 failed")
         return RunResult(0, "")
 
 
@@ -204,6 +206,21 @@ class CycleTests(unittest.TestCase):
                 self._run(state, yard=yard, **kw)
                 self.assertNotIn("deploy", [c[0] for c in yard.calls])
                 self.assertEqual(load_control(state).canary, {})
+
+    def test_a_suite_already_failing_on_live_charges_the_task_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            state, asked = Path(name), []
+            yard = _Yard(state)
+            outcome = self._run(state, yard=yard, runner=_Runner(base_code=1),
+                                write=lambda task, **kw: asked.append(1) or EngineResult("changed", "x"))
+            status = json.loads((state / "upgrade.json").read_text())
+            attempts = state / "upgrade" / "attempts.json"
+            self.assertEqual(outcome.code, 1)
+            self.assertIn("live's own tests fail", outcome.message)
+            self.assertEqual(status["last"]["outcome"], "broken")
+            self.assertEqual(asked, [])
+            self.assertFalse(attempts.exists() and json.loads(attempts.read_text()))
+            self.assertEqual([c[0] for c in yard.calls], ["prepare", "cleanup"])
 
     def test_an_engine_out_of_quota_charges_the_task_nothing(self) -> None:
         cases = {

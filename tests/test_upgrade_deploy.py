@@ -29,11 +29,11 @@ class UpgradeDeployTests(unittest.TestCase):
                 self.assertIn(command, (DEPLOY / unit).read_text())
 
     def test_systemd_never_kills_a_run_before_its_own_timeouts_do(self) -> None:
-        # three writers in turn 3 x 45 + review 20 + two test counts 20 + suite 40 + doc counts 15
-        # + git, PR and restart ~18 = ~248 min. A unit killed mid-deploy would leave live moved with no
+        # three writers in turn 3 x 45 + review 20 + two test counts 20 + live's suite and the candidate's
+        # 2 x 40 + doc counts 15 + git, PR and restart ~18 = ~288 min. A unit killed mid-deploy would leave live moved with no
         # canary to watch it.
         import re
 
         service = (DEPLOY / "agentic-trading-upgrade.service").read_text()
         minutes = int(re.search(r"TimeoutStartSec=(\d+)min", service).group(1))
-        self.assertGreaterEqual(minutes, 250)
+        self.assertGreaterEqual(minutes, 290)
