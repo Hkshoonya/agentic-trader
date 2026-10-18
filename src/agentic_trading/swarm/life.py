@@ -88,14 +88,19 @@ def benchmark_returns(series: dict[str, list[Bar]], days: list[date]) -> list[fl
     out = [0.0] * len(days)
     for symbol, share in BENCHMARK:
         closes = sorted((b.start.date(), float(b.close)) for b in series.get(symbol, []) if b.close > 0)
-        index, previous = 0, None
         table = dict(closes)
+        anchor = None
+        if days:
+            for close_day, close in closes:
+                if close_day >= days[0]:
+                    break
+                anchor = close
         for position, day in enumerate(days):
-            while index < len(closes) and closes[index][0] < day:
-                previous = closes[index][1]
-                index += 1
-            if day in table and previous:
-                out[position] += share * (table[day] / previous - 1)
+            close = table.get(day)
+            if close is not None:
+                if anchor is not None:
+                    out[position] += share * (close / anchor - 1)
+                anchor = close
     return out
 
 

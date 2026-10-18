@@ -3,7 +3,7 @@
 **An autonomous trading agent for Robinhood that has to earn the right to trade and remain inside operator-defined limits.**
 
 [![windows-build](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Hkshoonya/agentic-trader/actions/workflows/windows-build.yml)
-[![tests](https://img.shields.io/badge/tests-1387%20passing-35d07f)](#verify)
+[![tests](https://img.shields.io/badge/tests-1388%20passing-35d07f)](#verify)
 [![python](https://img.shields.io/badge/python-3.11%2B-4b8bbe)](pyproject.toml)
 [![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-8b97a8)](windows/README.md)
 [![default](https://img.shields.io/badge/default-shadow-f0b429)](#the-two-switches)
@@ -721,7 +721,7 @@ src/agentic_trading/     the agent: runtime, risk, gates, strategies, console
 deploy/                  systemd units, launchers, install.sh, migrate.sh, LAPTOP.md (WSL2 host)
 windows/                 the one-click Windows app (launcher, spec, build)
 paper_scalper.py         offline SPY simulation, no network
-tests/                   1387 tests, including the honesty tests for the rig
+tests/                   1388 tests, including the honesty tests for the rig
 ```
 
 ## Operations

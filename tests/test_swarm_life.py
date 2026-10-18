@@ -57,6 +57,26 @@ class LifeTests(unittest.TestCase):
         weekend, = benchmark_returns(series, [saturday])
         self.assertAlmostEqual(weekend, 0.4 * (104 / 102 - 1))
 
+    def test_benchmark_chains_btc_moves_across_skipped_calendar_days(self) -> None:
+        thursday = date(2024, 1, 4)
+        friday = date(2024, 1, 5)
+        monday = date(2024, 1, 8)
+        series = {
+            "QQQ": daily("QQQ", [100, 100, 110], start=thursday, weekdays_only=True),  # Thu, Fri, Mon
+            "BTCUSD": daily("BTCUSD", [100, 100, 200, 200, 200], start=thursday),  # Thu through Mon
+        }
+
+        friday_return, monday_return = benchmark_returns(series, [friday, monday])
+
+        self.assertAlmostEqual(friday_return, 0.0)
+        self.assertAlmostEqual(monday_return, 0.6 * 0.1 + 0.4)
+        friday_return, saturday_return, monday_return = benchmark_returns(
+            series, [friday, date(2024, 1, 6), monday]
+        )
+        self.assertAlmostEqual(friday_return, 0.0)
+        self.assertAlmostEqual(saturday_return, 0.4)
+        self.assertAlmostEqual(monday_return, 0.6 * 0.1)
+
     def test_agent_weights_follow_the_sizing_and_never_exceed_the_book(self) -> None:
         day = D0 + timedelta(days=400)
         weights = agent_weights(TREND, universe(420), day)
