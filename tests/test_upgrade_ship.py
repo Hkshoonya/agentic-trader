@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agentic_trading.upgrade.run import RunResult
 from agentic_trading.upgrade.ship import SERVICES, Shipyard
@@ -28,6 +29,12 @@ class _Fake:
 
 
 class ShipTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The systemd commands, on any OS: test_host_supervisor checks the Windows host's.
+        patcher = patch("agentic_trading.upgrade.services.windows", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _yard(self, name: str, fail: str = ""):
         state = Path(name) / "state"
         (state / "swarm").mkdir(parents=True)

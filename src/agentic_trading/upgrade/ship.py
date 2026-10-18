@@ -11,6 +11,8 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from agentic_trading.host.units import CONFIG
+from agentic_trading.upgrade import services
 from agentic_trading.upgrade.run import Runner
 
 IDENTITY = ["-c", "user.name=Hkshoonya", "-c", "user.email=154622641+Hkshoonya@users.noreply.github.com"]
@@ -133,7 +135,7 @@ class Shipyard:
         return True
 
     def restart(self) -> bool:
-        return self.runner(["systemctl", "--user", "restart", *SERVICES], timeout=180.0).code == 0
+        return self.runner(services.restart(SERVICES, config=self.repo / CONFIG), timeout=180.0).code == 0
 
     def deploy(self, branch: str, tag: str) -> bool:
         self.snapshot(tag)

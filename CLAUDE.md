@@ -13,6 +13,7 @@ systemctl --user restart agentic-trading-venues   # after changing venues/ or fa
 deploy/install.sh [--enable]                      # install every launcher + unit for this checkout (any path/user)
 deploy/migrate.sh export|import FILE              # move hosts: stops the old one, leaves arm latches behind
 ```
+Windows host (deploy/WINDOWS.md): `agentic-trading host run|status|restart|start|stop|logs|shutdown --config config/agentic.toml` is the supervisor and its systemctl verbs; `deploy\install.ps1 -Enable` registers the `AgenticTrading-Host` logon task; `deploy\migrate.ps1 export|import FILE` uses migrate.sh's archive. Units live in `host/units.py` and `tests/test_host_supervisor.py` fails if they drift from `deploy/*.service|*.timer`. The self-upgrader stays off on Windows (no bwrap).
 systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboard` (loopback console), `agentic-trading-venues` (Alpaca/Coinbase streams, recorder, paper switchboard), `agentic-trading-alert`, `agentic-trading-swarm.timer` (daily 00:30 UTC swarm step), `agentic-trading-upgrade.timer` (daily 02:00 UTC self-upgrade) and `agentic-trading-upgrade-watch.timer` (canary check every 5 min).
 
 ## Layout (`src/agentic_trading/`)
@@ -25,6 +26,7 @@ systemd `--user` services: `agentic-trading` (daemon), `agentic-trading-dashboar
 - `upgrade/` — the self-upgrader: policy walls (allow-list + control-module import closure), bwrap sandbox, Codex → DeepSeek → Claude writers (next on unavailable), Claude review, ship to `live`, canary watchdog, Pause/Resume/Rollback switches (`state/upgrade/control.json`), and the planner (`upgrade plan`) that refills the backlog with swarm/strategy tasks when it runs low
 - `dashboard*.py` — console; HTML/CSS/JS live as Python string modules
 - `llm/` — advisor and regime gates; `rh_mcp/` — Robinhood MCP client + OAuth
+- `host/` — the Windows host: supervisor, units mirrored from deploy/, client the upgrader's ship/watchdog use via `upgrade/services.py`
 - `windows/` — PyInstaller build; lazily imported modules need `hiddenimports` in `AgenticTrader.spec`
 - `docs/superpowers/specs|plans/` — design spec + plan per feature
 

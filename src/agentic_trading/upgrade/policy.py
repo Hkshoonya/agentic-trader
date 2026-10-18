@@ -27,6 +27,8 @@ CONTROL_MODULES = (
     "agentic_trading.panic", "agentic_trading.limits", "agentic_trading.config", "agentic_trading.journal",
     "agentic_trading.jsonio", "agentic_trading.notify", "agentic_trading.venues.guard",
     "agentic_trading.venues.arming", "agentic_trading.venues.secrets",
+    # the Windows host: it starts, stops and restarts everything above
+    "agentic_trading.host", "agentic_trading.filelock", "agentic_trading.stopfile",
 )
 FORBIDDEN_MODULES = ("subprocess", "socket", "httpx", "requests", "urllib", "http", "ctypes", "multiprocessing",
                      # the ways to reach those indirectly, run hidden code, or touch files and processes

@@ -180,6 +180,58 @@ class DesktopChannel:
         return result.returncode == 0
 
 
+# The title and body reach PowerShell as environment variables, never in the script text, so nothing
+# an alert says can be read as code. PowerShell's own AppUserModelID is registered on every install.
+TOAST_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml('<toast><visual><binding template="ToastGeneric"><text/><text/></binding></visual></toast>')
+$texts = $xml.GetElementsByTagName('text')
+$texts.Item(0).AppendChild($xml.CreateTextNode($env:AGENTIC_TOAST_TITLE)) | Out-Null
+$texts.Item(1).AppendChild($xml.CreateTextNode($env:AGENTIC_TOAST_BODY)) | Out-Null
+if ($env:AGENTIC_TOAST_URGENCY -eq 'critical') { $xml.DocumentElement.SetAttribute('scenario', 'urgent') }
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show(
+    [Windows.UI.Notifications.ToastNotification]::new($xml))
+"""
+
+
+class WindowsToastChannel:
+    """Windows desktop notification: a toast from the Action Center, via PowerShell."""
+
+    name = "desktop"
+
+    def __init__(self, binary: str = "powershell", timeout: float = 15.0) -> None:
+        self.binary = binary
+        self.timeout = timeout
+
+    def send(self, alert: Alert) -> bool:
+        env = dict(os.environ, AGENTIC_TOAST_TITLE=f"Agentic Trader: {alert.title}",
+                   AGENTIC_TOAST_BODY=alert.body, AGENTIC_TOAST_URGENCY=alert.urgency)
+        try:
+            result = subprocess.run(
+                [self.binary, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-Command", TOAST_SCRIPT],
+                capture_output=True,
+                timeout=self.timeout,
+                check=False,
+                env=env,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0
+
+
+def desktop_channel() -> Optional[Channel]:
+    """This machine's desktop notifier, if it has one."""
+    if os.name == "nt":
+        return WindowsToastChannel() if shutil.which("powershell") else None
+    return DesktopChannel() if shutil.which("notify-send") else None
+
+
 class TelegramChannel:
     """Telegram bot message; needs ``AGENTIC_TELEGRAM_*`` in the environment."""
 
@@ -279,8 +331,9 @@ def build_notifier() -> Optional[Notifier]:
         return None
 
     channels: list[Channel] = []
-    if shutil.which("notify-send"):
-        channels.append(DesktopChannel())
+    desktop = desktop_channel()
+    if desktop is not None:
+        channels.append(desktop)
     token = os.environ.get("AGENTIC_TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("AGENTIC_TELEGRAM_CHAT_ID")
     if token and chat_id:
