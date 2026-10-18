@@ -60,12 +60,12 @@ def _config(tmp: Path, *, symbols: list[str], bars: dict[str, int] | None = None
                 "equity_refresh_ticks = 30",
                 "equity_refresh_seconds = 60",
                 'timezone = "local"',
-                f'history_path = "{bars_dir}"',
-                f'quotes_path = "{tmp / "q.jsonl"}"',
-                f'journal_dir = "{tmp / "journal"}"',
-                f'state_dir = "{tmp / "state"}"',
-                f'tools_snapshot_path = "{tmp / "tools.json"}"',
-                f'token_path = "{tmp / "tok.json"}"',
+                f'history_path = "{Path(bars_dir).as_posix()}"',
+                f'quotes_path = "{(tmp / "q.jsonl").as_posix()}"',
+                f'journal_dir = "{(tmp / "journal").as_posix()}"',
+                f'state_dir = "{(tmp / "state").as_posix()}"',
+                f'tools_snapshot_path = "{(tmp / "tools.json").as_posix()}"',
+                f'token_path = "{(tmp / "tok.json").as_posix()}"',
                 'mcp_url = "https://agent.robinhood.com/mcp/trading"',
             ]
         )

@@ -53,6 +53,7 @@ class LoadTests(unittest.TestCase):
             creds = load_credentials(path, env=env)
         self.assertEqual(creds["alpaca_paper"].key, PAPER_KEY)
 
+    @unittest.skipIf(os.name == "nt", "Windows has no POSIX permission bits; the check is POSIX-only")
     def test_a_file_others_can_read_is_refused_without_echoing_it(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             path = _write(Path(name), f'[alpaca_paper]\nkey = "{PAPER_KEY}"\nsecret = "{PAPER_SECRET}"\n', 0o644)

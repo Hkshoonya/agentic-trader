@@ -12,8 +12,11 @@ NODE = shutil.which("node") or shutil.which("nodejs")
 
 
 def _node(script: str, stdin: str | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run([NODE, "-e", script], input=stdin, capture_output=True,
-                          text=True, timeout=30)
+    # The whole page script is longer than a Windows command line allows
+    # (WinError 206), so it goes in on stdin unless stdin is taken.
+    argv, feed = ([NODE, "-e", script], stdin) if stdin is not None else ([NODE, "-"], script)
+    return subprocess.run(argv, input=feed, capture_output=True, text=True,
+                          encoding="utf-8", timeout=30)
 
 
 @unittest.skipUnless(NODE, "node is not installed")
@@ -215,3 +218,19 @@ class CockpitPageWiringTests(unittest.TestCase):
         self.assertNotIn("\b", COCKPIT)
         self.assertNotIn("${", COCKPIT)  # concatenation only; every value passes esc()
         self.assertGreater(COCKPIT.count("esc("), 15)
+
+
+class ScriptStringTests(unittest.TestCase):
+    def test_no_page_string_carries_a_control_character(self) -> None:
+        """A JS regex written as \\b in a non-raw Python string arrives as a backspace."""
+        from agentic_trading.dashboard_charts_js import CHARTS
+        from agentic_trading.dashboard_cockpit_js import COCKPIT
+        from agentic_trading.dashboard_css import CSS
+        from agentic_trading.dashboard_html import HTML
+        from agentic_trading.dashboard_js import SCRIPT
+
+        pages = {"CHARTS": CHARTS, "COCKPIT": COCKPIT, "CSS": CSS, "HTML": HTML, "SCRIPT": SCRIPT}
+        for name, text in pages.items():
+            with self.subTest(name=name):
+                self.assertNotIn("\x08", text)
+                self.assertEqual(re.findall(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text), [])

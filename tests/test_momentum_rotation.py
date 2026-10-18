@@ -265,7 +265,7 @@ class TrialScoreTests(unittest.TestCase):
             tmp = Path(name)
             bars = tmp / "bars"
             bars.mkdir()
-            config = load_config(_write_config(tmp, extra=[f'history_path = "{bars}"']))
+            config = load_config(_write_config(tmp, extra=[f'history_path = "{Path(bars).as_posix()}"']))
             started = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
             def write(symbol: str, closes: list[float]) -> None:

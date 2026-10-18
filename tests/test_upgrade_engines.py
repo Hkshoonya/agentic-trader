@@ -133,10 +133,10 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(sandbox["allowUnsandboxedCommands"])
         self.assertTrue(sandbox["network"]["strictAllowlist"])
         self.assertEqual(sandbox["filesystem"]["denyRead"], ["~/"])  # the live checkout's secrets are unseen
-        self.assertEqual(sandbox["filesystem"]["allowRead"], [str(wt), "/v"])
+        self.assertEqual(sandbox["filesystem"]["allowRead"], [str(wt), str(Path("/v"))])
         self.assertTrue(any(a.startswith("TMPDIR=") for a in fake.calls[0][:fake.calls[0].index("claude")]))
         self.assertIn("BASH_DEFAULT_TIMEOUT_MS=1200000", fake.calls[0])  # the suite outlasts the 2-minute default
-        self.assertIn("/v/bin/python", argv[2])  # the project's Python rides in the prompt
+        self.assertIn(str(Path("/v") / "bin" / "python"), argv[2])  # the project's Python rides in the prompt
         self.assertIn("src/agentic_trading/swarm/", argv[2])
         env = fake.calls[0][:fake.calls[0].index("claude")]
         self.assertEqual(env[env.index("-u") + 1], DEEPSEEK_KEY)

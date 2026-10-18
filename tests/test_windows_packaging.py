@@ -7,6 +7,7 @@ window reports — is in ``windows/app_core.py`` and is tested here on any OS.
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from windows.app_core import (
     cli_command,
     read_dotenv,
     read_status,
+    utf8_stdio,
     write_dotenv,
 )
 
@@ -200,8 +202,36 @@ class CommandTests(unittest.TestCase):
             Path("/tmp/ws"), ["status"], python=Path("/usr/bin/python3")
         )
         self.assertEqual(
-            command, ["/usr/bin/python3", "-m", "agentic_trading", "status"]
+            command, [str(Path("/usr/bin/python3")), "-m", "agentic_trading", "status"]
         )
+
+
+class ConsoleEncodingTests(unittest.TestCase):
+    """A cp1252 console or pipe must not crash on an arrow in the help text."""
+
+    def _cp1252(self) -> tuple[io.BytesIO, io.TextIOWrapper]:
+        raw = io.BytesIO()
+        return raw, io.TextIOWrapper(raw, encoding="cp1252", newline="\n")
+
+    def test_the_cli_switches_a_cp1252_stream_to_utf8(self) -> None:
+        from agentic_trading.cli import utf8_stdio as cli_utf8_stdio
+
+        raw, stream = self._cp1252()
+        cli_utf8_stdio([stream])
+        stream.write("stage → live\n")
+        stream.flush()
+        self.assertEqual(raw.getvalue().decode("utf-8"), "stage → live\n")
+
+    def test_the_launcher_switches_a_cp1252_stream_to_utf8(self) -> None:
+        raw, stream = self._cp1252()
+        utf8_stdio([stream])
+        stream.write("→\n")
+        stream.flush()
+        self.assertEqual(raw.getvalue().decode("utf-8"), "→\n")
+
+    def test_children_are_told_to_write_utf8(self) -> None:
+        env = child_env(Path("ws"), environ={})
+        self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
 
 
 class PackagingIntegrityTests(unittest.TestCase):
@@ -328,8 +358,10 @@ class PathIsolationTests(unittest.TestCase):
             workspace = Path(name) / "ws"
             bootstrap_workspace(workspace, payload=REPO)
             config = load_config(workspace / "config" / "agentic.toml")
-        self.assertTrue(Path(config.state_dir).is_absolute())
-        self.assertTrue(str(Path(config.state_dir)).startswith(workspace.as_posix()))
+            self.assertTrue(Path(config.state_dir).is_absolute())
+            self.assertTrue(
+                Path(config.state_dir).resolve().is_relative_to(workspace.resolve())
+            )
 
 
 class TimezoneTests(unittest.TestCase):

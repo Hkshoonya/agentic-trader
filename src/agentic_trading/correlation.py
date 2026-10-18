@@ -141,7 +141,7 @@ def load_state(state_dir: Path | str) -> Optional[CorrelationState]:
     if not path.is_file():
         return None
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(jsonio.read_text(path))
     except (json.JSONDecodeError, OSError):
         return None
     if not isinstance(raw, dict):

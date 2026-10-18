@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,7 +49,8 @@ class TokenStorageTests(unittest.TestCase):
                 expires_at=1_700_000_000.0,
             )
             save_tokens(path, tokens)
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":  # Windows has no POSIX permission bits
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             loaded = load_tokens(path)
             assert loaded is not None
             self.assertEqual(loaded.access_token, "access")
@@ -205,4 +207,5 @@ class DesktopOauthPasteFallbackTests(unittest.TestCase):
                 )
             self.assertEqual(tokens.access_token, "pasted-access")
             self.assertTrue(path.is_file())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":  # Windows has no POSIX permission bits
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)

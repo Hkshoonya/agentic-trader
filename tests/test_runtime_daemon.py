@@ -97,11 +97,11 @@ def _write_config(
         "equity_refresh_ticks = 30",
         "equity_refresh_seconds = 60",
         'timezone = "local"',
-        f'quotes_path = "{tmp / "quotes.jsonl"}"',
-        f'journal_dir = "{tmp / "journal"}"',
-        f'state_dir = "{tmp / "state"}"',
-        f'tools_snapshot_path = "{tmp / "tools_snapshot.json"}"',
-        f'token_path = "{tmp / "missing-tokens.json"}"',
+        f'quotes_path = "{(tmp / "quotes.jsonl").as_posix()}"',
+        f'journal_dir = "{(tmp / "journal").as_posix()}"',
+        f'state_dir = "{(tmp / "state").as_posix()}"',
+        f'tools_snapshot_path = "{(tmp / "tools_snapshot.json").as_posix()}"',
+        f'token_path = "{(tmp / "missing-tokens.json").as_posix()}"',
         'mcp_url = "https://agent.robinhood.com/mcp/trading"',
     ]
     lines.extend(extra or [])

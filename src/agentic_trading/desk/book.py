@@ -228,8 +228,10 @@ class MemberBook:
         book = cls(name, starting_equity=starting_equity, path=path)
         if not path.is_file():
             return book, False
+        from agentic_trading import jsonio
+
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = json.loads(jsonio.read_text(path))
             book.starting_equity = Decimal(str(raw["starting_equity"]))
             book.cash = Decimal(str(raw["cash"]))
             book.lowest_cash = Decimal(str(raw.get("lowest_cash", raw["cash"])))

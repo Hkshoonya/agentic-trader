@@ -401,8 +401,10 @@ class StrategyDesk:
         jsonio.write_text(self.state_path, jsonio.dumps(payload, indent=2) + "\n")
 
     def _load(self) -> None:
+        from agentic_trading import jsonio
+
         try:
-            raw = json.loads(self.state_path.read_text(encoding="utf-8"))
+            raw = json.loads(jsonio.read_text(self.state_path))
         except (OSError, ValueError):
             return
         if not isinstance(raw, dict):

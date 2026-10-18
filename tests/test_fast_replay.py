@@ -99,7 +99,7 @@ class ReplayTests(unittest.TestCase):
 class CommandTests(unittest.TestCase):
     def _config(self, tmp: Path) -> Path:
         path = _write_config(tmp)
-        path.write_text(path.read_text() + f'\n[venues]\nstream_dir = "{tmp / "stream"}"\n'
+        path.write_text(path.read_text() + f'\n[venues]\nstream_dir = "{(tmp / "stream").as_posix()}"\n'
                         '\n[fast]\nsymbols = ["BTC/USD"]\n')
         return path
 

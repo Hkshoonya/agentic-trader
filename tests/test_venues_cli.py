@@ -29,7 +29,7 @@ def _config(tmp: Path, *, live=False) -> str:
     secrets.write_text(body)
     os.chmod(secrets, 0o600)
     path = _write_config(tmp, extra=[
-        "[venues]", "enabled = true", f'secrets_path = "{secrets}"', f'stream_dir = "{tmp / "stream"}"',
+        "[venues]", "enabled = true", f'secrets_path = "{Path(secrets).as_posix()}"', f'stream_dir = "{(tmp / "stream").as_posix()}"',
         f"use_alpaca_live = {'true' if live else 'false'}",
     ])
     return str(path)

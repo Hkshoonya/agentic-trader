@@ -133,7 +133,7 @@ class DipReversalWiringTests(unittest.TestCase):
         bars = tmp / "bars"
         bars.mkdir(exist_ok=True)
         return load_config(
-            _write_config(tmp, extra=[f'history_path = "{bars}"', *extra])
+            _write_config(tmp, extra=[f'history_path = "{bars.as_posix()}"', *extra])
         )
 
     def test_it_needs_forward_shadow_evidence_like_the_rotation(self) -> None:

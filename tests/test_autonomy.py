@@ -60,11 +60,11 @@ def _write_config(tmp: Path, *, autonomy: str, history: Path | None) -> Path:
         "equity_refresh_ticks = 30",
         "equity_refresh_seconds = 60",
         'timezone = "local"',
-        f'quotes_path = "{tmp / "quotes.jsonl"}"',
-        f'journal_dir = "{tmp / "journal"}"',
-        f'state_dir = "{tmp / "state"}"',
-        f'tools_snapshot_path = "{tmp / "tools.json"}"',
-        f'token_path = "{tmp / "tok.json"}"',
+        f'quotes_path = "{(tmp / "quotes.jsonl").as_posix()}"',
+        f'journal_dir = "{(tmp / "journal").as_posix()}"',
+        f'state_dir = "{(tmp / "state").as_posix()}"',
+        f'tools_snapshot_path = "{(tmp / "tools.json").as_posix()}"',
+        f'token_path = "{(tmp / "tok.json").as_posix()}"',
         'mcp_url = "https://agent.robinhood.com/mcp/trading"',
         f'autonomy = "{autonomy}"',
         "evolution_population = 12",
@@ -74,7 +74,7 @@ def _write_config(tmp: Path, *, autonomy: str, history: Path | None) -> Path:
         "evolution_interval_minutes = 1",
     ]
     if history is not None:
-        lines.append(f'history_path = "{history}"')
+        lines.append(f'history_path = "{Path(history).as_posix()}"')
     path = tmp / "agentic.toml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

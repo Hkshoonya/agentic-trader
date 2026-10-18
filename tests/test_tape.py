@@ -86,7 +86,7 @@ class TapeDaemonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
             config = load_config(
-                _write_config(tmp, extra=[f'tape_dir = "{tmp / "tape"}"'])
+                _write_config(tmp, extra=[f'tape_dir = "{(tmp / "tape").as_posix()}"'])
             )
             tools = load_tools()
             _run(

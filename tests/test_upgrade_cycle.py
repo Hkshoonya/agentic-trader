@@ -20,6 +20,19 @@ ON = UpgradeConfig(enabled=True)
 SWARM_FILE = "src/agentic_trading/swarm/blend.py"
 
 
+def _can_symlink() -> bool:
+    """Windows refuses symlinks without Developer Mode or admin (WinError 1314)."""
+    with tempfile.TemporaryDirectory() as name:
+        try:
+            (Path(name) / "link").symlink_to(Path(name) / "target")
+        except OSError:
+            return False
+    return True
+
+
+SYMLINKS = _can_symlink()
+
+
 class _Runner:
     """git/bwrap stand-in: a clean live checkout, a sandbox that holds, a suite that passes."""
 
@@ -125,6 +138,8 @@ class CycleTests(unittest.TestCase):
         for needle, yard_kw in (("changed the worktree", dict(settled=False)), ("symlink", dict(link=True)),
                                 ("git link", dict(whole=False))):
             with self.subTest(needle=needle), tempfile.TemporaryDirectory() as name:
+                if yard_kw.get("link") and not SYMLINKS:
+                    self.skipTest("this account cannot create symlinks")
                 reviewed = []
                 yard = _Yard(Path(name), **yard_kw)
                 outcome = self._run(Path(name), yard=yard,
@@ -364,6 +379,7 @@ class DocCountTests(unittest.TestCase):
             self.assertEqual((wt / "CONTRIBUTING.md").read_text(), "X = 1\n")
             self.assertTrue(outcome.message.startswith("shipped"), outcome.message)
 
+    @unittest.skipUnless(SYMLINKS, "this account cannot create symlinks")
     def test_a_doc_file_swapped_for_a_symlink_is_never_written_through(self) -> None:
         def write(task, *, worktree, **kw):
             (worktree / "README.md").symlink_to(worktree.parent / "outside.md")
