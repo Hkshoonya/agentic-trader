@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from agentic_trading import jsonio
+from agentic_trading import filelock, jsonio
 
 
 @dataclass
@@ -51,23 +51,8 @@ def save_control(state_dir: Path | str, control: Control) -> None:
 def exclusive(state_dir: Path | str) -> Iterator[bool]:
     """One upgrader job at a time: yields False while another run or watch holds the lock, so a
     watchdog tick never lands mid-deploy and two jobs never race git in the live checkout."""
-    try:
-        import fcntl
-    except ImportError:  # Windows: the upgrader is Linux-only; never block the switches there
-        yield True
-        return
-    path = _path(state_dir).with_name("busy.lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            yield False
-            return
-        try:
-            yield True
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    with filelock.exclusive(_path(state_dir).with_name("busy.lock")) as held:
+        yield held
 
 
 def pause(state_dir: Path | str, reason: str) -> Control:

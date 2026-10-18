@@ -8,6 +8,7 @@ by accident.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -25,8 +26,9 @@ def venues_view(state_dir: Path | str, *, now: Optional[datetime] = None) -> dic
         if not isinstance(data, dict):
             raise ValueError("not an object")
     except (OSError, ValueError):
-        return {"enabled": False,
-                "note": "the venues service is not running (systemctl --user start agentic-trading-venues)"}
+        start = ("agentic-trading host start --config config/agentic.toml agentic-trading-venues" if os.name == "nt"
+                 else "systemctl --user start agentic-trading-venues")
+        return {"enabled": False, "note": f"the venues service is not running ({start})"}
     try:
         as_of: Optional[datetime] = datetime.fromisoformat(str(data.get("as_of")))
     except ValueError:

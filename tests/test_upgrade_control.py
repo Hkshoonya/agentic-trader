@@ -63,7 +63,6 @@ class ControlTests(unittest.TestCase):
         self.assertEqual((again.canary["commit"], again.last_shipped["title"]), ("abc", "t"))
 
 
-@unittest.skipIf(os.name == "nt", "the self-upgrader is Linux-only; its job lock is a no-op on Windows")
 class LockTests(unittest.TestCase):
     def test_one_upgrader_job_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as name:

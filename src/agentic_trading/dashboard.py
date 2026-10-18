@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import ipaddress
+import os
+import socket
 import threading
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -1593,6 +1595,22 @@ class _Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, status=404)
 
 
+class _ConsoleServer(ThreadingHTTPServer):
+    """One console per port, as on Linux.
+
+    Windows' SO_REUSEADDR lets a second server bind a port a live one holds, and the two then share
+    its connections: a stale console could answer the canary's health checks for a broken new one.
+    An exclusive bind makes the second fail at start, the way EADDRINUSE does on Linux.
+    """
+
+    if os.name == "nt":
+        allow_reuse_address = False
+
+        def server_bind(self) -> None:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+
+
 def serve(
     config: Config,
     *,
@@ -1614,7 +1632,7 @@ def serve(
         )
     state = DashboardState(config, config_path=config_path)
     handler = type("BoundHandler", (_Handler,), {"state": state})
-    server = ThreadingHTTPServer((host, port), handler)
+    server = _ConsoleServer((host, port), handler)
     if open_browser:
         import webbrowser
 

@@ -1,8 +1,9 @@
 # Windows build
 
 > This app runs the daemon and the console only, from its own single-strategy template. To run the
-> whole system on a Windows machine (desk, venues gateway, swarm, self-upgrader), use WSL2 instead:
-> [deploy/LAPTOP.md](../deploy/LAPTOP.md). Don't run both against the same broker login.
+> whole system on a Windows machine (desk, venues gateway, swarm, canary), use the native Windows host
+> from a source checkout: [deploy/WINDOWS.md](../deploy/WINDOWS.md); or WSL2, which also runs the
+> self-upgrader: [deploy/LAPTOP.md](../deploy/LAPTOP.md). Don't run two against the same broker login.
 
 Everything needed to turn this repository into a double-clickable Windows app
 lives in this folder.

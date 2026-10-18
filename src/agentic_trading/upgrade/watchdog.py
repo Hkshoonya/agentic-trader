@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from agentic_trading.upgrade import services
 from agentic_trading.upgrade.control import load_control, save_control
 from agentic_trading.upgrade.run import Runner
 from agentic_trading.upgrade.ship import SERVICES
@@ -30,10 +31,9 @@ def checks(runner: Runner, *, journal_dir: Path, since: datetime, now: datetime,
     problems = []
     stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     for service in SERVICES:
-        if runner(["systemctl", "--user", "is-active", service], timeout=30.0).out.strip() != "active":
+        if runner(services.is_active(service), timeout=30.0).out.strip() != "active":
             problems.append(f"{service} is not active")
-        logs = runner(["journalctl", "--user", "-u", service, "--since", stamp, "--no-pager", "-o", "cat"],
-                      timeout=60.0).out
+        logs = runner(services.logs_since(service, stamp), timeout=60.0).out
         if "Traceback (most recent call last)" in logs:
             problems.append(f"{service} logged a traceback")
     if now - since >= GRACE:
@@ -44,8 +44,7 @@ def checks(runner: Runner, *, journal_dir: Path, since: datetime, now: datetime,
     for path in APIS:
         if http_get(f"http://127.0.0.1:8787{path}") != 200:
             problems.append(f"the dashboard's {path} does not answer")
-    result = runner(["systemctl", "--user", "show", "agentic-trading-swarm.service", "-p", "Result", "--value"],
-                    timeout=30.0).out.strip()
+    result = runner(services.result("agentic-trading-swarm.service"), timeout=30.0).out.strip()
     if result not in ("success", ""):
         problems.append(f"the last swarm step ended with {result}")
     return problems

@@ -4,6 +4,9 @@ The system is a set of Linux `systemd --user` services: daemon, console, venues 
 swarm, self-upgrade and canary timers. The self-upgrader also needs `bwrap`, `gh`, Codex and Claude,
 and a git checkout on `live`. On Windows they all run unchanged inside WSL2.
 
+Without WSL, [WINDOWS.md](WINDOWS.md) runs every service and timer natively, except the
+self-upgrader. Its sandbox needs Linux.
+
 The one-click app in [`windows/`](../windows/README.md) is not this. It starts only the daemon and the
 console, from an older single-strategy template, without the desk, venues, swarm or self-upgrader.
 

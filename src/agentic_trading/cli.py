@@ -1234,8 +1234,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from agentic_trading.upgrade.cli import add_upgrade_parser
 
     add_upgrade_parser(sub)
+    from agentic_trading.host.cli import add_host_parser
+
+    add_host_parser(sub)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
+    from agentic_trading import stopfile
+
+    stopfile.watch()  # the Windows host's stop request; inert unless it set AGENTIC_STOP_FILE
 
     if args.command == "run":
         return cmd_run(
@@ -1346,6 +1352,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from agentic_trading.swarm.cli import dispatch_swarm
 
         return dispatch_swarm(args)
+    if args.command == "host":
+        from agentic_trading.host.cli import dispatch_host
+
+        return dispatch_host(args)
     if args.command == "upgrade":
         from agentic_trading.upgrade.cli import dispatch_upgrade
 

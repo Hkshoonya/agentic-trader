@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from agentic_trading.upgrade.control import load_control, request_rollback, save_control
 from agentic_trading.upgrade.run import RunResult
@@ -50,6 +51,12 @@ def _canary(state: Path, started: datetime) -> None:
 
 
 class WatchdogTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The systemd commands, on any OS: test_host_supervisor checks the Windows host's.
+        patcher = patch("agentic_trading.upgrade.services.windows", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _watch(self, state, journal, now, runner, yard, http=lambda url: 200):
         events, alerts = [], []
         result = watch(state_dir=state, journal_dir=journal, now=now, runner=runner, shipyard=yard,
