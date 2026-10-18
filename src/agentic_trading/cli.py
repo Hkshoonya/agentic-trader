@@ -986,7 +986,27 @@ def cmd_snapshot_tools(config_path: str) -> int:
     return 0
 
 
+def utf8_stdio(streams: Optional[Sequence[Any]] = None) -> None:
+    """Write UTF-8 to the console and to pipes, whatever the code page.
+
+    Help text and reports use characters such as an arrow; on Windows the
+    console and a redirected pipe default to cp1252, which cannot encode them,
+    so a plain ``--help`` died with ``UnicodeEncodeError``. Unencodable output
+    is replaced rather than raised: a status line is never worth a crash.
+    """
+    for stream in streams if streams is not None else (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = str(getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if reconfigure is None or encoding == "utf8":
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            continue
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    utf8_stdio()
     parser = argparse.ArgumentParser(prog="agentic-trading")
     sub = parser.add_subparsers(dest="command", required=True)
 

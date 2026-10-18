@@ -76,8 +76,10 @@ def load_limits(state_dir: Path | str) -> Optional[Limits]:
     path = _path(state_dir)
     if not path.is_file():
         return None
+    from agentic_trading import jsonio
+
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(jsonio.read_text(path))
     except (json.JSONDecodeError, OSError):
         return None
     try:

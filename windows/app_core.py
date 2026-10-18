@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 APP_NAME = "AgenticTrader"
 DEFAULT_PORT = 8787
@@ -30,6 +30,25 @@ ADVISOR_SWITCH = "AGENTIC_LLM_ADVISOR"
 # What the user must type to arm real order submission. Arming is the one
 # irreversible-feeling action in the app, so it is not a checkbox.
 ARM_PHRASE = "ARM"
+
+
+def utf8_stdio(streams: Optional[Sequence[Any]] = None) -> None:
+    """Write UTF-8 to the console and to pipes, whatever the code page.
+
+    Help text and reports use characters such as an arrow; on Windows the
+    console and a redirected pipe default to cp1252, which cannot encode them,
+    so a plain ``--help`` died with ``UnicodeEncodeError``. Unencodable output
+    is replaced rather than raised: a status line is never worth a crash.
+    """
+    for stream in streams if streams is not None else (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = str(getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if reconfigure is None or encoding == "utf8":
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            continue
 
 
 def default_workspace() -> Path:

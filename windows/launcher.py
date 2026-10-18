@@ -36,6 +36,7 @@ from app_core import (  # noqa: E402 — path set above for frozen builds
     config_path,
     default_workspace,
     read_status,
+    utf8_stdio,
     write_dotenv,
 )
 
@@ -160,6 +161,9 @@ class Supervisor:
             env=env,
             capture_output=capture,
             text=True,
+            # Children write UTF-8 (child_env); decode it as such, not as cp1252.
+            encoding="utf-8",
+            errors="replace",
             **creating,
         )
         if capture:
@@ -198,6 +202,7 @@ def selftest(workspace: Path) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    utf8_stdio()
     parser = argparse.ArgumentParser(prog=APP_NAME)
     parser.add_argument(
         "--workspace",

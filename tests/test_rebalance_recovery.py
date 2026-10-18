@@ -38,11 +38,11 @@ def _config(tmp: Path, **overrides: Any) -> Any:
         "equity_refresh_ticks": "30",
         "equity_refresh_seconds": "60",
         "timezone": '"local"',
-        "quotes_path": f'"{tmp / "quotes.jsonl"}"',
-        "journal_dir": f'"{tmp / "journal"}"',
-        "state_dir": f'"{tmp / "state"}"',
-        "tools_snapshot_path": f'"{tmp / "tools.json"}"',
-        "token_path": f'"{tmp / "missing.json"}"',
+        "quotes_path": f'"{(tmp / "quotes.jsonl").as_posix()}"',
+        "journal_dir": f'"{(tmp / "journal").as_posix()}"',
+        "state_dir": f'"{(tmp / "state").as_posix()}"',
+        "tools_snapshot_path": f'"{(tmp / "tools.json").as_posix()}"',
+        "token_path": f'"{(tmp / "missing.json").as_posix()}"',
         "mcp_url": '"https://agent.robinhood.com/mcp/trading"',
     }
     values.update({key: str(value) for key, value in overrides.items()})

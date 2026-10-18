@@ -13,8 +13,13 @@ import json
 import math
 import os
 import tempfile
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
+
+_T = TypeVar("_T")
+
+_SHARING_ATTEMPTS = 50
 
 
 def finite(value: Any) -> Any:
@@ -33,6 +38,32 @@ def dumps(payload: Any, *, indent: Optional[int] = None) -> str:
     return json.dumps(finite(payload), indent=indent, default=str, allow_nan=False)
 
 
+def _retry_sharing_lock(action: Callable[[], _T]) -> _T:
+    """Run ``action``, riding out a Windows sharing violation.
+
+    Windows refuses to replace a file another process has open, and refuses to
+    open one while it is being replaced; both surface as ``PermissionError``
+    for a few milliseconds. Left alone, a reader would treat that as "no state
+    stored" (the agent's reduced budget reverting to the operator's ceiling)
+    and a writer would drop the update. On POSIX a ``PermissionError`` is a
+    real permission problem, so it is raised at once.
+    """
+    for attempt in range(_SHARING_ATTEMPTS):
+        try:
+            return action()
+        except PermissionError:
+            if os.name != "nt" or attempt == _SHARING_ATTEMPTS - 1:
+                raise
+            time.sleep(0.002 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
+def read_text(path: Path | str) -> str:
+    """Read a file written by :func:`write_text`, never failing mid-swap."""
+    source = Path(path)
+    return _retry_sharing_lock(lambda: source.read_text(encoding="utf-8"))
+
+
 def write_text(path: Path | str, text: str, *, mode: int = 0o600) -> None:
     """Write ``text`` so a concurrent reader never sees a half-written file.
 
@@ -40,7 +71,8 @@ def write_text(path: Path | str, text: str, *, mode: int = 0o600) -> None:
     the other may be writing them. A torn read of ``effective_limits.json``
     fails to parse, which used to mean "no limits stored" — i.e. the agent's
     reduced budget silently reverted to the operator's ceiling. Rename is
-    atomic on POSIX, so a reader sees either the old file or the new one.
+    atomic on POSIX, so a reader sees either the old file or the new one. On
+    Windows the rename waits out a reader holding the destination open.
     """
     destination = Path(path)
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -53,7 +85,7 @@ def write_text(path: Path | str, text: str, *, mode: int = 0o600) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temporary, mode)
-        os.replace(temporary, destination)
+        _retry_sharing_lock(lambda: os.replace(temporary, destination))
     except BaseException:
         try:
             os.unlink(temporary)

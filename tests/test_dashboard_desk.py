@@ -25,7 +25,7 @@ def _config(tmp: Path, members: str = '["momentum_rotation", "benchmark"]', stra
         _write_config(
             tmp,
             extra=[
-                f'history_path = "{bars}"',
+                f'history_path = "{Path(bars).as_posix()}"',
                 f'strategy = "{strategy}"',
                 f"desk_members = {members}",
             ],

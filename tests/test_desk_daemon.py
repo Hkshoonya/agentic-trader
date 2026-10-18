@@ -30,7 +30,7 @@ def _desk_config(tmp: Path, *, equity: str):
         handle.write(
             'strategy = "desk"\n'
             'desk_members = ["benchmark"]\n'
-            f'history_path = "{tmp / "bars"}"\n'
+            f'history_path = "{(tmp / "bars").as_posix()}"\n'
         )
     config = load_config(path)
     state = Path(config.state_dir)

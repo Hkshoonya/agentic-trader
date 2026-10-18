@@ -144,11 +144,11 @@ class DashboardTests(unittest.TestCase):
                     "equity_refresh_ticks = 30",
                     "equity_refresh_seconds = 60",
                     'timezone = "local"',
-                    f'quotes_path = "{tmp / "quotes.jsonl"}"',
-                    f'journal_dir = "{tmp / "journal"}"',
-                    f'state_dir = "{tmp / "state"}"',
-                    f'tools_snapshot_path = "{tmp / "tools.json"}"',
-                    f'token_path = "{tmp / "tok.json"}"',
+                    f'quotes_path = "{(tmp / "quotes.jsonl").as_posix()}"',
+                    f'journal_dir = "{(tmp / "journal").as_posix()}"',
+                    f'state_dir = "{(tmp / "state").as_posix()}"',
+                    f'tools_snapshot_path = "{(tmp / "tools.json").as_posix()}"',
+                    f'token_path = "{(tmp / "tok.json").as_posix()}"',
                     'mcp_url = "https://agent.robinhood.com/mcp/trading"',
                     'autonomy = "auto"',
                 ]
@@ -461,7 +461,7 @@ def _with_history(tmp: Path) -> Path:
     path = tmp / "agentic.toml"
     with_history = tmp / "agentic-bars.toml"
     with_history.write_text(
-        path.read_text(encoding="utf-8") + f'history_path = "{tmp / "bars"}"\n',
+        path.read_text(encoding="utf-8") + f'history_path = "{(tmp / "bars").as_posix()}"\n',
         encoding="utf-8",
     )
     return with_history
@@ -759,7 +759,7 @@ class OrderTableAccuracyTests(unittest.TestCase):
             config = DashboardTests()._config(tmp)
             (tmp / "agentic-nobars.toml").write_text(
                 (tmp / "agentic.toml").read_text(encoding="utf-8")
-                + f'history_path = "{tmp / "empty-bars"}"\n',
+                + f'history_path = "{(tmp / "empty-bars").as_posix()}"\n',
                 encoding="utf-8",
             )
             config = load_config(tmp / "agentic-nobars.toml")
@@ -851,7 +851,7 @@ class RebuiltGradeTests(unittest.TestCase):
         (bars / "BTCUSD_day.jsonl").write_text("\n".join(rows) + "\n")
         (tmp / "agentic-bars.toml").write_text(
             (tmp / "agentic.toml").read_text(encoding="utf-8")
-            + f'history_path = "{bars}"\n',
+            + f'history_path = "{Path(bars).as_posix()}"\n',
             encoding="utf-8",
         )
         return load_config(tmp / "agentic-bars.toml")
@@ -946,7 +946,7 @@ class RebuiltGradeTests(unittest.TestCase):
             config = DashboardTests()._config(tmp)
             (tmp / "agentic-nobars.toml").write_text(
                 (tmp / "agentic.toml").read_text(encoding="utf-8")
-                + f'history_path = "{tmp / "empty-bars"}"\n',
+                + f'history_path = "{(tmp / "empty-bars").as_posix()}"\n',
                 encoding="utf-8",
             )
             config = load_config(tmp / "agentic-nobars.toml")

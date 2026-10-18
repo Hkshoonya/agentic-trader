@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from decimal import Decimal
@@ -34,11 +35,11 @@ def _config(tmp: Path):
         "\n".join(
             CONFIG_LINES
             + [
-                f'quotes_path = "{tmp / "q.jsonl"}"',
-                f'journal_dir = "{tmp / "journal"}"',
-                f'state_dir = "{tmp / "state"}"',
-                f'tools_snapshot_path = "{tmp / "tools.json"}"',
-                f'token_path = "{tmp / "tok.json"}"',
+                f'quotes_path = "{(tmp / "q.jsonl").as_posix()}"',
+                f'journal_dir = "{(tmp / "journal").as_posix()}"',
+                f'state_dir = "{(tmp / "state").as_posix()}"',
+                f'tools_snapshot_path = "{(tmp / "tools.json").as_posix()}"',
+                f'token_path = "{(tmp / "tok.json").as_posix()}"',
             ]
         )
         + "\n",
@@ -63,12 +64,13 @@ class RestartPersistenceTests(unittest.TestCase):
 
             self.assertEqual(load_state(config.state_dir).stage, "probation")
             self.assertEqual(load_state(config.state_dir).streak, 2)
-            self.assertEqual(
-                stat.S_IMODE((Path(config.state_dir) / "mode").stat().st_mode), 0o600
-            )
-            self.assertEqual(
-                stat.S_IMODE(Path(config.state_dir).stat().st_mode), 0o700
-            )
+            if os.name != "nt":  # Windows has no POSIX permission bits
+                self.assertEqual(
+                    stat.S_IMODE((Path(config.state_dir) / "mode").stat().st_mode), 0o600
+                )
+                self.assertEqual(
+                    stat.S_IMODE(Path(config.state_dir).stat().st_mode), 0o700
+                )
 
     def test_the_risk_budget_survives_a_restart_and_still_binds_the_guard(self) -> None:
         with tempfile.TemporaryDirectory() as name:

@@ -254,11 +254,11 @@ class BudgetAboveTargetTests(unittest.TestCase):
                         "equity_refresh_ticks = 30",
                         "equity_refresh_seconds = 60",
                         'timezone = "local"',
-                        f'quotes_path = "{tmp / "q.jsonl"}"',
-                        f'journal_dir = "{tmp / "j"}"',
-                        f'state_dir = "{tmp / "state"}"',
-                        f'tools_snapshot_path = "{tmp / "t.json"}"',
-                        f'token_path = "{tmp / "k.json"}"',
+                        f'quotes_path = "{(tmp / "q.jsonl").as_posix()}"',
+                        f'journal_dir = "{(tmp / "j").as_posix()}"',
+                        f'state_dir = "{(tmp / "state").as_posix()}"',
+                        f'tools_snapshot_path = "{(tmp / "t.json").as_posix()}"',
+                        f'token_path = "{(tmp / "k.json").as_posix()}"',
                         'mcp_url = "https://x"',
                     ]
                 )

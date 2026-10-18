@@ -17,7 +17,7 @@ def _config(tmp: Path, *extra: str):
     return load_config(
         _write_config(
             tmp,
-            extra=['strategy = "desk"', f'history_path = "{tmp / "bars"}"', *extra],
+            extra=['strategy = "desk"', f'history_path = "{(tmp / "bars").as_posix()}"', *extra],
         )
     )
 
@@ -179,7 +179,7 @@ class DeskGateAndTrialTests(unittest.TestCase):
                 json.dumps(desk_order) + "\n", encoding="utf-8"
             )
             rolled_back = load_config(
-                _write_config(tmp, extra=[f'history_path = "{tmp / "bars"}"'])
+                _write_config(tmp, extra=[f'history_path = "{(tmp / "bars").as_posix()}"'])
             )
             scored = trial.score_trial(rolled_back, now=started + timedelta(days=2))
         self.assertEqual(scored["entries"], 0)

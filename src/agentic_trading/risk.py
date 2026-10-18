@@ -363,7 +363,9 @@ class RiskGuard:
         path = Path(state_dir) / _STATE_FILE
         today = self._today_key()
         if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            from agentic_trading import jsonio
+
+            raw = json.loads(jsonio.read_text(path))
             self._kill_switch = bool(raw.get("kill_switch", False))
             self._kill_reason = str(raw.get("kill_reason", ""))
             if "baseline_equity" in raw:

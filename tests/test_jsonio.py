@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import unittest
 from decimal import Decimal
@@ -90,6 +91,24 @@ class AtomicWriteTests(unittest.TestCase):
 
             self.assertEqual(failures, [])
             self.assertIsNotNone(load_limits(state_dir))
+
+    def test_a_sharing_violation_is_waited_out_only_on_windows(self) -> None:
+        """On POSIX a PermissionError is a real one and must surface at once."""
+        calls: list[int] = []
+
+        def flaky() -> str:
+            calls.append(1)
+            if len(calls) < 3:
+                raise PermissionError("in use")
+            return "ok"
+
+        if os.name == "nt":
+            self.assertEqual(jsonio._retry_sharing_lock(flaky), "ok")
+            self.assertEqual(len(calls), 3)
+        else:
+            with self.assertRaises(PermissionError):
+                jsonio._retry_sharing_lock(flaky)
+            self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":
