@@ -9,6 +9,8 @@
     host is-active  --config C UNIT            prints active/inactive/failed; exit 0 only when active
     host show       --config C UNIT -p Result  a timer's last result (success, exit-code, timeout)
     host logs       --config C UNIT --since S  log lines since "YYYY-MM-DD HH:MM:SS UTC"
+    host container build|check|login|exec --config C [ARGS]
+                                               the self-upgrader's Linux container (deploy/WINDOWS.md)
 """
 
 from __future__ import annotations
@@ -35,6 +37,10 @@ def add_host_parser(sub: Any) -> None:
             action.add_argument("--value", action="store_true")
         if verb == "logs":
             action.add_argument("--since", required=True)
+    box = verbs.add_parser("container", help="the self-upgrader's Linux container")
+    box.add_argument("box_action", choices=("build", "check", "login", "exec"))
+    box.add_argument("--config", required=True)
+    box.add_argument("args", nargs="*", help="exec: after --, the agentic-trading command to run inside")
 
 
 def dispatch_host(args: Any) -> int:
@@ -50,6 +56,8 @@ def dispatch_host(args: Any) -> int:
         from agentic_trading.host.supervisor import Supervisor
 
         return Supervisor(repo, state).run()
+    if verb == "container":
+        return _container(args.box_action, repo, state, list(args.args))
     if verb == "is-active":
         found = client.unit_state(state, args.unit)
         print(found)
@@ -84,3 +92,35 @@ def _print_status(state: dict[str, Any], up: bool) -> int:
         print(f"  {name:32} next {row.get('next_run') or '-'}  last {row.get('last_start') or 'never'}"
               f" {row.get('result') or ''}")
     return 0 if up else 3
+
+
+def _container(action: str, repo: Path, state: Path, args: list[str]) -> int:
+    import subprocess
+
+    from agentic_trading.host import container
+    from agentic_trading.upgrade.run import real_runner
+
+    if action == "build":
+        done = container.build(repo, state, real_runner)
+        print(done.out[-2000:])
+        print(f"host container build: {'built ' + container.image_tag(repo) if done.code == 0 else 'FAILED'}")
+        return 0 if done.code == 0 else 1
+    image = container.built_image(state)
+    if action == "check":
+        found = container.problems(repo, image, real_runner)
+        for problem in found:
+            print(f"FAIL  {problem}")
+        print("host container check: " + ("ready: the upgrader runs here inside its walls" if not found else "not ready"))
+        return 0 if not found else 1
+    if action == "login":
+        if not image:
+            print("build the image first: agentic-trading host container build --config ...")
+            return 1
+        print("In the shell that opens, run:\n" + container.login_steps())
+        return subprocess.call(container.run_argv(repo, image, ["bash"], raw=True, interactive=True))
+    found = container.problems(repo, image, real_runner)
+    if found:
+        print("host container exec: refused: " + "; ".join(found))
+        return 1
+    args = args[1:] if args[:1] == ["--"] else args
+    return container.execute(repo, str(image), args, real_runner)

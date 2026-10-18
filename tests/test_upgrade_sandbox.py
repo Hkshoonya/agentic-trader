@@ -34,6 +34,16 @@ class SandboxTests(unittest.TestCase):
         self.assertNotIn("/home/u", argv)
         self.assertEqual(argv[-2:], ["python", "-V"])
 
+    def test_the_sandboxs_own_root_is_read_only(self) -> None:
+        """bwrap's root is a tmpfs: without this, a path beside the worktree was writable (found on the
+        Windows host's container, 2026-10-18), and the probe rightly refused the sandbox."""
+        argv = wrap(["python", "-V"], worktree=WT, venv=VENV)
+        at = argv.index("--remount-ro")
+        self.assertEqual(argv[at + 1], "/")
+        # after every mount it must not undo: binds and the /tmp tmpfs are separate mounts and stay as made
+        self.assertGreater(at, argv.index("--tmpfs"))
+        self.assertGreater(at, max(i for i, a in enumerate(argv) if a == "--bind"))
+
     def test_the_tests_cannot_replace_the_worktrees_git_link(self) -> None:
         import tempfile
 

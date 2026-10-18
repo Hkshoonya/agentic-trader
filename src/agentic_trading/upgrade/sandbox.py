@@ -56,6 +56,9 @@ def wrap(argv: Sequence[str], *, worktree: Path, venv: Path) -> list[str]:
             "--bind", str(worktree), str(worktree),
             *link,
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+            # The new root is bwrap's own tmpfs, and a path the candidate makes there (beside its worktree, say)
+            # is writable: gone when it exits, but the probe counts it a write outside. Read-only it is.
+            "--remount-ro", "/",
             "--unshare-net", "--unshare-pid", "--die-with-parent", "--clearenv",
             "--setenv", "PATH", f"{venv}/bin:/usr/bin:/bin", "--setenv", "HOME", "/tmp",
             "--setenv", "PYTHONDONTWRITEBYTECODE", "1", "--chdir", str(worktree), *argv]
