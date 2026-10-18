@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
-SANDBOX_MISSING = "off on this host: the self-upgrader's sandbox (bwrap) needs Linux"
+SANDBOX_MISSING = ("off on this host: its sandbox needs Linux; build its container to turn it on "
+                   "(agentic-trading host container build --config ...)")
 
 
 def sandbox_available() -> bool:

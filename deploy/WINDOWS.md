@@ -15,25 +15,43 @@ with `deploy/*.service` and `deploy/*.timer`. A scheduled task starts it at sign
 | SIGTERM on stop | a stop file; the child raises SIGINT on itself and shuts down through its own handlers |
 | `deploy/install.sh`, `deploy/migrate.sh` | `deploy\install.ps1`, `deploy\migrate.ps1` (same archive format, either direction) |
 
-**The self-upgrader stays off on Windows.** Its walls are Linux sandboxes: `bwrap` runs candidate code
-with no network and no view of your secrets, and the writers' shell commands are sandboxed the same way.
-Windows has none of these, so `host status` shows `agentic-trading-upgrade` as off, with the reason.
-Nothing runs it nightly only to have it refuse. The canary timer still runs, because it serves the
-console's Rollback button. `agentic-trading upgrade pause|resume|rollback|status` work as before.
+**The self-upgrader runs in a Linux container.** Its walls are Linux sandboxes. `bwrap` runs
+candidate code with no network and no view of your secrets, and the writers' shell commands are
+sandboxed the same way. Windows has none of these, so on Windows only `upgrade run` goes into a Docker
+Desktop container. Inside it, the same code runs behind the same walls, and the sandbox probe proves
+them before any writer starts. The container sees only this checkout and the writers' logins. After
+a deploy, it asks this host to restart the services. The canary, Rollback and the
+pause/resume switches stay native. Until you build the container, `host status` shows the upgrade as
+off and gives the reason.
 
 **Run one host at a time.** Two hosts would trade on one broker login and keep two diverging records.
 
 ## 1. The code
 
 ```powershell
-git clone https://github.com/Hkshoonya/agentic-trader.git
-cd agentic-trader; git checkout live
-git config core.autocrlf false       # the checkout is shared with Linux tooling; keep LF as committed
+# LF line endings, as committed: Linux git in the upgrader's container reads this checkout too
+git clone -c core.autocrlf=false --branch live https://github.com/Hkshoonya/agentic-trader.git
+cd agentic-trader
 py -3 -m venv .venv; .venv\Scripts\pip install -e ".[dev,venues]"
 .venv\Scripts\python -m pytest tests -q
 ```
 
-## 2. Move the record here
+## 2. The self-upgrader's container (optional)
+
+Install Docker Desktop, start it, then:
+
+```powershell
+.venv\Scripts\agentic-trading host container build --config config\agentic.toml   # git, gh, bwrap, Python, Codex, Claude
+.venv\Scripts\agentic-trading host container login --config config\agentic.toml   # once: gh, Codex and Claude logins
+.venv\Scripts\agentic-trading host container check --config config\agentic.toml   # ready, or why not
+```
+
+`check` refuses a checkout that converts line endings, because Linux git in the container would see
+every file as changed. A DeepSeek key for the second writer goes in
+`%USERPROFILE%\.config\agentic-trading\upgrade.env` (`DEEPSEEK_API_KEY=...`), as on Linux, and reaches
+the container by name only. Rebuild after `pyproject.toml` changes; `check` says when.
+
+## 3. Move the record here
 
 On the **old host** (Linux): `deploy/migrate.sh export ~/agentic-move.tgz`. This stops and disables
 everything there first. Carry the file privately (a USB stick, `scp`), never through a synced folder.
@@ -51,7 +69,7 @@ relative to the checkout. The arm latches are left behind, so this machine start
 With nothing to move, copy `config\agentic.example.toml` to `config\agentic.toml` and run
 `agentic-trading auth --config config\agentic.toml`.
 
-## 3. Start it
+## 4. Start it
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy\install.ps1 -Enable              # add -KeepAwake (admin) on a 24/7 laptop

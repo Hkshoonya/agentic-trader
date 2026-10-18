@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, Sequence
 
 from agentic_trading import filelock, jsonio
-from agentic_trading.host.units import (SANDBOX_MISSING, SERVICES, TIMERS, Service, Timer, find,
+from agentic_trading.host.units import (CONFIG, SANDBOX_MISSING, SERVICES, TIMERS, Service, Timer, find,
                                         sandbox_available)
 
 TICK_SECONDS = 1.0
@@ -78,7 +78,7 @@ class Supervisor:
                  alert: Optional[Callable[[str, str, str], Any]] = None,
                  home: Optional[Path] = None,
                  services: Sequence[Service] = SERVICES, timers: Sequence[Timer] = TIMERS,
-                 sandbox: Optional[bool] = None) -> None:
+                 sandbox: Optional[bool] = None, windows_container: bool = False) -> None:
         self.repo, self.state_dir = Path(repo), Path(state_dir)
         self.dir = host_dir(state_dir)
         self.spawn = spawn or spawn_process
@@ -90,6 +90,7 @@ class Supervisor:
         self.timers = {unit.name: _TimerState(unit) for unit in timers}
         self.stopping = False
         self.sandbox = sandbox_available() if sandbox is None else sandbox
+        self.windows_container = windows_container  # tests: behave as a Windows host on any OS
 
     # ----- lifecycle -------------------------------------------------------------------------------
 
@@ -241,7 +242,8 @@ class Supervisor:
         timer.stop_file = self._fresh_stop_file(unit.name)
         env = self._env({**self._env_file(unit.env_file)}, timer.stop_file)
         try:
-            timer.proc = self.spawn(self._argv(unit.args), cwd=self.repo, env=env, log=self.state_dir / unit.log,
+            timer.proc = self.spawn(self._argv(self._timer_args(unit)), cwd=self.repo, env=env,
+                                    log=self.state_dir / unit.log,
                                     low_priority=unit.low_priority)
         except OSError as exc:
             timer.result, timer.last_start = "exit-code", now
@@ -342,7 +344,20 @@ class Supervisor:
     # ----- helpers ---------------------------------------------------------------------------------
 
     def _disabled(self, unit: Timer) -> bool:
-        return unit.needs_sandbox and not self.sandbox
+        return unit.needs_sandbox and not self.sandbox and not self._container()
+
+    def _container(self) -> bool:
+        """On Windows, the sandboxed jobs run in the upgrader's container once the operator built it."""
+        if os.name != "nt" and not self.windows_container:
+            return False
+        from agentic_trading.host.container import built_image
+
+        return built_image(self.state_dir) is not None
+
+    def _timer_args(self, unit: Timer) -> list[str]:
+        if unit.needs_sandbox and not self.sandbox and self._container():
+            return ["host", "container", "exec", "--config", CONFIG, "--", *unit.args]
+        return list(unit.args)
 
     def _argv(self, args: Sequence[str]) -> list[str]:
         return [child_python(), "-m", "agentic_trading", *args]

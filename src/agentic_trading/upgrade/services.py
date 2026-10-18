@@ -16,7 +16,8 @@ from agentic_trading.host.units import CONFIG
 
 
 def windows() -> bool:
-    return os.name == "nt"
+    """The Windows host manages the services: here, or from the upgrader's container on it."""
+    return os.name == "nt" or os.environ.get("AGENTIC_SERVICE_HOST") == "windows"
 
 
 def _host(*verb: str, config: Optional[Path] = None) -> list[str]:

@@ -20,6 +20,13 @@ def add_upgrade_parser(sub: Any) -> None:
             action.add_argument("--save", action="store_true", help="queue the planned tasks (default: only show them)")
 
 
+def _venv(repo: Path) -> Path:
+    """The checkout's venv; in the Windows host's container, the image's Linux one (the checkout's is Windows')."""
+    import os
+
+    return Path(os.environ.get("AGENTIC_UPGRADE_VENV") or repo / ".venv")
+
+
 def dispatch_upgrade(args: Any) -> int:
     from agentic_trading.config import load_config
     from agentic_trading.journal import DecisionJournal
@@ -89,7 +96,7 @@ def _work(args: Any, config: Any, state: Path, journal_dir: Path, repo: Path, ac
 
     mode_file = state / "mode"
     mode = mode_file.read_text().strip() if mode_file.is_file() else str(config.mode)
-    outcome = run_cycle(state_dir=state, journal_dir=journal_dir, repo=repo, venv=repo / ".venv",
+    outcome = run_cycle(state_dir=state, journal_dir=journal_dir, repo=repo, venv=_venv(repo),
                         settings=load_upgrade_config(args.config), mode=mode, now=now, runner=real_runner,
                         shipyard=yard, probe_paths=(repo / "config" / "secrets.toml", Path.home() / ".bashrc"))
     print(f"upgrade run: {outcome.message}")
