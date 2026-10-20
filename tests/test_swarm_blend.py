@@ -39,6 +39,33 @@ class ContributingTests(unittest.TestCase):
         self.assertAlmostEqual(sum(got.values()), 1.0)
         self.assertAlmostEqual(got[calm.recipe.id] / got[wild.recipe.id], 3.0)
 
+    def test_shares_grow_with_forward_excess_t_statistic(self) -> None:
+        weak = _agent(60, 0.001, vol=0.01, per_order=0.1)
+        proven = _agent(60, 0.001, vol=0.01, per_order=0.2)
+        weak.record = Record(weak.record.days, weak.record.returns,
+                             tuple(-0.009 if i % 2 == 0 else 0.011 for i in range(60)), 10, 0.0, 0.0)
+        proven.record = Record(proven.record.days, proven.record.returns,
+                               tuple(-0.006 if i % 2 == 0 else 0.014 for i in range(60)), 10, 0.0, 0.0)
+
+        got = shares([weak, proven], nursery_days=20)
+
+        self.assertGreater(got[proven.recipe.id], got[weak.recipe.id])
+        self.assertAlmostEqual(sum(got.values()), 1.0)
+
+    def test_short_records_shrink_forward_excess_evidence(self) -> None:
+        short, long = _agent(20, 0.001, vol=0.01, per_order=0.1), _agent(60, 0.001, vol=0.01, per_order=0.2)
+        for agent in (short, long):
+            count = len(agent.record.days)
+            mean = 0.003
+            amplitude = mean * (count - 1) ** 0.5
+            excess = tuple(mean - amplitude if i % 2 == 0 else mean + amplitude for i in range(count))
+            agent.record = Record(agent.record.days, agent.record.returns, excess, 10, 0.0, 0.0)
+
+        got = shares([short, long], nursery_days=20)
+
+        self.assertGreater(got[long.recipe.id], got[short.recipe.id])
+        self.assertAlmostEqual(sum(got.values()), 1.0)
+
     def test_no_contributor_means_the_benchmark(self) -> None:
         self.assertEqual(blend_weights([_agent(5, 0.01)], {}, {}, MONDAY), BENCHMARK_WEIGHTS)
 

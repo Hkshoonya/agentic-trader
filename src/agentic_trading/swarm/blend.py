@@ -2,9 +2,9 @@
 
 An agent earns a share of the book only after 20 forward days, and only while
 its last 60 forward days beat the benchmark. Shares are inverse to each
-contributor's own forward volatility, so a wild agent doesn't drown the calm
-ones. With no contributor, the book holds the benchmark, so the swarm's excess
-comes from its agents alone.
+contributor's own forward volatility and also favor stronger forward excess
+evidence. With no contributor, the book holds the benchmark, so the swarm's
+excess comes from its agents alone.
 """
 
 from __future__ import annotations
@@ -34,12 +34,27 @@ def _vol(returns: tuple[float, ...]) -> float:
     return math.sqrt(math.fsum((r - mean) ** 2 for r in returns) / len(returns))
 
 
+def _shrunk_excess_t(excess: tuple[float, ...]) -> float:
+    values = excess[-TRAILING_DAYS:]
+    count = len(values)
+    if count < 2:
+        return 0.0
+    mean = math.fsum(values) / count
+    variance = math.fsum((value - mean) ** 2 for value in values) / (count - 1)
+    if variance == 0:
+        return 0.0
+    t_stat = mean / math.sqrt(variance / count)
+    return t_stat * count / (count + TRAILING_DAYS)
+
+
 def shares(agents: Iterable[Agent], *, nursery_days: int) -> dict[str, float]:
     raw = {}
     for agent in agents:
         vol = _vol(agent.record.returns)
         if contributing(agent, nursery_days=nursery_days) and vol > 0:
-            raw[agent.recipe.id] = 1 / vol
+            t_stat = _shrunk_excess_t(agent.record.excess)
+            evidence = max(0.05, 1 + t_stat / (1 + abs(t_stat)))
+            raw[agent.recipe.id] = evidence / vol
     total = math.fsum(raw.values())
     return {key: value / total for key, value in raw.items()} if total > 0 else {}
 
